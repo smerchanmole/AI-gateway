@@ -1,0 +1,21 @@
+model_list:
+  # 1. Tu cerebro local principal (Generación SQL / Chat)
+  - model_name: topito
+    litellm_params:
+      model: ollama/topito # <-- Cuando bajes el 3.6, cambias esto a ollama/qwen3.6:xx
+      api_base: "http://localhost:11434"
+      keep_alive: -1
+  # 2. El motor de Embeddings (VITAL PARA MILVUS)
+  - model_name: embedding-local
+    litellm_params:
+      model: ollama/bge-m3:latest
+      api_base: "http://localhost:11434"
+      keep_alive: -1
+      drop_params: true  # <--- LA MAGIA ESTÁ AQUÍ
+
+  # 3. El guardián de seguridad
+  - model_name: guardian-seguridad
+    litellm_params:
+      model: ollama/llama-guard3
+      api_base: "http://localhost:11434"
+      keep_alive: -1

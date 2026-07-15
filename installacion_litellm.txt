@@ -1,0 +1,10 @@
+Creamos un entorno virtual
+python -m venv litellm
+cambiamos a ese entorno
+source litellm/bin/activate
+
+luego pip install 'litellm[proxy]'
+
+comprobamos
+litellm --version
+para ejecutar el streamlit poner streamlit run dashboard.py
