@@ -10,6 +10,41 @@ ejecuta localmente y conserva una API compatible con OpenAI en el puerto `4000`.
 > Estado del proyecto: la versión funcional anterior está congelada en el tag
 > Git `alpha`. Este documento describe la evolución `beta`.
 
+## Navegación rápida
+
+- [Inicio en cinco minutos](#inicio-en-cinco-minutos)
+- [Arquitectura](#2-arquitectura)
+- [Instalación desde cero](#5-instalación-desde-cero)
+- [Consumir el gateway](#6-consumir-el-gateway)
+- [Observabilidad](#8-observabilidad)
+- [Diagnóstico rápido](#12-diagnóstico-rápido)
+- [Migrar desde Alpha](#14-migrar-desde-alpha)
+- [Operación, respaldo y actualización](#15-operación-respaldo-y-actualización)
+
+## Inicio en cinco minutos
+
+Para quien ya tiene Python y Git instalados, este es el recorrido mínimo:
+
+```bash
+git clone http://nas.mole4.local:8418/smerchan/ia-gateway.git
+cd ia-gateway
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edita `.env`, configura `OPENAI_API_KEY`, revisa `config.yaml` y arranca:
+
+```bash
+python app.py
+```
+
+Después abre <http://127.0.0.1:5100>, pulsa **Arrancar** y espera al indicador
+`Activo · 127.0.0.1:4000`. El gateway estará disponible para clientes en
+<http://127.0.0.1:4000/v1>.
+
 ## 1. Qué problema resuelve
 
 LiteLLM es un gateway potente, pero operarlo únicamente desde terminal obliga a
@@ -82,7 +117,8 @@ ia-gateway/
 ├── static/
 │   ├── index.html                 # Estructura semántica del dashboard
 │   ├── app.js                     # Estado y comportamiento del navegador
-│   └── style.css                  # Sistema visual beta
+│   ├── style.css                  # Sistema visual beta
+│   └── ia-gateway-beta-infografia.png # Cabecera visual de la web
 ├── tests/
 │   ├── test_app.py                # Contrato HTTP y comportamiento web
 │   └── test_core.py               # Configuración, logs y seguridad
@@ -331,3 +367,147 @@ git switch main
 `alpha` es la línea base funcional. `beta` añade documentación, enseñanza en el
 código y una identidad visual más ambiciosa sin romper los contratos HTTP ni la
 estructura operativa.
+
+## 14. Migrar desde Alpha
+
+Beta es una evolución compatible de Alpha: conserva sus puertos, endpoints,
+modelo de configuración y directorio de ejecución. La migración no exige
+convertir datos ni reescribir `config.yaml`.
+
+### Qué conserva y qué mejora
+
+| Área | Alpha | Beta |
+|---|---|---|
+| Panel | Control funcional | Misma estructura con sistema visual de alto contraste |
+| Modelos | Activar y desactivar | Igual, con tipología y métricas más legibles |
+| Pruebas | Chat y embeddings | Pestaña dedicada para cada modelo |
+| Logs | Entradas y salidas | LiteLLM primero y pestañas por modelo con IPs y latencias |
+| Estado | PID y puerto | Salud real, CPU total, RAM y recursos Ollama |
+| Documentación | Puesta en marcha básica | Arquitectura, operación, seguridad, API y diagnóstico |
+| Código | Funcional | Comentarios pedagógicos y responsabilidades explícitas |
+
+### Actualización segura
+
+```bash
+cd ia-gateway
+git status
+git pull --no-rebase origin main
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pytest -q
+python app.py
+```
+
+Antes del `pull`, `git status` debe estar limpio. Si contiene modificaciones
+propias, crea un commit o guárdalas de forma consciente antes de actualizar.
+Nunca copies `runtime/active_config.yaml` sobre `config.yaml`: el primero es una
+salida generada y puede omitir modelos desactivados.
+
+### Volver temporalmente a Alpha
+
+```bash
+git switch --detach alpha
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python app.py
+```
+
+Para regresar a Beta:
+
+```bash
+git switch main
+```
+
+El modo `detach` es apropiado para inspección o diagnóstico. No desarrolles
+cambios permanentes ahí sin crear antes una rama.
+
+## 15. Operación, respaldo y actualización
+
+### Secuencia diaria recomendada
+
+1. Arranca la web con `python app.py`.
+2. Abre el panel en el puerto `5100`.
+3. Pulsa **Arrancar** para iniciar LiteLLM.
+4. Comprueba puerto, PID, CPU y RAM en la cabecera.
+5. Ejecuta una prueba desde la pestaña del modelo que vas a consumir.
+6. Verifica la nueva entrada en **Actividad**.
+7. Antes de cerrar la web, pulsa **Detener** para terminar LiteLLM limpiamente.
+
+### Qué debe respaldarse
+
+| Elemento | ¿Respaldar? | Motivo |
+|---|---:|---|
+| `config.yaml` | Sí | Fuente de verdad de los modelos |
+| `.env` | Sí, en un gestor seguro | Contiene secretos y no está en Git |
+| `runtime/requests.sqlite3` | Opcional | Histórico de solicitudes y respuestas |
+| `runtime/state.json` | Opcional | Modelos desactivados temporalmente |
+| `runtime/active_config.yaml` | No | Se regenera automáticamente |
+| `runtime/litellm.pid` | No | Sólo tiene sentido durante la ejecución |
+| `runtime/litellm-process.log` | Opcional | Útil para auditoría y diagnóstico |
+
+Para respaldar SQLite mientras la aplicación está detenida:
+
+```bash
+mkdir -p backups
+cp runtime/requests.sqlite3 backups/requests.sqlite3
+```
+
+No publiques ese respaldo: puede contener prompts, respuestas, direcciones IP y
+otros datos sensibles.
+
+### Actualizar dependencias
+
+Las versiones de producción están controladas en `requirements.txt`. Una
+actualización responsable debe realizarse en una rama, seguida de:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pytest -q
+```
+
+Además de los tests, valida manualmente un chat OpenAI, un embedding Ollama, la
+parada del proxy y la escritura de un evento en cada pestaña de logs.
+
+### Detención de emergencia
+
+Usa primero el botón **Detener**. Si el navegador no responde, interrumpe
+`python app.py` con `Ctrl+C`. Al reiniciar, el gestor valida el PID guardado y el
+puerto; no confía ciegamente en un fichero PID antiguo.
+
+## 16. Decisiones de diseño
+
+- **FastAPI sin framework frontend:** reduce dependencias y hace el panel fácil
+  de auditar, desplegar y enseñar.
+- **Configuración generada:** permite desactivar modelos sin modificar la fuente
+  de verdad del usuario.
+- **SQLite en modo WAL:** ofrece persistencia local y lecturas concurrentes sin
+  desplegar una base de datos externa.
+- **PID más comprobación de puerto:** un proceso vivo no garantiza un servicio
+  operativo; ambos indicadores son necesarios.
+- **Reloj monotónico para latencias:** evita errores si cambia la hora del sistema
+  durante una petición.
+- **Métricas honestas:** los recursos remotos de OpenAI no se inventan y la CPU
+  compartida de Ollama se identifica como tal.
+- **Interfaz servida por la propia API:** una sola orden arranca toda la capa de
+  control y evita una cadena de compilación adicional.
+
+## 17. Lista de aceptación de una instalación
+
+Una instalación Beta puede considerarse correcta cuando se cumplen todos estos
+puntos:
+
+- [ ] El panel abre en `127.0.0.1:5100` sin errores de consola.
+- [ ] **Arrancar** cambia a **Detener** sólo cuando responde el puerto `4000`.
+- [ ] La cabecera muestra PID, CPU total y memoria RAM.
+- [ ] Todos los alias de `config.yaml` aparecen en la zona de modelos.
+- [ ] Desactivar un modelo no modifica el fichero `config.yaml` original.
+- [ ] Las pestañas de prueba distinguen chat de embeddings.
+- [ ] Una llamada OpenAI usa la clave de `.env`, nunca una clave versionada.
+- [ ] Una llamada Ollama llega a `localhost:11434`.
+- [ ] La pestaña LiteLLM presenta la salida directa del proceso.
+- [ ] Los eventos nuevos muestran hora de Madrid, IPs y latencias disponibles.
+- [ ] `python -m pytest -q` termina sin fallos.
+
+Con esta lista superada, la aplicación no sólo “arranca”: queda validada de
+extremo a extremo, desde la configuración hasta la trazabilidad de la respuesta.
