@@ -1,3 +1,11 @@
+"""Capa HTTP del panel de control.
+
+Piensa en este módulo como el *adaptador de entrada* de la arquitectura: traduce
+acciones humanas y peticiones HTTP a operaciones del dominio (`GatewayManager`).
+No conoce cómo se lanza un proceso ni cómo se filtra YAML; delegar esas decisiones
+mantiene los endpoints pequeños, comprobables y fáciles de leer.
+"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -22,6 +30,7 @@ manager = GatewayManager(ROOT)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    """Garantiza que el proxy hijo no sobreviva accidentalmente al panel."""
     yield
     # El proxy es hijo del panel y no debe quedar huérfano al cerrar la app.
     manager.stop()
@@ -33,6 +42,7 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 @app.middleware("http")
 async def disable_dashboard_cache(request, call_next):
+    """Evita que el navegador mezcle HTML nuevo con JS/CSS de otra versión."""
     response = await call_next(request)
     if request.url.path == "/" or request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -55,11 +65,13 @@ def home():
 
 @app.get("/api/status")
 def status():
+    """Devuelve salud real y telemetría; un PID por sí solo no implica servicio."""
     return manager.status()
 
 
 @app.get("/api/models")
 def models():
+    """Expone la vista segura de modelos, nunca las API keys del YAML."""
     try:
         return manager.models()
     except RuntimeError as exc:
@@ -68,11 +80,13 @@ def models():
 
 @app.get("/api/model-resources")
 def model_resources():
+    """Separa métricas locales de proveedores remotos no observables."""
     return manager.model_resources()
 
 
 @app.post("/api/gateway/start")
 def start():
+    """Arranca el gateway sólo después de validar configuración y secretos."""
     try:
         return manager.start()
     except RuntimeError as exc:
@@ -81,11 +95,13 @@ def start():
 
 @app.post("/api/gateway/stop")
 def stop():
+    """Detiene LiteLLM y sus procesos descendientes."""
     return manager.stop()
 
 
 @app.put("/api/models/{name}/state")
 def set_model_state(name: str, state: ModelState):
+    """Cambia el estado efectivo de un alias sin editar `config.yaml`."""
     try:
         return manager.set_model(name, state.enabled)
     except KeyError as exc:
@@ -96,6 +112,7 @@ def set_model_state(name: str, state: ModelState):
 
 @app.post("/api/models/{name}/test")
 async def test_model(name: str, test: TestCall):
+    """Ejecuta una prueba extremo a extremo por el mismo gateway que usa producción."""
     prompt = test.prompt.strip()
     if not prompt:
         raise HTTPException(422, "Escribe un texto para realizar la prueba")
@@ -109,6 +126,8 @@ async def test_model(name: str, test: TestCall):
     if not manager.is_running():
         raise HTTPException(409, "Arranca LiteLLM antes de realizar la prueba")
 
+    # Un embedding no es un chat: elegir el endpoint según la capacidad evita
+    # pruebas engañosas y permite mantener una única interfaz en el navegador.
     endpoint = "embeddings" if model["mode"] == "embedding" else "chat/completions"
     payload = (
         {"model": name, "input": prompt}
@@ -132,11 +151,13 @@ async def test_model(name: str, test: TestCall):
 
 @app.get("/api/models/{name}/logs")
 def logs(name: str, limit: int = Query(100, ge=1, le=500)):
+    """Consulta eventos estructurados con un límite defensivo de filas."""
     return read_logs(ROOT / "runtime" / "requests.sqlite3", name, limit)
 
 
 @app.get("/api/process-log", response_class=PlainTextResponse)
 def process_log():
+    """Muestra stdout/stderr de LiteLLM para diagnosticar fallos de arranque."""
     return manager.process_log(200)
 
 

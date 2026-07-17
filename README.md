@@ -1,5 +1,7 @@
 # IA Gateway
 
+> La guía completa de arquitectura, instalación y operación de la versión beta está en [BETA.md](BETA.md).
+
 Panel web local para administrar un proxy LiteLLM configurado mediante `config.yaml`.
 
 ## Instalación

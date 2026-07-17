@@ -1,20 +1,308 @@
-const $ = (s) => document.querySelector(s);
-let models = [], selectedModel = '__litellm__', selectedTestModel = null, running = false;
-const escapeHtml = (s) => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-async function api(url, options={}) { const r=await fetch(url,{headers:{'Content-Type':'application/json'},...options}); if(!r.ok){let e;try{e=(await r.json()).detail}catch{e=await r.text()}throw new Error(e||`HTTP ${r.status}`)}return r.headers.get('content-type')?.includes('json')?r.json():r.text() }
-function error(e){const n=$('#notice');n.textContent=e.message;n.hidden=false;setTimeout(()=>n.hidden=true,7000)}
-async function loadStatus(){const s=await api('/api/status');running=s.process_alive;$('#status').classList.toggle('online',s.running);$('#status').classList.toggle('unhealthy',s.process_alive&&!s.running);$('#status span').textContent=s.running?`Activo · ${s.host}:${s.port} · PID ${s.pid}`:s.process_alive?`Sin servicio · puerto ${s.port} · PID ${s.pid}`:`Detenido · puerto ${s.port}`;$('#resources').textContent=s.process_alive?`CPU ${s.cpu_percent??'—'}% del total (${s.cores} cores) · RAM ${s.memory_gb??'—'} GB`:'CPU — · RAM —';const b=$('#gateway-button');b.disabled=false;b.textContent=s.process_alive?'Detener':'Arrancar';b.classList.toggle('stop',s.process_alive)}
-async function loadModels(){models=await api('/api/models');$('#model-count').textContent=`${models.filter(m=>m.enabled).length} activos / ${models.length}`;$('#models').innerHTML=models.map(m=>`<article class="model-card ${m.enabled?'':'disabled'}"><div class="model-head"><h3>${escapeHtml(m.name)}</h3><span class="badge">${m.enabled?'ACTIVO':'INACTIVO'}</span></div><p class="provider">${escapeHtml(m.provider_model)}</p><div class="model-resources" data-resource-name="${escapeHtml(m.name)}">Calculando recursos…</div><div class="meta"><span>${escapeHtml(m.api_base||'API por defecto')}</span><button data-model="${escapeHtml(m.name)}" data-enabled="${!m.enabled}" class="${m.enabled?'danger':'enable'}">${m.enabled?'Desactivar':'Activar'}</button></div></article>`).join('');$('#models').querySelectorAll('button').forEach(b=>b.onclick=()=>toggleModel(b));renderTestModels();renderTabs();await Promise.all([loadLogs(),loadModelResources()])}
-async function loadModelResources(){const resources=await api('/api/model-resources');for(const item of resources){const target=[...document.querySelectorAll('.model-resources')].find(node=>node.dataset.resourceName===item.name);if(!target)continue;if(item.source==='remote'){target.textContent='Proveedor remoto · CPU/RAM no disponible';target.className='model-resources remote';continue}if(!item.available){target.textContent='Ollama no disponible';target.className='model-resources unavailable';continue}target.textContent=item.loaded?`CPU Ollama compartida ${item.cpu_percent??'—'}% · Memoria ${item.memory_gb} GB · VRAM ${item.vram_gb} GB`:`CPU Ollama compartida ${item.cpu_percent??'—'}% · Modelo no cargado`;target.className='model-resources'}}
-function renderTestModels(){if(!models.some(m=>m.name===selectedTestModel&&m.enabled))selectedTestModel=models.find(m=>m.enabled)?.name??null;$('#test-tabs').innerHTML=models.map(m=>`<button class="tab ${m.name===selectedTestModel?'active':''}" data-name="${escapeHtml(m.name)}" ${m.enabled?'':'disabled'}>${escapeHtml(m.name)}</button>`).join('');$('#test-tabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{selectedTestModel=b.dataset.name;renderTestModels()});updateTestHelp();$('#test-button').disabled=!selectedTestModel}
-function updateTestHelp(){const model=models.find(m=>m.name===selectedTestModel),embedding=model?.mode==='embedding';$('#test-mode').textContent=embedding?'EMBEDDING':'CHAT';$('#test-help').textContent=embedding?'El texto se enviará al endpoint de embeddings.':'Se enviará como un mensaje de usuario.';$('#test-prompt').placeholder=embedding?'Texto que quieres convertir en un vector…':'Escribe aquí el mensaje de prueba…'}
-function renderTabs(){const all=[{name:'__litellm__',label:'LiteLLM'},...models.map(m=>({name:m.name,label:m.name}))];$('#tabs').innerHTML=all.map(m=>`<button class="tab ${m.name===selectedModel?'active':''}" data-name="${escapeHtml(m.name)}">${escapeHtml(m.label)}</button>`).join('');$('#tabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{selectedModel=b.dataset.name;renderTabs();loadLogs().catch(error)})}
-async function toggleModel(b){b.disabled=true;try{await api(`/api/models/${encodeURIComponent(b.dataset.model)}/state`,{method:'PUT',body:JSON.stringify({enabled:b.dataset.enabled==='true'})});await Promise.all([loadModels(),loadStatus()])}catch(e){error(e);b.disabled=false}}
-function madridTime(value){if(!value)return '—';const date=new Date(value);if(Number.isNaN(date.getTime()))return value;return new Intl.DateTimeFormat('es-ES',{timeZone:'Europe/Madrid',dateStyle:'short',timeStyle:'medium',hour12:false}).format(date)}
-async function loadLogs(){if(selectedModel==='__litellm__'){const raw=await api('/api/process-log');$('#logs').innerHTML=raw?`<pre class="process-log">${escapeHtml(raw)}</pre>`:'<p class="empty">LiteLLM todavía no ha generado salida de proceso.</p>';return}if(!selectedModel)return;const logs=await api(`/api/models/${encodeURIComponent(selectedModel)}/logs?limit=100`);$('#logs').innerHTML=logs.length?logs.map(l=>`<article class="log"><div class="log-head"><span class="${l.status==='success'?'ok':'error'}">${l.status==='success'?'● CORRECTO':'● ERROR'}</span><span>${escapeHtml(madridTime(l.started_at||l.created_at))} · Europe/Madrid</span></div><div class="request-meta"><span><b>Fecha:</b> ${escapeHtml(madridTime(l.started_at||l.created_at))}</span><span><b>Origen:</b> ${escapeHtml(l.origin_ip||'no disponible')}</span><span><b>Respuesta:</b> ${escapeHtml(l.provider_ip||'no disponible')}</span><span><b>Inicio respuesta:</b> ${l.ttft_ms??'—'} ms</span><span><b>Fin respuesta:</b> ${l.duration_ms??'—'} ms</span></div><div class="io-grid"><div><h4>Pregunta / entrada</h4><pre>${escapeHtml(JSON.stringify(l.request,null,2))}</pre></div><div><h4>Respuesta / salida</h4><pre>${escapeHtml(l.error||JSON.stringify(l.response,null,2))}</pre></div></div></article>`).join(''):'<p class="empty">Todavía no hay solicitudes registradas para este modelo.</p>'}
-function readableResult(data){if(data.mode==='chat')return data.result?.choices?.[0]?.message?.content??JSON.stringify(data.result,null,2);const vector=data.result?.data?.[0]?.embedding;if(Array.isArray(vector))return `Embedding generado correctamente\n\nDimensiones: ${vector.length}\nPrimeros valores: [${vector.slice(0,12).join(', ')}${vector.length>12?', …':''}]`;return JSON.stringify(data.result,null,2)}
-async function runTest(){const button=$('#test-button'),name=selectedTestModel,prompt=$('#test-prompt').value,result=$('#test-result');if(!name)return;button.disabled=true;button.textContent='Enviando…';result.hidden=true;const started=performance.now();try{const data=await api(`/api/models/${encodeURIComponent(name)}/test`,{method:'POST',body:JSON.stringify({prompt})});result.querySelector('pre').textContent=readableResult(data);$('#test-time').textContent=`${Math.round(performance.now()-started)} ms`;result.hidden=false;selectedModel=name;renderTabs();setTimeout(()=>loadLogs().catch(error),500)}catch(e){error(e)}finally{button.disabled=false;button.textContent='Enviar prueba'}}
-$('#gateway-button').onclick=async()=>{const b=$('#gateway-button');b.disabled=true;try{await api(`/api/gateway/${running?'stop':'start'}`,{method:'POST'});await loadStatus()}catch(e){error(e);b.disabled=false}};
-$('#refresh').onclick=()=>loadLogs().catch(error);
-$('#test-button').onclick=runTest;
-Promise.all([loadStatus(),loadModels()]).catch(error);setInterval(()=>Promise.all([loadStatus(),loadModelResources(),loadLogs()]).catch(()=>{}),3000);
+/**
+ * Controlador del dashboard.
+ *
+ * No usamos un framework deliberadamente: el estado es pequeño y queremos que
+ * un estudiante pueda seguir el flujo completo desde `fetch` hasta el DOM.
+ */
+
+const $ = (selector) => document.querySelector(selector);
+
+let models = [];
+let selectedLogModel = "__litellm__";
+let selectedTestModel = null;
+let gatewayProcessAlive = false;
+
+/** Escapar texto antes de insertarlo como HTML evita XSS desde prompts o logs. */
+const escapeHtml = (value) => String(value ?? "").replace(
+  /[&<>'"]/g,
+  (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character],
+);
+
+/** Único punto de acceso HTTP: normaliza tanto errores JSON como texto plano. */
+async function api(url, options = {}) {
+  const response = await fetch(url, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!response.ok) {
+    let detail;
+    try {
+      detail = (await response.json()).detail;
+    } catch {
+      detail = await response.text();
+    }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return response.headers.get("content-type")?.includes("json")
+    ? response.json()
+    : response.text();
+}
+
+function showError(exception) {
+  const notice = $("#notice");
+  notice.textContent = exception.message;
+  notice.hidden = false;
+  window.setTimeout(() => { notice.hidden = true; }, 7000);
+}
+
+/** Salud y proceso son conceptos distintos: la UI conserva esa distinción. */
+async function loadStatus() {
+  const status = await api("/api/status");
+  gatewayProcessAlive = status.process_alive;
+
+  $("#status").classList.toggle("online", status.running);
+  $("#status").classList.toggle("unhealthy", status.process_alive && !status.running);
+  $("#status span").textContent = status.running
+    ? `Activo · ${status.host}:${status.port} · PID ${status.pid}`
+    : status.process_alive
+      ? `Sin servicio · puerto ${status.port} · PID ${status.pid}`
+      : `Detenido · puerto ${status.port}`;
+
+  $("#resources").textContent = status.process_alive
+    ? `CPU ${status.cpu_percent ?? "—"}% del total (${status.cores} cores) · RAM ${status.memory_gb ?? "—"} GB`
+    : "CPU — · RAM —";
+
+  const button = $("#gateway-button");
+  button.disabled = false;
+  button.textContent = status.process_alive ? "Detener" : "Arrancar";
+  button.classList.toggle("stop", status.process_alive);
+}
+
+function modelCard(model) {
+  return `
+    <article class="model-card ${model.enabled ? "" : "disabled"}">
+      <div class="model-head">
+        <div>
+          <span class="model-kicker">${model.mode === "embedding" ? "VECTOR" : "CHAT"}</span>
+          <h3>${escapeHtml(model.name)}</h3>
+        </div>
+        <span class="badge">${model.enabled ? "ACTIVO" : "INACTIVO"}</span>
+      </div>
+      <p class="provider">${escapeHtml(model.provider_model)}</p>
+      <div class="model-resources" data-resource-name="${escapeHtml(model.name)}">
+        Calculando recursos…
+      </div>
+      <div class="meta">
+        <span>${escapeHtml(model.api_base || "API por defecto")}</span>
+        <button
+          data-model="${escapeHtml(model.name)}"
+          data-enabled="${!model.enabled}"
+          class="${model.enabled ? "danger" : "enable"}"
+        >${model.enabled ? "Desactivar" : "Activar"}</button>
+      </div>
+    </article>`;
+}
+
+async function loadModels() {
+  models = await api("/api/models");
+  $("#model-count").textContent = `${models.filter((model) => model.enabled).length} activos / ${models.length}`;
+  $("#models").innerHTML = models.map(modelCard).join("");
+  $("#models").querySelectorAll("button").forEach((button) => {
+    button.onclick = () => toggleModel(button);
+  });
+
+  renderTestTabs();
+  renderLogTabs();
+  await Promise.all([loadLogs(), loadModelResources()]);
+}
+
+/** Las métricas remotas se etiquetan, nunca se simulan con datos locales. */
+async function loadModelResources() {
+  const resources = await api("/api/model-resources");
+  for (const item of resources) {
+    const target = [...document.querySelectorAll(".model-resources")]
+      .find((node) => node.dataset.resourceName === item.name);
+    if (!target) continue;
+
+    if (item.source === "remote") {
+      target.textContent = "Proveedor remoto · CPU/RAM no disponible";
+      target.className = "model-resources remote";
+    } else if (!item.available) {
+      target.textContent = "Ollama no disponible";
+      target.className = "model-resources unavailable";
+    } else {
+      target.textContent = item.loaded
+        ? `CPU Ollama compartida ${item.cpu_percent ?? "—"}% · Memoria ${item.memory_gb} GB · VRAM ${item.vram_gb} GB`
+        : `CPU Ollama compartida ${item.cpu_percent ?? "—"}% · Modelo no cargado`;
+      target.className = "model-resources";
+    }
+  }
+}
+
+function renderTestTabs() {
+  if (!models.some((model) => model.name === selectedTestModel && model.enabled)) {
+    selectedTestModel = models.find((model) => model.enabled)?.name ?? null;
+  }
+
+  $("#test-tabs").innerHTML = models.map((model) => `
+    <button
+      class="tab ${model.name === selectedTestModel ? "active" : ""}"
+      data-name="${escapeHtml(model.name)}"
+      ${model.enabled ? "" : "disabled"}
+    >${escapeHtml(model.name)}</button>`).join("");
+
+  $("#test-tabs").querySelectorAll("button").forEach((button) => {
+    button.onclick = () => {
+      selectedTestModel = button.dataset.name;
+      renderTestTabs();
+    };
+  });
+  updateTestHelp();
+  $("#test-button").disabled = !selectedTestModel;
+}
+
+function updateTestHelp() {
+  const model = models.find((item) => item.name === selectedTestModel);
+  const embedding = model?.mode === "embedding";
+  $("#test-mode").textContent = embedding ? "EMBEDDING" : "CHAT";
+  $("#test-help").textContent = embedding
+    ? "El texto se enviará al endpoint de embeddings."
+    : "Se enviará como un mensaje de usuario.";
+  $("#test-prompt").placeholder = embedding
+    ? "Texto que quieres convertir en un vector…"
+    : "Escribe aquí el mensaje de prueba…";
+}
+
+/** LiteLLM ocupa siempre la primera pestaña para separar infraestructura/modelos. */
+function renderLogTabs() {
+  const tabs = [
+    { name: "__litellm__", label: "LiteLLM" },
+    ...models.map((model) => ({ name: model.name, label: model.name })),
+  ];
+  $("#tabs").innerHTML = tabs.map((tab) => `
+    <button class="tab ${tab.name === selectedLogModel ? "active" : ""}" data-name="${escapeHtml(tab.name)}">
+      ${escapeHtml(tab.label)}
+    </button>`).join("");
+  $("#tabs").querySelectorAll("button").forEach((button) => {
+    button.onclick = () => {
+      selectedLogModel = button.dataset.name;
+      renderLogTabs();
+      loadLogs().catch(showError);
+    };
+  });
+}
+
+async function toggleModel(button) {
+  button.disabled = true;
+  try {
+    await api(`/api/models/${encodeURIComponent(button.dataset.model)}/state`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: button.dataset.enabled === "true" }),
+    });
+    await Promise.all([loadModels(), loadStatus()]);
+  } catch (exception) {
+    showError(exception);
+    button.disabled = false;
+  }
+}
+
+/** Intl hace la conversión temporal; la base de datos conserva timestamps neutros. */
+function madridTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("es-ES", {
+    timeZone: "Europe/Madrid",
+    dateStyle: "short",
+    timeStyle: "medium",
+    hour12: false,
+  }).format(date);
+}
+
+function logCard(log) {
+  const timestamp = madridTime(log.started_at || log.created_at);
+  return `
+    <article class="log">
+      <div class="log-head">
+        <span class="${log.status === "success" ? "ok" : "error"}">
+          ${log.status === "success" ? "● CORRECTO" : "● ERROR"}
+        </span>
+        <span>${escapeHtml(timestamp)} · Europe/Madrid</span>
+      </div>
+      <div class="request-meta">
+        <span><b>Fecha:</b> ${escapeHtml(timestamp)}</span>
+        <span><b>Origen:</b> ${escapeHtml(log.origin_ip || "no disponible")}</span>
+        <span><b>Respuesta:</b> ${escapeHtml(log.provider_ip || "no disponible")}</span>
+        <span><b>Inicio respuesta:</b> ${log.ttft_ms ?? "—"} ms</span>
+        <span><b>Fin respuesta:</b> ${log.duration_ms ?? "—"} ms</span>
+      </div>
+      <div class="io-grid">
+        <div><h4>Pregunta / entrada</h4><pre>${escapeHtml(JSON.stringify(log.request, null, 2))}</pre></div>
+        <div><h4>Respuesta / salida</h4><pre>${escapeHtml(log.error || JSON.stringify(log.response, null, 2))}</pre></div>
+      </div>
+    </article>`;
+}
+
+async function loadLogs() {
+  if (selectedLogModel === "__litellm__") {
+    const raw = await api("/api/process-log");
+    $("#logs").innerHTML = raw
+      ? `<pre class="process-log">${escapeHtml(raw)}</pre>`
+      : '<p class="empty">LiteLLM todavía no ha generado salida de proceso.</p>';
+    return;
+  }
+  if (!selectedLogModel) return;
+  const logs = await api(`/api/models/${encodeURIComponent(selectedLogModel)}/logs?limit=100`);
+  $("#logs").innerHTML = logs.length
+    ? logs.map(logCard).join("")
+    : '<p class="empty">Todavía no hay solicitudes registradas para este modelo.</p>';
+}
+
+function readableResult(data) {
+  if (data.mode === "chat") {
+    return data.result?.choices?.[0]?.message?.content ?? JSON.stringify(data.result, null, 2);
+  }
+  const vector = data.result?.data?.[0]?.embedding;
+  if (!Array.isArray(vector)) return JSON.stringify(data.result, null, 2);
+  const preview = vector.slice(0, 12).join(", ");
+  return `Embedding generado correctamente\n\nDimensiones: ${vector.length}\nPrimeros valores: [${preview}${vector.length > 12 ? ", …" : ""}]`;
+}
+
+async function runTest() {
+  if (!selectedTestModel) return;
+  const button = $("#test-button");
+  const result = $("#test-result");
+  button.disabled = true;
+  button.textContent = "Enviando…";
+  result.hidden = true;
+  const started = performance.now();
+  try {
+    const data = await api(`/api/models/${encodeURIComponent(selectedTestModel)}/test`, {
+      method: "POST",
+      body: JSON.stringify({ prompt: $("#test-prompt").value }),
+    });
+    result.querySelector("pre").textContent = readableResult(data);
+    $("#test-time").textContent = `${Math.round(performance.now() - started)} ms`;
+    result.hidden = false;
+    selectedLogModel = selectedTestModel;
+    renderLogTabs();
+    window.setTimeout(() => loadLogs().catch(showError), 500);
+  } catch (exception) {
+    showError(exception);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Enviar prueba";
+  }
+}
+
+$("#gateway-button").onclick = async () => {
+  const button = $("#gateway-button");
+  button.disabled = true;
+  try {
+    await api(`/api/gateway/${gatewayProcessAlive ? "stop" : "start"}`, { method: "POST" });
+    await loadStatus();
+  } catch (exception) {
+    showError(exception);
+    button.disabled = false;
+  }
+};
+
+$("#refresh").onclick = () => loadLogs().catch(showError);
+$("#test-button").onclick = runTest;
+
+// Un único heartbeat mantiene coherentes proceso, modelos y observabilidad.
+Promise.all([loadStatus(), loadModels()]).catch(showError);
+window.setInterval(
+  () => Promise.all([loadStatus(), loadModelResources(), loadLogs()]).catch(() => {}),
+  3000,
+);

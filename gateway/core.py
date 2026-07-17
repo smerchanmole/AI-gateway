@@ -1,3 +1,10 @@
+"""Dominio operativo del gateway: configuración, procesos, salud y métricas.
+
+La idea pedagógica importante es separar *estar ejecutándose* de *estar listo*.
+Un proceso puede conservar un PID después de que su servidor haya fallado. Por
+eso esta clase exige dos señales: proceso vivo y puerto accesible.
+"""
+
 from __future__ import annotations
 
 import json
@@ -17,7 +24,10 @@ import psutil
 
 
 class GatewayManager:
+    """Orquesta LiteLLM conservando `config.yaml` como fuente de verdad inmutable."""
+
     def __init__(self, root: Path) -> None:
+        """Centraliza todas las rutas generadas bajo `runtime/`."""
         self.root = root.resolve()
         self.source_config = self.root / "config.yaml"
         self.runtime_dir = self.root / "runtime"
@@ -31,6 +41,7 @@ class GatewayManager:
         self.runtime_dir.mkdir(exist_ok=True)
 
     def _source(self) -> dict[str, Any]:
+        """Carga y valida la forma mínima del contrato YAML del usuario."""
         if not self.source_config.exists():
             raise RuntimeError(f"No existe {self.source_config}")
         data = yaml.safe_load(self.source_config.read_text(encoding="utf-8")) or {}
@@ -39,6 +50,7 @@ class GatewayManager:
         return data
 
     def _state(self) -> dict[str, Any]:
+        """Lee estado efímero; ante corrupción vuelve a un estado seguro vacío."""
         if not self.state_file.exists():
             return {"disabled_models": []}
         try:
@@ -48,12 +60,15 @@ class GatewayManager:
             return {"disabled_models": []}
 
     def models(self) -> list[dict[str, Any]]:
+        """Proyecta el YAML en datos de UI sin exponer parámetros sensibles."""
         disabled = set(self._state().get("disabled_models", []))
         result = []
         for entry in self._source().get("model_list", []):
             name = str(entry.get("model_name", "sin-nombre"))
             params = entry.get("litellm_params") or {}
             provider_model = str(params.get("model", ""))
+            # LiteLLM soporta muchos endpoints. Para esta UI basta una heurística
+            # explícita que distingue los embeddings locales conocidos del chat.
             searchable_name = f"{name} {provider_model}".lower()
             result.append({
                 "name": name,
@@ -65,6 +80,7 @@ class GatewayManager:
         return result
 
     def _ollama_cpu_percent(self) -> float | None:
+        """Mide CPU compartida de Ollama como porcentaje de la máquina completa."""
         try:
             candidates = []
             for process in psutil.process_iter(["pid", "name"]):
@@ -86,6 +102,7 @@ class GatewayManager:
             return None
 
     def model_resources(self) -> list[dict[str, Any]]:
+        """Combina procesos locales con `/api/ps` sin fingir métricas remotas."""
         models = self.models()
         ollama_cpu = self._ollama_cpu_percent()
         bases = {model["api_base"].rstrip("/") for model in models if model["provider_model"].startswith("ollama/")}
@@ -127,6 +144,7 @@ class GatewayManager:
         temp.replace(self.state_file)
 
     def missing_environment_variables(self) -> list[str]:
+        """Descubre referencias `os.environ/VAR` antes de lanzar LiteLLM."""
         referenced: set[str] = set()
 
         def visit(value: Any) -> None:
@@ -143,6 +161,7 @@ class GatewayManager:
         return sorted(name for name in referenced if not os.environ.get(name))
 
     def _write_active_config(self) -> None:
+        """Genera una configuración filtrada y carga el callback junto a ella."""
         config = self._source()
         disabled = set(self._state().get("disabled_models", []))
         config["model_list"] = [
@@ -177,9 +196,11 @@ class GatewayManager:
             return False
 
     def is_running(self) -> bool:
+        """Sólo es verdadero si el supervisor vive y el socket está listo."""
         return self.process_alive() and self._port_ready()
 
     def process_alive(self) -> bool:
+        """Comprueba el PID guardado y elimina referencias obsoletas."""
         pid = self._pid()
         if pid and self._alive(pid):
             return True
@@ -187,6 +208,7 @@ class GatewayManager:
         return False
 
     def _port_ready(self, timeout: float = 0.25) -> bool:
+        """Usa una conexión TCP corta como prueba de disponibilidad objetiva."""
         try:
             with socket.create_connection(("127.0.0.1", self.port), timeout=timeout):
                 return True
@@ -194,6 +216,7 @@ class GatewayManager:
             return False
 
     def _metrics(self, pid: int | None) -> dict[str, float | int | None]:
+        """Agrega CPU y RSS del árbol, con degradación segura ante permisos."""
         if not pid:
             self._metric_processes.clear()
             return {"cpu_percent": None, "memory_gb": None, "cores": psutil.cpu_count() or 1}
@@ -227,6 +250,7 @@ class GatewayManager:
             return {"cpu_percent": None, "memory_gb": None, "cores": psutil.cpu_count() or 1}
 
     def status(self) -> dict[str, Any]:
+        """Construye el snapshot que la interfaz renueva cada tres segundos."""
         process_alive = self.process_alive()
         pid = self._pid() if process_alive else None
         running = process_alive and self._port_ready()
@@ -240,6 +264,7 @@ class GatewayManager:
         }
 
     def start(self) -> dict[str, Any]:
+        """Arranca el CLI del `.venv` y espera activamente a que abra el puerto."""
         if self.process_alive():
             if self.is_running():
                 return self.status()
@@ -272,6 +297,8 @@ class GatewayManager:
         )
         output.close()
         self.pid_file.write_text(str(process.pid), encoding="utf-8")
+        # `monotonic()` no cambia si el reloj del sistema se sincroniza durante
+        # el arranque, por eso es preferible a comparar timestamps de pared.
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -284,6 +311,7 @@ class GatewayManager:
         raise RuntimeError(f"LiteLLM no pudo abrir el puerto {self.port}. Últimas líneas:\n{tail}")
 
     def stop(self) -> dict[str, Any]:
+        """Aplica terminación amable y escala a SIGKILL sólo como último recurso."""
         pid = self._pid()
         if not pid or not self._alive(pid):
             self.pid_file.unlink(missing_ok=True)
@@ -311,6 +339,7 @@ class GatewayManager:
         return self.status()
 
     def set_model(self, name: str, enabled: bool) -> dict[str, Any]:
+        """Persiste el override y reinicia para aplicar la topología nueva."""
         names = {model["name"] for model in self.models()}
         if name not in names:
             raise KeyError(name)
@@ -324,6 +353,7 @@ class GatewayManager:
         return next(model for model in self.models() if model["name"] == name)
 
     def process_log(self, lines: int = 100) -> str:
+        """Devuelve la cola del log sin códigos ANSI propios de terminal."""
         if not self.output_log.exists():
             return ""
         content = "\n".join(self.output_log.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])

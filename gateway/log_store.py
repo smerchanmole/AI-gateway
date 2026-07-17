@@ -1,3 +1,10 @@
+"""Repositorio SQLite para eventos de inferencia.
+
+Este módulo no sabe nada de HTTP ni de LiteLLM. Recibe valores ya extraídos,
+redacta secretos y ofrece operaciones pequeñas de escritura/lectura. Esa frontera
+hace posible probar privacidad y migraciones sin arrancar ningún modelo.
+"""
+
 from __future__ import annotations
 
 import json
@@ -10,6 +17,7 @@ SECRET_KEYS = {"authorization", "api_key", "apikey", "token", "access_token", "s
 
 
 def safe_value(value: Any, depth: int = 0) -> Any:
+    """Convierte objetos complejos a JSON y oculta secretos por nombre de campo."""
     if depth > 8:
         return "[profundidad limitada]"
     if hasattr(value, "model_dump"):
@@ -29,6 +37,7 @@ def safe_value(value: Any, depth: int = 0) -> Any:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
+    """Abre SQLite, activa WAL y aplica migraciones aditivas idempotentes."""
     connection = sqlite3.connect(db_path, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
@@ -40,6 +49,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
         request_json TEXT, response_json TEXT, error TEXT
         )"""
     )
+    # No usamos un framework de migración para cuatro columnas, pero mantenemos
+    # la propiedad esencial de una migración: ejecutarla N veces equivale a una.
     existing = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
     for name, column_type in {
         "started_at": "TEXT", "origin_ip": "TEXT", "provider_ip": "TEXT", "ttft_ms": "INTEGER"
@@ -54,6 +65,7 @@ def insert_log(db_path: Path, model: str, status: str, duration_ms: int | None,
                request: Any, response: Any, error: str | None = None, *,
                started_at: str | None = None, origin_ip: str | None = None,
                provider_ip: str | None = None, ttft_ms: int | None = None) -> None:
+    """Inserta un evento en una transacción corta para no bloquear el callback."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as connection:
         connection.execute(
@@ -69,6 +81,7 @@ def insert_log(db_path: Path, model: str, status: str, duration_ms: int | None,
 
 
 def read_logs(db_path: Path, model: str, limit: int = 100) -> list[dict[str, Any]]:
+    """Hidrata JSON y devuelve primero las llamadas más recientes."""
     if not db_path.exists():
         return []
     with connect(db_path) as connection:
