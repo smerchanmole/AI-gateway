@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>IA Gateway</title>
-  <link rel="stylesheet" href="/static/style.css?v=beta-1">
+  <link rel="stylesheet" href="/static/style.css?v=beta-2">
 </head>
 <body>
   <main>
@@ -19,6 +19,14 @@
         <button id="gateway-button" class="primary" disabled>Arrancar</button>
       </div>
     </header>
+
+    <!-- La infografía sirve como mapa visual antes de entrar en la operación diaria. -->
+    <figure class="architecture-hero">
+      <img
+        src="/static/ia-gateway-beta-infografia.png"
+        alt="Arquitectura de IA Gateway: panel web, LiteLLM, OpenAI, Ollama, control, pruebas, logs y métricas"
+      >
+    </figure>
 
     <!-- Inventario de modelos cargados desde config.yaml. -->
     <section>
@@ -51,6 +59,6 @@
     </section>
     <p id="notice" role="alert" class="notice" hidden></p>
   </main>
-  <script src="/static/app.js?v=beta-1"></script>
+  <script src="/static/app.js?v=beta-2"></script>
 </body>
 </html>

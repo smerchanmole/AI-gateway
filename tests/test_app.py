@@ -23,3 +23,15 @@ def test_dashboard_disables_cache_and_uses_test_tabs():
     assert response.headers["cache-control"].startswith("no-store")
     assert 'id="test-tabs"' in response.text
     assert 'id="test-model"' not in response.text
+
+
+def test_dashboard_exposes_architecture_infographic():
+    """La portada no debe apuntar a una imagen que el servidor no publique."""
+    client = TestClient(dashboard.app)
+
+    dashboard_response = client.get("/")
+    image_response = client.get("/static/ia-gateway-beta-infografia.png")
+
+    assert "ia-gateway-beta-infografia.png" in dashboard_response.text
+    assert image_response.status_code == 200
+    assert image_response.headers["content-type"] == "image/png"
