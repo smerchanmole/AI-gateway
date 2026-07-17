@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>IA Gateway</title>
+  <link rel="stylesheet" href="/static/style.css?v=20260717-2">
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">CONTROL LOCAL</p><h1>IA Gateway</h1><p class="subtitle">Panel de LiteLLM · <code>localhost:4000</code></p></div>
+      <div class="gateway-control">
+        <div class="status-wrap">
+          <span id="status" class="status"><i></i><span>Comprobando…</span></span>
+          <span id="resources" class="resources">CPU — · RAM —</span>
+        </div>
+        <button id="gateway-button" class="primary" disabled>Arrancar</button>
+      </div>
+    </header>
+
+    <section>
+      <div class="section-title"><div><h2>Modelos</h2><p>Configurados en <code>config.yaml</code></p></div><span id="model-count"></span></div>
+      <div id="models" class="model-grid"><p class="empty">Cargando modelos…</p></div>
+    </section>
+
+    <section class="test-section">
+      <div class="section-title"><div><h2>Prueba rápida</h2><p>Envía una llamada sencilla a cualquiera de los modelos activos</p></div></div>
+      <div class="test-panel">
+        <nav id="test-tabs" class="tabs test-tabs"></nav>
+        <textarea id="test-prompt" rows="4" placeholder="Escribe aquí el mensaje de prueba…"></textarea>
+        <div class="test-actions">
+          <div class="test-hint"><span id="test-mode" class="mode-badge"></span><span id="test-help">Se enviará como un mensaje de usuario.</span></div>
+          <button id="test-button" class="primary">Enviar prueba</button>
+        </div>
+        <div id="test-result" class="test-result" hidden>
+          <div class="result-head"><span>Resultado</span><span id="test-time"></span></div>
+          <pre></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="logs-section">
+      <div class="section-title"><div><h2>Actividad</h2><p>Contenido enviado y recibido por cada modelo</p></div><button id="refresh" class="secondary">Actualizar</button></div>
+      <nav id="tabs" class="tabs"></nav>
+      <div id="logs" class="logs"><p class="empty">Selecciona un modelo.</p></div>
+    </section>
+    <p id="notice" role="alert" class="notice" hidden></p>
+  </main>
+  <script src="/static/app.js?v=20260717-2"></script>
+</body>
+</html>

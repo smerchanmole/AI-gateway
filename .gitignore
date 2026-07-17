@@ -1,6 +1,9 @@
 .venv/
+venv/
 __pycache__/
-*.pyc
+*.py[cod]
 .env
 .vscode/
 .idea/
+.DS_Store
+runtime/
