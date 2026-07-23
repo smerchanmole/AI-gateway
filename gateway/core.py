@@ -181,6 +181,24 @@ class GatewayManager:
             yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )
 
+    def _process_environment(self) -> dict[str, str]:
+        """Construye el entorno de LiteLLM respetando la política del YAML.
+
+        LiteLLM interpreta ``LITELLM_MASTER_KEY`` aunque no aparezca en su
+        configuración y también puede volver a cargarla directamente desde
+        `.env`. Por eso la pasamos vacía —en vez de omitirla— cuando el usuario
+        no declara una ``master_key`` en `general_settings`: `python-dotenv` no
+        sobrescribe variables ya presentes y las claves de proveedores siguen
+        disponibles con normalidad.
+        """
+        env = os.environ.copy()
+        general_settings = self._source().get("general_settings") or {}
+        if not general_settings.get("master_key"):
+            env["LITELLM_MASTER_KEY"] = ""
+        env["PYTHONPATH"] = str(self.root) + os.pathsep + env.get("PYTHONPATH", "")
+        env["IA_GATEWAY_ROOT"] = str(self.root)
+        return env
+
     def _pid(self) -> int | None:
         try:
             return int(self.pid_file.read_text(encoding="utf-8").strip())
@@ -279,9 +297,7 @@ class GatewayManager:
                 "Añádelas al fichero .env y reinicia la webapp."
             )
         self._write_active_config()
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(self.root) + os.pathsep + env.get("PYTHONPATH", "")
-        env["IA_GATEWAY_ROOT"] = str(self.root)
+        env = self._process_environment()
         output = self.output_log.open("a", encoding="utf-8")
         litellm_cli = self.root / ".venv" / "bin" / "litellm"
         if not litellm_cli.exists():

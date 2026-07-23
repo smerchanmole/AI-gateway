@@ -9,6 +9,7 @@ mantiene los endpoints pequeños, comprobables y fáciles de leer.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
 import httpx
@@ -26,6 +27,14 @@ ROOT = Path(__file__).resolve().parent
 # Las claves permanecen fuera del YAML y de Git, pero se heredan al proxy hijo.
 load_dotenv(ROOT / ".env")
 manager = GatewayManager(ROOT)
+
+
+def gateway_auth_headers() -> dict[str, str]:
+    """Autentica el salto panel→LiteLLM sin revelar la clave al navegador."""
+    master_key = os.environ.get("LITELLM_MASTER_KEY", "").strip()
+    if not master_key:
+        raise RuntimeError("Falta LITELLM_MASTER_KEY en el fichero .env")
+    return {"Authorization": f"Bearer {master_key}"}
 
 
 @asynccontextmanager
@@ -136,7 +145,13 @@ async def test_model(name: str, test: TestCall):
     )
     try:
         async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(f"http://127.0.0.1:4000/v1/{endpoint}", json=payload)
+            response = await client.post(
+                f"http://127.0.0.1:4000/v1/{endpoint}",
+                json=payload,
+                headers=gateway_auth_headers(),
+            )
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
     except httpx.RequestError as exc:
         raise HTTPException(502, f"No se pudo conectar con LiteLLM: {exc}") from exc
     try:

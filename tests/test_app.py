@@ -17,6 +17,25 @@ def test_quick_test_rejects_empty_prompt():
     assert response.status_code == 422
 
 
+def test_gateway_auth_headers_use_general_key(monkeypatch):
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "general-test-key")
+
+    assert dashboard.gateway_auth_headers() == {
+        "Authorization": "Bearer general-test-key"
+    }
+
+
+def test_gateway_auth_headers_require_general_key(monkeypatch):
+    monkeypatch.delenv("LITELLM_MASTER_KEY", raising=False)
+
+    try:
+        dashboard.gateway_auth_headers()
+    except RuntimeError as exc:
+        assert "LITELLM_MASTER_KEY" in str(exc)
+    else:
+        raise AssertionError("Se esperaba un error sin master key")
+
+
 def test_dashboard_disables_cache_and_uses_test_tabs():
     client = TestClient(dashboard.app)
     response = client.get("/")

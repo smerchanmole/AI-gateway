@@ -35,7 +35,8 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edita `.env`, configura `OPENAI_API_KEY`, revisa `config.yaml` y arranca:
+Edita `.env`, configura `OPENAI_API_KEY` y `LITELLM_MASTER_KEY`, revisa
+`config.yaml` y arranca:
 
 ```bash
 python app.py
@@ -87,6 +88,37 @@ flowchart LR
 
 El panel nunca suplanta al gateway. Las aplicaciones siguen llamando al puerto
 `4000`; el puerto `5100` sólo administra y observa.
+
+### Dos saltos de autenticación
+
+```mermaid
+sequenceDiagram
+    participant C as Cliente o panel web
+    participant L as LiteLLM :4000
+    participant O as OpenAI
+    participant A as Ollama :11434
+    C->>L: Bearer LITELLM_MASTER_KEY
+    alt alias topito
+        L->>O: OPENAI_API_KEY
+        O-->>L: Respuesta OpenAI
+    else alias local
+        L->>A: Petición local sin clave OpenAI
+        A-->>L: Respuesta Ollama
+    end
+    L-->>C: Respuesta normalizada
+```
+
+Las claves no son intercambiables:
+
+| Credencial | Protege | Quién la usa | Modelos afectados |
+|---|---|---|---|
+| `LITELLM_MASTER_KEY` | Entrada al gateway `:4000` | Panel y clientes externos | Todos |
+| `OPENAI_API_KEY` | Salida hacia la API de OpenAI | LiteLLM, internamente | Sólo aliases OpenAI |
+
+Aunque un cliente solicite `topito`, debe autenticarse ante LiteLLM con
+`LITELLM_MASTER_KEY`. LiteLLM añade después `OPENAI_API_KEY` al contactar con
+OpenAI. En ningún caso debe enviarse la clave de OpenAI como token de entrada al
+gateway.
 
 ## 3. Recorrido de una petición
 
@@ -185,7 +217,19 @@ Edita únicamente `.env`:
 
 ```dotenv
 OPENAI_API_KEY=sk-tu-clave-real
+LITELLM_MASTER_KEY=una-clave-general-larga-y-aleatoria
 ```
+
+Puedes generar la clave general sin reutilizar ninguna credencial externa:
+
+```bash
+openssl rand -hex 32
+```
+
+`LITELLM_MASTER_KEY` autentica a todos los clientes que entran por el puerto
+`4000`. `OPENAI_API_KEY` sólo se utiliza en el segundo salto, cuando LiteLLM
+envía una petición del alias `topito` al proveedor OpenAI. Los modelos Ollama no
+reciben la clave de OpenAI.
 
 No pongas secretos en `config.yaml`, `active_config.yaml`, capturas, commits o
 logs. `.env` ya está ignorado por Git.
@@ -207,6 +251,9 @@ model_list:
       api_base: http://localhost:11434
       keep_alive: -1
       drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
 ```
 
 `model_name` es el alias estable que usan tus aplicaciones. El valor `model`
@@ -230,6 +277,7 @@ que el puerto acepta conexiones.
 ```bash
 curl http://127.0.0.1:4000/v1/chat/completions \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -d '{
     "model": "topito",
     "messages": [{"role": "user", "content": "Escribe SELECT 1"}]
@@ -239,11 +287,13 @@ curl http://127.0.0.1:4000/v1/chat/completions \
 ### SDK de OpenAI
 
 ```python
+import os
+
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://127.0.0.1:4000/v1",
-    api_key="local-not-used",
+    api_key=os.environ["LITELLM_MASTER_KEY"],
 )
 
 response = client.chat.completions.create(
@@ -252,6 +302,20 @@ response = client.chat.completions.create(
 )
 print(response.choices[0].message.content)
 ```
+
+El SDK se denomina «OpenAI», pero cuando `base_url` apunta a LiteLLM su parámetro
+`api_key` contiene la clave del gateway. No debe contener `OPENAI_API_KEY`.
+
+### Qué hace la prueba del panel
+
+El navegador envía únicamente el prompt y el alias a FastAPI en el puerto
+`5100`. El backend lee `LITELLM_MASTER_KEY` desde su entorno y añade la cabecera
+`Authorization` en la llamada interna al puerto `4000`. De esta forma:
+
+- la clave general no aparece en HTML, JavaScript ni almacenamiento del navegador;
+- chat y embeddings siguen exactamente la misma política;
+- `topito` conserva su autenticación independiente hacia OpenAI;
+- los modelos Ollama nunca reciben `OPENAI_API_KEY`.
 
 ## 7. API interna del panel
 
@@ -333,10 +397,26 @@ variables de entorno, contrato HTTP, anti-caché y pestañas de prueba.
 Consulta la pestaña **LiteLLM**. El panel diferencia el supervisor del endpoint:
 un PID sin puerto operativo aparece como `Sin servicio`, nunca como activo.
 
-### `AuthenticationError`
+### `401 Authentication Error: No api key passed in`
 
-Confirma que `.env` existe, que contiene `OPENAI_API_KEY` y que reiniciaste
-completamente `python app.py` después de editarlo.
+Es un rechazo de entrada de LiteLLM: falta `Authorization: Bearer
+<LITELLM_MASTER_KEY>`. Si ocurre en la prueba web, confirma que `.env` contiene
+`LITELLM_MASTER_KEY` y reinicia completamente `python app.py`. Si ocurre en un
+cliente externo, configura esa clave como `api_key` del cliente que apunta a
+`http://127.0.0.1:4000/v1`.
+
+### `AuthenticationError` de OpenAI
+
+Si LiteLLM acepta la llamada pero OpenAI rechaza `topito`, revisa
+`OPENAI_API_KEY`, el proyecto al que pertenece y que `config.yaml` mantenga
+`api_key: os.environ/OPENAI_API_KEY`. Esta credencial no arregla un `401` de
+entrada al gateway.
+
+### He cambiado `.env`, pero el error continúa
+
+Las variables se cargan al iniciar la web y LiteLLM las hereda al arrancar.
+Detén LiteLLM, termina `python app.py` con `Ctrl+C`, vuelve a iniciar la web y
+pulsa **Arrancar**. Editar `.env` sin reiniciar no cambia procesos existentes.
 
 ### `RateLimitError: exceeded your current quota`
 
@@ -504,6 +584,9 @@ puntos:
 - [ ] Desactivar un modelo no modifica el fichero `config.yaml` original.
 - [ ] Las pestañas de prueba distinguen chat de embeddings.
 - [ ] Una llamada OpenAI usa la clave de `.env`, nunca una clave versionada.
+- [ ] Una llamada sin `LITELLM_MASTER_KEY` al puerto `4000` recibe `401`.
+- [ ] Una llamada con `LITELLM_MASTER_KEY` funciona para OpenAI y Ollama.
+- [ ] La prueba web funciona sin exponer la clave general en el navegador.
 - [ ] Una llamada Ollama llega a `localhost:11434`.
 - [ ] La pestaña LiteLLM presenta la salida directa del proceso.
 - [ ] Los eventos nuevos muestran hora de Madrid, IPs y latencias disponibles.

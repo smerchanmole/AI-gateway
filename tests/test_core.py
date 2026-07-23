@@ -66,3 +66,20 @@ def test_reports_missing_referenced_environment_variable(tmp_path, monkeypatch):
     manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
     monkeypatch.delenv("TEST_OPENAI_KEY", raising=False)
     assert manager.missing_environment_variables() == ["TEST_OPENAI_KEY"]
+
+
+def test_process_environment_blanks_implicit_master_key(tmp_path, monkeypatch):
+    manager = make_manager(tmp_path)
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "must-not-reach-proxy")
+
+    assert manager._process_environment()["LITELLM_MASTER_KEY"] == ""
+
+
+def test_process_environment_keeps_explicit_master_key(tmp_path, monkeypatch):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["general_settings"] = {"master_key": "os.environ/LITELLM_MASTER_KEY"}
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "explicit-key")
+
+    assert manager._process_environment()["LITELLM_MASTER_KEY"] == "explicit-key"

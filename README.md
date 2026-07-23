@@ -23,8 +23,15 @@ Primero crea el fichero local de secretos (sólo es necesario una vez):
 cp .env.example .env
 ```
 
-Edita `.env` y sustituye el valor de ejemplo por tu clave real. Este fichero está
-excluido de Git y la aplicación lo carga automáticamente antes de iniciar LiteLLM.
+Edita `.env` y configura las dos credenciales. `OPENAI_API_KEY` permite que
+LiteLLM llame a OpenAI; `LITELLM_MASTER_KEY` protege la entrada al gateway para
+todos los modelos, incluidos los locales. Este fichero está excluido de Git.
+
+Puedes generar una clave general robusta con:
+
+```bash
+openssl rand -hex 32
+```
 
 ```bash
 source .venv/bin/activate
@@ -44,8 +51,12 @@ Para probar el gateway una vez arrancado:
 ```bash
 curl http://127.0.0.1:4000/v1/chat/completions \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -d '{"model":"topito","messages":[{"role":"user","content":"Hola"}]}'
 ```
+
+La prueba integrada en la web añade esa autorización desde el backend. La clave
+general nunca se envía al JavaScript ni aparece en el navegador.
 
 Los estados y logs se guardan bajo `runtime/`, que no se versiona. El fichero
 `config.yaml` original nunca se modifica: se crea una copia filtrada en

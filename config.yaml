@@ -1,22 +1,30 @@
 model_list:
-  # 1. Modelo principal para generación SQL / chat
   - model_name: topito
     litellm_params:
       model: openai/gpt-5.6-sol
       api_key: os.environ/OPENAI_API_KEY
       reasoning_effort: high
       drop_params: true
-  # 2. El motor de Embeddings (VITAL PARA MILVUS)
+
+  - model_name: qwen-local
+    litellm_params:
+      model: ollama/qwen3.5:9b
+      api_base: http://localhost:11434
+      keep_alive: -1
+      drop_params: true
+
   - model_name: embedding-local
     litellm_params:
       model: ollama/bge-m3:latest
-      api_base: "http://localhost:11434"
+      api_base: http://localhost:11434
       keep_alive: -1
-      drop_params: true  # <--- LA MAGIA ESTÁ AQUÍ
+      drop_params: true
 
-  # 3. El guardián de seguridad
   - model_name: guardian-seguridad
     litellm_params:
       model: ollama/llama-guard3
-      api_base: "http://localhost:11434"
+      api_base: http://localhost:11434
       keep_alive: -1
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
