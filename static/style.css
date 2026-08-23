@@ -79,7 +79,7 @@ header {
 }
 
 .architecture-hero {
-  margin: 22px 0 0;
+  margin: 48px 0 0;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.3);
   border-radius: 24px;
@@ -233,9 +233,21 @@ section { padding-top: 48px; }
   color: #91eddb;
   background: rgba(7, 17, 31, 0.72);
   font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
+.metric-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 4px 0; }
+.metric-row + .metric-row { border-top: 1px solid rgba(255, 255, 255, 0.07); }
+.metric-label { color: #a9bfd3; }
+.metric-value { display: inline-flex; align-items: center; justify-content: flex-end; gap: 7px; color: #e6f7f3; text-align: right; }
+.metric-dot { width: 8px; height: 8px; flex: 0 0 8px; border: 1px solid rgba(255, 255, 255, 0.28); border-radius: 50%; background: #64748b; }
+.metric-dot.healthy { background: var(--green); }
+.metric-dot.warning { background: var(--amber); }
+.metric-dot.danger { background: var(--red); }
+.metric-dot.unknown { background: #64748b; }
 .model-resources.remote { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.18); }
+.model-resources.remote .metric-value { color: #ddd6fe; }
 .model-resources.unavailable { color: #fda4af; border-color: rgba(251, 113, 133, 0.18); }
+.model-resources.unavailable .metric-value { color: #fecdd3; }
 .meta { padding-top: 15px; border-top: 1px solid var(--line); color: #c6d6e8; font-size: 11px; }
 
 .test-panel, .logs {

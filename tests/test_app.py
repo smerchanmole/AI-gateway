@@ -54,3 +54,53 @@ def test_dashboard_exposes_architecture_infographic():
     assert "ia-gateway-beta-infografia.png" in dashboard_response.text
     assert image_response.status_code == 200
     assert image_response.headers["content-type"] == "image/png"
+    assert dashboard_response.text.index('class="logs-section"') < dashboard_response.text.index(
+        'class="architecture-hero"'
+    )
+
+
+def test_model_metrics_use_vertical_rows_and_accessible_statuses():
+    """Los semáforos complementan al texto y no sustituyen su significado."""
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    stylesheet = (dashboard.ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert 'class="metric-row"' in javascript
+    assert 'aria-label="${status.label}"' in javascript
+    assert 'value >= 80' in javascript
+    assert 'value < 20' in javascript
+    assert 'kind === "latency"' in javascript
+    assert "await loadRemoteLatencies()" in javascript
+    assert ".metric-row + .metric-row" in stylesheet
+
+
+def test_remote_latency_probe_uses_gateway_auth(monkeypatch):
+    calls = []
+
+    class Response:
+        is_error = False
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setattr(dashboard.manager, "models", lambda: [{
+        "name": "topito", "provider_model": "openai/test", "enabled": True, "mode": "chat",
+    }])
+    monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
+    monkeypatch.setattr(dashboard.httpx, "AsyncClient", lambda **_kwargs: Client())
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "general-test-key")
+
+    response = TestClient(dashboard.app).post("/api/models/topito/latency")
+
+    assert response.status_code == 200
+    assert response.json()["latency_ms"] >= 0
+    assert len(calls) == 1
+    assert calls[0][1]["headers"] == {"Authorization": "Bearer general-test-key"}
+    assert calls[0][1]["json"]["model"] == "topito"

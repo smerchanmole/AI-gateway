@@ -83,3 +83,22 @@ def test_process_environment_keeps_explicit_master_key(tmp_path, monkeypatch):
     monkeypatch.setenv("LITELLM_MASTER_KEY", "explicit-key")
 
     assert manager._process_environment()["LITELLM_MASTER_KEY"] == "explicit-key"
+
+
+def test_local_ollama_reports_host_free_memory(tmp_path, monkeypatch):
+    manager = make_manager(tmp_path)
+
+    class Memory:
+        total = 1000
+        available = 375
+
+    monkeypatch.setattr("gateway.core.psutil.virtual_memory", lambda: Memory())
+
+    assert manager._host_memory_free_percent("http://localhost:11434") == 37.5
+    assert manager._host_memory_free_percent("http://127.0.0.1:11434") == 37.5
+
+
+def test_remote_ollama_does_not_report_dashboard_memory(tmp_path):
+    manager = make_manager(tmp_path)
+
+    assert manager._host_memory_free_percent("http://ollama.example:11434") is None

@@ -58,6 +58,10 @@ curl http://127.0.0.1:4000/v1/chat/completions \
 La prueba integrada en la web añade esa autorización desde el backend. La clave
 general nunca se envía al JavaScript ni aparece en el navegador.
 
+Al cargar el panel se ejecuta una única sonda mínima por modelo remoto para
+mostrar su latencia con un semáforo. Las actualizaciones periódicas de métricas
+no repiten ni facturan nuevas sondas; una recarga completa de la página sí.
+
 Los estados y logs se guardan bajo `runtime/`, que no se versiona. El fichero
 `config.yaml` original nunca se modifica: se crea una copia filtrada en
 `runtime/active_config.yaml`.

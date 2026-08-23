@@ -357,12 +357,28 @@ los logs históricos no se destruyen.
 
 - **LiteLLM:** CPU normalizada sobre todos los cores y RSS del árbol de procesos.
 - **Ollama:** CPU compartida del servicio, memoria del modelo y VRAM informadas
-  por `/api/ps`.
+  por `/api/ps`. Cuando Ollama se ejecuta en el mismo servidor que el panel,
+  también se muestra el porcentaje de RAM disponible del sistema.
 - **OpenAI:** se marca como remoto; no es posible inspeccionar CPU/RAM del
-  proveedor desde el equipo local.
+  proveedor desde el equipo local. OpenAI tampoco expone mediante la API de
+  inferencia un contador fiable de saldo o tokens restantes por modelo, por lo
+  que el panel indica expresamente que ese dato no está disponible. Como señal
+  operativa alternativa, al cargar la página se realiza una única petición
+  mínima por modelo remoto y se muestra la latencia extremo a extremo.
+
+El semáforo de latencia utiliza estos umbrales: verde por debajo de `2.000 ms`,
+amarillo entre `2.000` y `5.000 ms`, y rojo por encima de `5.000 ms`. Es una
+medición puntual que incluye el panel, LiteLLM, red, proveedor e inferencia; no
+es un SLA ni una medida aislada de la red.
+
+> Cada recarga completa de la página consume una petición mínima del proveedor
+> remoto. El heartbeat de tres segundos no repite la sonda, por lo que dejar el
+> panel abierto no genera llamadas adicionales.
 
 No se presenta una precisión falsa: varios modelos Ollama pueden compartir el
 mismo servidor y su CPU no es atribuible de forma fiable a una sola tarjeta.
+Si `api_base` apunta a un Ollama remoto, el panel tampoco atribuye a ese host la
+RAM libre de la máquina local; en ese caso presenta `—`.
 
 ## 10. Seguridad
 

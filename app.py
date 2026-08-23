@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import os
 from pathlib import Path
+import time
 
 import httpx
 from dotenv import load_dotenv
@@ -162,6 +163,45 @@ async def test_model(name: str, test: TestCall):
         detail = body.get("error", body) if isinstance(body, dict) else body
         raise HTTPException(response.status_code, detail)
     return {"mode": model["mode"], "result": body}
+
+
+@app.post("/api/models/{name}/latency")
+async def model_latency(name: str):
+    """Realiza una única sonda generativa y devuelve su latencia extremo a extremo."""
+    model = next((item for item in manager.models() if item["name"] == name), None)
+    if model is None:
+        raise HTTPException(404, f"Modelo no encontrado: {name}")
+    if model["provider_model"].startswith("ollama/"):
+        raise HTTPException(400, "La sonda de latencia automática sólo se aplica a modelos remotos")
+    if not model["enabled"]:
+        raise HTTPException(409, f"El modelo {name} está desactivado")
+    if not manager.is_running():
+        raise HTTPException(409, "LiteLLM no está activo")
+
+    payload = {
+        "model": name,
+        "messages": [{"role": "user", "content": "Responde únicamente: OK"}],
+    }
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                "http://127.0.0.1:4000/v1/chat/completions",
+                json=payload,
+                headers=gateway_auth_headers(),
+            )
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(502, f"No se pudo medir la latencia: {exc}") from exc
+    latency_ms = round((time.monotonic() - started) * 1000)
+    if response.is_error:
+        try:
+            detail = response.json().get("error", response.json())
+        except ValueError:
+            detail = response.text
+        raise HTTPException(response.status_code, detail)
+    return {"model": name, "latency_ms": latency_ms}
 
 
 @app.get("/api/models/{name}/logs")

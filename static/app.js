@@ -11,6 +11,7 @@ let models = [];
 let selectedLogModel = "__litellm__";
 let selectedTestModel = null;
 let gatewayProcessAlive = false;
+const remoteLatencies = new Map();
 
 /** Escapar texto antes de insertarlo como HTML evita XSS desde prompts o logs. */
 const escapeHtml = (value) => String(value ?? "").replace(
@@ -107,6 +108,37 @@ async function loadModels() {
 }
 
 /** Las métricas remotas se etiquetan, nunca se simulan con datos locales. */
+function metricStatus(kind, value) {
+  if (value === null || value === undefined) return { level: "unknown", label: "Sin datos" };
+  if (kind === "cpu") {
+    if (value >= 80) return { level: "danger", label: "Uso crítico" };
+    if (value > 60) return { level: "warning", label: "Uso elevado" };
+    return { level: "healthy", label: "Uso bajo" };
+  }
+  if (kind === "memory-free") {
+    if (value < 20) return { level: "danger", label: "Memoria crítica" };
+    if (value < 40) return { level: "warning", label: "Memoria limitada" };
+    return { level: "healthy", label: "Memoria suficiente" };
+  }
+  if (kind === "latency") {
+    if (value > 5000) return { level: "danger", label: "Respuesta lenta" };
+    if (value >= 2000) return { level: "warning", label: "Respuesta moderada" };
+    return { level: "healthy", label: "Respuesta rápida" };
+  }
+  return { level: "unknown", label: "Informativo" };
+}
+
+function metricRow(label, value, status = null) {
+  const indicator = status
+    ? `<span class="metric-dot ${status.level}" role="img" aria-label="${status.label}" title="${status.label}"></span>`
+    : "";
+  return `
+    <div class="metric-row">
+      <span class="metric-label">${label}</span>
+      <span class="metric-value">${value}${indicator}</span>
+    </div>`;
+}
+
 async function loadModelResources() {
   const resources = await api("/api/model-resources");
   for (const item of resources) {
@@ -115,17 +147,53 @@ async function loadModelResources() {
     if (!target) continue;
 
     if (item.source === "remote") {
-      target.textContent = "Proveedor remoto · CPU/RAM no disponible";
+      const latency = remoteLatencies.get(item.name);
+      const latencyRow = latency?.latency_ms !== undefined
+        ? metricRow("Latencia (sonda)", `${latency.latency_ms} ms`, metricStatus("latency", latency.latency_ms))
+        : metricRow("Latencia (sonda)", latency?.error || (gatewayProcessAlive ? "Pendiente" : "Gateway detenido"));
+      target.innerHTML = [
+        metricRow("Proveedor", "OpenAI · remoto"),
+        metricRow("Saldo / tokens", "No disponible vía API"),
+        latencyRow,
+      ].join("");
       target.className = "model-resources remote";
     } else if (!item.available) {
-      target.textContent = "Ollama no disponible";
+      target.innerHTML = metricRow("Estado", "Ollama no disponible");
       target.className = "model-resources unavailable";
     } else {
-      target.textContent = item.loaded
-        ? `CPU Ollama compartida ${item.cpu_percent ?? "—"}% · Memoria ${item.memory_gb} GB · VRAM ${item.vram_gb} GB`
-        : `CPU Ollama compartida ${item.cpu_percent ?? "—"}% · Modelo no cargado`;
+      const memoryFree = item.server_memory_free_percent;
+      const cpu = item.cpu_percent;
+      const rows = item.loaded
+        ? [
+            metricRow("Memoria modelo", `${item.memory_gb} GB`),
+            metricRow("VRAM modelo", `${item.vram_gb} GB`),
+          ]
+        : [metricRow("Estado modelo", "No cargado")];
+      rows.push(
+        metricRow("Memoria libre", `${memoryFree ?? "—"}%`, metricStatus("memory-free", memoryFree)),
+        metricRow("CPU compartida", `${cpu ?? "—"}%`, metricStatus("cpu", cpu)),
+      );
+      target.innerHTML = rows.join("");
       target.className = "model-resources";
     }
+  }
+}
+
+/** Una sola llamada mínima por modelo remoto y carga completa de la página. */
+async function loadRemoteLatencies() {
+  const remoteModels = models.filter((model) => (
+    model.enabled && !model.provider_model.startsWith("ollama/")
+  ));
+  for (const model of remoteModels) {
+    try {
+      remoteLatencies.set(
+        model.name,
+        await api(`/api/models/${encodeURIComponent(model.name)}/latency`, { method: "POST" }),
+      );
+    } catch {
+      remoteLatencies.set(model.name, { error: "No disponible" });
+    }
+    await loadModelResources();
   }
 }
 
@@ -291,6 +359,7 @@ $("#gateway-button").onclick = async () => {
   try {
     await api(`/api/gateway/${gatewayProcessAlive ? "stop" : "start"}`, { method: "POST" });
     await loadStatus();
+    if (gatewayProcessAlive && remoteLatencies.size === 0) await loadRemoteLatencies();
   } catch (exception) {
     showError(exception);
     button.disabled = false;
@@ -300,8 +369,14 @@ $("#gateway-button").onclick = async () => {
 $("#refresh").onclick = () => loadLogs().catch(showError);
 $("#test-button").onclick = runTest;
 
-// Un único heartbeat mantiene coherentes proceso, modelos y observabilidad.
-Promise.all([loadStatus(), loadModels()]).catch(showError);
+// La inicialización secuencial garantiza que la sonda sólo se lance si el gateway está listo.
+async function initialize() {
+  await loadStatus();
+  await loadModels();
+  if (gatewayProcessAlive) await loadRemoteLatencies();
+}
+
+initialize().catch(showError);
 window.setInterval(
   () => Promise.all([loadStatus(), loadModelResources(), loadLogs()]).catch(() => {}),
   3000,

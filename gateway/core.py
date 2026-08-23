@@ -16,6 +16,7 @@ import socket
 import subprocess
 import time
 import urllib.request
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any
 
@@ -123,7 +124,8 @@ class GatewayManager:
             if not provider_model.startswith("ollama/"):
                 result.append({
                     "name": model["name"], "source": "remote", "available": False,
-                    "cpu_percent": None, "memory_gb": None, "vram_gb": None, "loaded": None,
+                    "cpu_percent": None, "memory_gb": None, "vram_gb": None,
+                    "server_memory_free_percent": None, "loaded": None,
                 })
                 continue
             base = model["api_base"].rstrip("/")
@@ -134,9 +136,24 @@ class GatewayManager:
                 "name": model["name"], "source": "ollama", "available": loaded_models is not None,
                 "cpu_percent": ollama_cpu, "memory_gb": round(item.get("size", 0) / (1024 ** 3), 3) if item else 0.0,
                 "vram_gb": round(item.get("size_vram", 0) / (1024 ** 3), 3) if item else 0.0,
+                "server_memory_free_percent": self._host_memory_free_percent(base),
                 "loaded": item is not None,
             })
         return result
+
+    @staticmethod
+    def _host_memory_free_percent(api_base: str) -> float | None:
+        """Devuelve RAM libre sólo cuando Ollama reside en esta máquina.
+
+        `/api/ps` informa del tamaño de los modelos, pero no de la RAM total del
+        host. Para un servidor remoto no debemos presentar la memoria del panel
+        como si perteneciera a ese servidor.
+        """
+        hostname = (urlparse(api_base).hostname or "").lower()
+        if hostname not in {"localhost", "127.0.0.1", "::1"}:
+            return None
+        memory = psutil.virtual_memory()
+        return round(memory.available / memory.total * 100, 1) if memory.total else None
 
     def _write_state(self, disabled: set[str]) -> None:
         temp = self.state_file.with_suffix(".tmp")
