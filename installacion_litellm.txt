@@ -26,7 +26,10 @@ canónica y explica arquitectura, seguridad, YAML, Ollama, Cloudera y capacidad.
 
    ./start.sh
 
-6. Abrir http://127.0.0.1:5100 y pulsar «Arrancar».
+6. Abrir https://127.0.0.1:8081 y pulsar «Arrancar».
 
-El panel escucha en 5100. Las aplicaciones consumidoras llaman al gateway
-OpenAI-compatible en http://127.0.0.1:4000/v1 usando LITELLM_MASTER_KEY.
+El panel escucha en 127.0.0.1:${CDSW_APP_PORT:-8081}. Las aplicaciones
+consumidoras llaman al gateway OpenAI-compatible en
+http://127.0.0.1:${CDSW_READONLY_PORT:-8090}/v1 usando LITELLM_MASTER_KEY.
+Cloudera define ambas variables automáticamente y publica ambos servicios por
+HTTPS. En local se usan los fallbacks y el panel genera un certificado HTTPS.

@@ -17,6 +17,9 @@ const remoteLatencies = new Map();
 let clouderaConnections = [];
 let clouderaModels = [];
 let editingClouderaConnectionId = null;
+let preparedClouderaSource = null;
+let csrfToken = "";
+let dashboardAuthenticated = false;
 const clouderaProbeTimers = new Map();
 const clouderaChecksInProgress = new Set();
 
@@ -35,9 +38,13 @@ const escapeHtml = (value) => String(value ?? "").replace(
 
 /** Único punto de acceso HTTP: normaliza tanto errores JSON como texto plano. */
 async function api(url, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) headers["X-CSRF-Token"] = csrfToken;
   const response = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers,
+    credentials: "same-origin",
   });
   if (!response.ok) {
     let detail;
@@ -333,6 +340,8 @@ async function probeClouderaModel(index, button) {
 
 function prepareClouderaModel(index) {
   const model = clouderaModels[index]; cancelModelEdit();
+  const connection = clouderaConnections.find((item) => item.id === model.connection_id);
+  preparedClouderaSource = {source: "cloudera", cloudera_kind: connection?.kind || (model.source?.toLowerCase().includes("workbench") ? "workbench" : "inference")};
   $("#config-name").value = model.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   $("#config-model").value = model.protocol === "openai" ? `openai/${model.model_name || model.name}` : `custom/${model.model_name || model.name}`;
   $("#config-api-base").value = (model.url || "").replace(/\/(chat\/completions|completions|embeddings)\/?$/, "");
@@ -346,6 +355,7 @@ async function loadStatus() {
   /** Refresca salud del proceso; se ejecuta cada tres segundos al final. */
   const status = await api("/api/status");
   gatewayProcessAlive = status.process_alive;
+  $("#gateway-address").textContent = `${status.host}:${status.port}`;
 
   $("#status").classList.toggle("online", status.running);
   $("#status").classList.toggle("unhealthy", (status.process_alive && !status.running) || status.port_conflict);
@@ -370,11 +380,14 @@ async function loadStatus() {
 
 function modelCard(model) {
   /** Proyecta un modelo seguro del backend a una tarjeta puramente visual. */
+  const sourceBadge = model.source === "cloudera"
+    ? `<span class="source-badge cloudera">CLOUDERA · ${model.cloudera_kind === "workbench" ? "WORKBENCH" : "AI INFERENCE"}</span>`
+    : "";
   return `
     <article class="model-card ${model.enabled ? "" : "disabled"}">
       <div class="model-head">
         <div>
-          <span class="model-kicker">${model.mode === "embedding" ? "VECTOR" : "CHAT"}</span>
+          <span class="model-kicker">${model.mode === "embedding" ? "VECTOR" : "CHAT"}</span>${sourceBadge}
           <h3>${escapeHtml(model.name)}</h3>
         </div>
         <span class="badge">${model.enabled ? "ACTIVO" : "INACTIVO"}</span>
@@ -461,6 +474,16 @@ async function loadModelResources() {
         latencyRow,
       ].join("");
       target.className = "model-resources remote";
+    } else if (item.source === "cloudera") {
+      const latency = remoteLatencies.get(item.name);
+      const latencyRow = latency?.latency_ms !== undefined
+        ? metricRow("Latencia (sonda)", `${latency.latency_ms} ms`, metricStatus("latency", latency.latency_ms))
+        : metricRow("Latencia (sonda)", latency?.error || (gatewayProcessAlive ? "Pendiente" : "Gateway detenido"));
+      target.innerHTML = [
+        metricRow("Proveedor", `Cloudera · ${item.cloudera_kind === "workbench" ? "Workbench" : "AI Inference"}`),
+        latencyRow,
+      ].join("");
+      target.className = "model-resources cloudera";
     } else if (!item.available) {
       target.innerHTML = metricRow("Estado", "Ollama no disponible");
       target.className = "model-resources unavailable";
@@ -513,7 +536,7 @@ function renderConfiguredModels() {
   $("#config-fallback").innerHTML = `<option value="">Sin fallback</option>${options}`;
   $("#config-fallback").value = fallbackValue;
   const guardrailValue = $("#guardrail-model").value;
-  $("#guardrail-model").innerHTML = `<option value="">Selecciona un modelo</option>${options}`;
+  $("#guardrail-model").innerHTML = `<option value="">Sin guardrail · llamada directa</option>${options}`;
   $("#guardrail-model").value = guardrailValue;
 }
 
@@ -521,6 +544,7 @@ function beginModelEdit(name) {
   const model = models.find((item) => item.name === name);
   if (!model) return;
   editingModelName = name;
+  preparedClouderaSource = model.source === "cloudera" ? {source: "cloudera", cloudera_kind: model.cloudera_kind} : null;
   $("#config-name").value = model.name;
   $("#config-model").value = model.provider_model;
   $("#config-api-base").value = model.api_base || "";
@@ -538,6 +562,7 @@ function beginModelEdit(name) {
 
 function cancelModelEdit() {
   editingModelName = null;
+  preparedClouderaSource = null;
   $("#model-form").reset();
   $("#config-drop-params").checked = true;
   $("#save-model").textContent = "Añadir modelo";
@@ -597,6 +622,8 @@ async function addConfiguredModel(event) {
     timeout: $("#config-timeout").value ? Number($("#config-timeout").value) : null,
     fallback_model: $("#config-fallback").value,
     drop_params: $("#config-drop-params").checked,
+    source: preparedClouderaSource?.source || "",
+    cloudera_kind: preparedClouderaSource?.cloudera_kind || "",
   };
   try {
     const restart = await askRestart();
@@ -664,12 +691,24 @@ async function updateGuardrail() {
   try {
     const result = await api("/api/config/guardrail", {method: "PUT", body: JSON.stringify({enabled: $("#guardrail-enabled").checked, model: $("#guardrail-model").value, policy: $("#guardrail-policy").value, restart})});
     $("#yaml-editor").value = result.content;
-    setInlineStatus("#yaml-status", "Guardrail actualizado en modo avisar y continuar.", "success");
+    const message = !$("#guardrail-enabled").checked
+      ? "Guardrail desactivado: las llamadas irán directamente al modelo elegido."
+      : $("#guardrail-policy").value === "block"
+        ? "Guardrail actualizado en política restringida."
+        : "Guardrail actualizado en política permisiva.";
+    setInlineStatus("#yaml-status", message, "success");
     await Promise.all([loadStatus(), loadModels()]);
   } catch (exception) { showError(exception); }
 }
 
 function renderGuardrailPolicy() {
+  if (!$("#guardrail-enabled").checked || !$("#guardrail-model").value) {
+    $("#policy-chip").textContent = "Guardrail desactivado";
+    $("#policy-chip").classList.remove("restricted");
+    $("#guardrail-policy").disabled = true;
+    return;
+  }
+  $("#guardrail-policy").disabled = false;
   const restricted = $("#guardrail-policy").value === "block";
   $("#policy-chip").textContent = restricted ? "Política restringida · bloquea" : "Política permisiva · avisa y continúa";
   $("#policy-chip").classList.toggle("restricted", restricted);
@@ -855,6 +894,8 @@ async function loadLogs() {
     $("#logs").innerHTML = raw
       ? `<pre class="process-log">${escapeHtml(raw)}</pre>`
       : '<p class="empty">LiteLLM todavía no ha generado salida de proceso.</p>';
+    const processLog = $(".process-log");
+    if (processLog) processLog.scrollTop = processLog.scrollHeight;
     return;
   }
   if (!selectedLogModel) return;
@@ -865,6 +906,8 @@ async function loadLogs() {
   $("#download-logs").href = `/api/models/${encodeURIComponent(selectedLogModel)}/logs.xlsx?day=${encodeURIComponent(selectedLogDay)}`;
   renderKpis(data.kpis);
   $("#logs").innerHTML = logTable(data.rows);
+  const tableLog = $(".log-table-wrap");
+  if (tableLog) tableLog.scrollTop = tableLog.scrollHeight;
 }
 
 async function clearSelectedProcessLog() {
@@ -934,8 +977,8 @@ $("#test-button").onclick = runTest;
 $("#model-form").onsubmit = addConfiguredModel;
 $("#save-yaml").onclick = saveYaml;
 $("#validate-yaml").onclick = () => validateYaml().catch(() => {});
-$("#guardrail-enabled").onchange = updateGuardrail;
-$("#guardrail-model").onchange = () => { if ($("#guardrail-enabled").checked) updateGuardrail(); };
+$("#guardrail-enabled").onchange = () => { renderGuardrailPolicy(); updateGuardrail(); };
+$("#guardrail-model").onchange = () => { $("#guardrail-enabled").checked = Boolean($("#guardrail-model").value); renderGuardrailPolicy(); updateGuardrail(); };
 $("#guardrail-policy").onchange = () => { renderGuardrailPolicy(); if ($("#guardrail-enabled").checked) updateGuardrail(); };
 $("#cancel-model-edit").onclick = cancelModelEdit;
 $("#cloudera-connection-form").onsubmit = saveClouderaConnection;
@@ -962,8 +1005,75 @@ async function initialize() {
   if (gatewayProcessAlive) await loadRemoteLatencies();
 }
 
-initialize().catch(showError);
-window.setInterval(
-  () => Promise.all([loadStatus(), loadModelResources(), loadLogs()]).catch(() => {}),
-  3000,
-);
+async function authenticationBootstrap() {
+  const status = await api("/api/auth/status");
+  if (!status.authenticated) {
+    $("#login-screen").hidden = false;
+    $("#dashboard").hidden = true;
+    $("#login-password").focus();
+    return;
+  }
+  csrfToken = status.csrf_token;
+  dashboardAuthenticated = true;
+  $("#login-screen").hidden = true;
+  $("#dashboard").hidden = false;
+  if (status.must_change_password) { openPasswordDialog(true); return; }
+  await initialize();
+}
+
+function openPasswordDialog(required = false) {
+  const dialog = $("#password-dialog");
+  dialog.dataset.required = String(required);
+  $("#cancel-password").hidden = required;
+  $("#password-help").textContent = required
+    ? "Por seguridad debes sustituir la contraseña inicial antes de usar el panel. Usa al menos 12 caracteres, mayúscula, minúscula, número y símbolo."
+    : "Usa al menos 12 caracteres, mayúscula, minúscula, número y símbolo.";
+  $("#password-form").reset();
+  setInlineStatus("#password-status", "");
+  dialog.showModal();
+  $("#current-password").focus();
+}
+
+$("#login-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button[type=submit]");
+  button.disabled = true;
+  setInlineStatus("#login-status", "Comprobando…");
+  try {
+    const status = await api("/api/auth/login", {method: "POST", body: JSON.stringify({username: $("#login-username").value, password: $("#login-password").value})});
+    csrfToken = status.csrf_token;
+    dashboardAuthenticated = true;
+    $("#login-screen").hidden = true; $("#dashboard").hidden = false;
+    if (status.must_change_password) { openPasswordDialog(true); return; }
+    await initialize();
+  } catch (error) { setInlineStatus("#login-status", error.message, "error"); }
+  finally { button.disabled = false; }
+};
+
+$("#change-password-button").onclick = () => openPasswordDialog(false);
+$("#cancel-password").onclick = () => $("#password-dialog").close();
+$("#password-form").onsubmit = async (event) => {
+  event.preventDefault();
+  if ($("#new-password").value !== $("#confirm-password").value) {
+    setInlineStatus("#password-status", "Las nuevas contraseñas no coinciden.", "error"); return;
+  }
+  try {
+    const status = await api("/api/auth/change-password", {method: "POST", body: JSON.stringify({current_password: $("#current-password").value, new_password: $("#new-password").value})});
+    csrfToken = status.csrf_token; $("#password-dialog").close(); await initialize();
+  } catch (error) { setInlineStatus("#password-status", error.message, "error"); }
+};
+$("#logout-button").onclick = async () => {
+  await api("/api/auth/logout", {method: "POST"});
+  csrfToken = ""; dashboardAuthenticated = false; location.reload();
+};
+$("#password-dialog").addEventListener("cancel", (event) => {
+  if ($("#password-dialog").dataset.required === "true") event.preventDefault();
+});
+
+authenticationBootstrap().catch(showError);
+window.setInterval(() => {
+  if (dashboardAuthenticated) Promise.all([loadStatus(), loadModelResources()]).catch(() => {});
+}, 3000);
+window.setInterval(() => {
+  if (dashboardAuthenticated && !$("#view-logs").hidden) loadLogs().catch(() => {});
+}, 10000);

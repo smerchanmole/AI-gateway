@@ -27,6 +27,20 @@ import yaml
 import psutil
 
 
+def environment_port(name: str, default: int) -> int:
+    """Lee un puerto de entorno con validación explícita y fallback local."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} debe contener un puerto numérico válido") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError(f"{name} debe estar entre 1 y 65535")
+    return port
+
+
 class GatewayManager:
     """Orquesta LiteLLM conservando `config.yaml` como fuente de verdad inmutable."""
 
@@ -41,7 +55,8 @@ class GatewayManager:
         self.output_log = self.runtime_dir / "litellm-process.log"
         self.dashboard_settings_file = self.runtime_dir / "dashboard_settings.json"
         self.restart_pending_file = self.runtime_dir / "config-restart-pending"
-        self.port = 4000
+        self.host = "127.0.0.1"
+        self.port = environment_port("CDSW_READONLY_PORT", 8090)
         self._metric_processes: dict[int, psutil.Process] = {}
         self._ollama_metric_processes: dict[int, psutil.Process] = {}
         self._config_lock = threading.RLock()
@@ -155,6 +170,9 @@ class GatewayManager:
 
         with self._config_lock:
             config = self._source()
+            enabled = bool(enabled and model)
+            if not enabled:
+                model = ""
             names = {str(item.get("model_name")) for item in config.get("model_list", [])}
             if enabled and model not in names:
                 raise RuntimeError("Selecciona un modelo guardrail existente")
@@ -244,6 +262,8 @@ class GatewayManager:
                 managed.remove("api_key")
             models[index] = {**models[index], "model_name": new_name,
                              "litellm_params": {**{k: v for k, v in old_params.items() if k not in managed}, **new_params}}
+            if entry.get("model_info"):
+                models[index]["model_info"] = entry["model_info"]
             router = config.get("router_settings") or {}
             for mapping in router.get("fallbacks", []):
                 if isinstance(mapping, dict):
@@ -314,14 +334,36 @@ class GatewayManager:
         for mapping in (source.get("router_settings") or {}).get("fallbacks", []):
             if isinstance(mapping, dict):
                 fallback_map.update({str(k): [str(v) for v in values] for k, values in mapping.items() if isinstance(values, list)})
+        # Relacionamos cada API base con su conexión Cloudera para que el
+        # inventario no pierda el origen al convertir un endpoint a LiteLLM.
+        from gateway.cloudera import ClouderaCatalog
+        try:
+            connections = ClouderaCatalog(self.runtime_dir).connections()
+        except RuntimeError:
+            # Un catálogo opcional dañado no debe ocultar el inventario YAML.
+            connections = []
+        cloudera_origins = []
+        for connection in connections:
+            parsed = urlparse(str(connection.get("url") or ""))
+            if parsed.hostname:
+                cloudera_origins.append((parsed.hostname.lower(), connection.get("kind", "inference")))
         result = []
         for entry in source.get("model_list", []):
             name = str(entry.get("model_name", "sin-nombre"))
             params = entry.get("litellm_params") or {}
+            model_info = entry.get("model_info") or {}
             provider_model = str(params.get("model", ""))
             # LiteLLM soporta muchos endpoints. Para esta UI basta una heurística
             # explícita que distingue los embeddings locales conocidos del chat.
             searchable_name = f"{name} {provider_model}".lower()
+            api_base = str(params.get("api_base", ""))
+            api_hostname = (urlparse(api_base).hostname or "").lower()
+            cloudera_kind = str(model_info.get("dashboard_cloudera_kind") or "")
+            if not cloudera_kind:
+                cloudera_kind = next((kind for hostname, kind in cloudera_origins if hostname == api_hostname), "")
+            is_cloudera = model_info.get("dashboard_source") == "cloudera" or bool(cloudera_kind) or "cloudera.site" in api_hostname or str(params.get("api_key", "")).startswith("os.environ/CLOUDERA_")
+            if is_cloudera and not cloudera_kind:
+                cloudera_kind = "workbench" if any(marker in api_base.lower() for marker in ("/model-deployments", "/api/v2")) else "inference"
             result.append({
                 "name": name,
                 "provider_model": provider_model,
@@ -335,6 +377,8 @@ class GatewayManager:
                 "fallbacks": fallback_map.get(name, []),
                 "enabled": name not in disabled,
                 "mode": "embedding" if "embedding" in searchable_name or "bge-" in searchable_name else "chat",
+                "source": "cloudera" if is_cloudera else ("ollama" if provider_model.startswith("ollama/") else "remote"),
+                "cloudera_kind": cloudera_kind,
             })
         return result
 
@@ -381,7 +425,8 @@ class GatewayManager:
             provider_model = model["provider_model"]
             if not provider_model.startswith("ollama/"):
                 result.append({
-                    "name": model["name"], "source": "remote", "available": False,
+                    "name": model["name"], "source": model.get("source", "remote"),
+                    "cloudera_kind": model.get("cloudera_kind", ""), "available": False,
                     "cpu_percent": None, "memory_gb": None, "vram_gb": None,
                     "server_memory_free_percent": None, "loaded": None,
                 })
@@ -475,9 +520,10 @@ class GatewayManager:
         settings["callbacks"] = list(dict.fromkeys([*current_callbacks, callback]))
         config["litellm_settings"] = settings
         guardrail = dict(dashboard_settings.get("guardrail") or {})
+        guardrail["enabled"] = bool(guardrail.get("enabled") and guardrail.get("model"))
         guardrail_name = guardrail.get("model")
         guardrail_entry = next((item for item in config.get("model_list", []) if item.get("model_name") == guardrail_name), None)
-        if guardrail_entry:
+        if guardrail["enabled"] and guardrail_entry:
             params = guardrail_entry.get("litellm_params") or {}
             guardrail["provider_model"] = str(params.get("model", "")).removeprefix("ollama/")
             guardrail["api_base"] = params.get("api_base", "http://localhost:11434")
@@ -543,7 +589,7 @@ class GatewayManager:
     def _port_ready(self, timeout: float = 0.25) -> bool:
         """Usa una conexión TCP corta como prueba de disponibilidad objetiva."""
         try:
-            with socket.create_connection(("127.0.0.1", self.port), timeout=timeout):
+            with socket.create_connection((self.host, self.port), timeout=timeout):
                 return True
         except OSError:
             return False
@@ -593,7 +639,7 @@ class GatewayManager:
             "process_alive": process_alive,
             "port_conflict": port_ready and not process_alive,
             "pid": pid,
-            "host": "127.0.0.1",
+            "host": self.host,
             "port": self.port,
             "restart_pending": self.restart_pending_file.exists(),
             **self._metrics(pid),
@@ -622,9 +668,23 @@ class GatewayManager:
         litellm_cli = self.root / ".venv" / "bin" / "litellm"
         if not litellm_cli.exists():
             raise RuntimeError("No se encuentra el ejecutable de LiteLLM en el entorno activo")
+        environment_python = self.root / ".venv" / "bin" / "python"
+        try:
+            version = subprocess.run(
+                [str(environment_python), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                check=True, capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+            major, minor = (int(part) for part in version.split(".", 1))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("No se pudo validar la versión de Python del entorno .venv") from exc
+        if (major, minor) < (3, 11):
+            raise RuntimeError(
+                f"El entorno .venv usa Python {version}. IA Gateway requiere Python 3.11 o superior; "
+                "recréalo para evitar errores de carga en LiteLLM."
+            )
         process = subprocess.Popen(
             [str(litellm_cli), "--config", str(self.active_config),
-             "--host", "127.0.0.1", "--port", str(self.port)],
+             "--host", self.host, "--port", str(self.port)],
             cwd=self.root,
             env=env,
             stdout=subprocess.PIPE,

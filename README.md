@@ -10,10 +10,12 @@ IA Gateway coloca una capa de operación sencilla delante de
 las aplicaciones, pero permite administrar desde el navegador modelos OpenAI,
 Ollama y Cloudera AI Inference/Workbench.
 
-La idea central es separar responsabilidades:
+La idea central es separar responsabilidades. Los números siguientes son los
+valores locales por defecto; en Cloudera se leen automáticamente de las
+variables proporcionadas por el Workbench:
 
-- las aplicaciones consumen una única API en el puerto `4000`;
-- el panel de administración vive en el puerto `5100`;
+- las aplicaciones consumen una única API en el puerto `8090`;
+- el panel de administración vive por **HTTPS** en el puerto `8081`;
 - `config.yaml` es la fuente de verdad versionable;
 - los secretos y artefactos de ejecución permanecen fuera de Git;
 - cada petición deja una traza diaria consultable y exportable.
@@ -43,7 +45,7 @@ La idea central es separar responsabilidades:
 
 - Arranque y parada de LiteLLM desde la web.
 - Estado real basado en PID **y** disponibilidad del puerto.
-- Detección de un proceso ajeno que esté ocupando el puerto `4000`.
+- Detección de un proceso ajeno que esté ocupando el puerto `8090`.
 - CPU total y memoria RAM del árbol de procesos, actualizadas cada tres segundos.
 - CRUD de modelos sin editar YAML manualmente.
 - Editor avanzado con validación previa y reinicio transaccional.
@@ -66,14 +68,14 @@ flowchart LR
         APP["Aplicación / agente / SDK OpenAI"]
     end
 
-    subgraph PANEL["IA Gateway · puerto 5100"]
+    subgraph PANEL["IA Gateway · puerto 8081"]
         API["FastAPI · app.py"]
         UI["HTML + CSS + JavaScript"]
         CORE["GatewayManager"]
         CDP["ClouderaCatalog"]
     end
 
-    subgraph PROXY["Plano de inferencia · puerto 4000"]
+    subgraph PROXY["Plano de inferencia · puerto 8090"]
         LLM["LiteLLM Proxy"]
         CALLBACK["Callback de guardrail y observabilidad"]
     end
@@ -109,12 +111,30 @@ flowchart LR
 
 | Plano | Puerto/almacén | Responsabilidad |
 |---|---|---|
-| Administración | `127.0.0.1:5100` | UI, CRUD, pruebas, salud y consulta de logs. |
-| Inferencia | `127.0.0.1:4000` | API OpenAI-compatible que consumen las aplicaciones. |
+| Administración | `https://servidor:8081` | UI autenticada, CRUD, pruebas, salud y logs. |
+| Inferencia | `127.0.0.1:8090` | API OpenAI-compatible que consumen las aplicaciones. |
 | Proveedores | remoto o `:11434` | Ejecución real del modelo. |
 
+Los puertos efectivos se resuelven al arrancar:
+
+| Proceso | Variable | Fallback local | Binding |
+|---|---|---:|---|
+| Panel FastAPI | `CDSW_APP_PORT` | `8081` | `127.0.0.1` |
+| LiteLLM OpenAI-compatible | `CDSW_READONLY_PORT` | `8090` | `127.0.0.1` |
+
+Esto permite ejecutar el mismo código en macOS/Linux y como aplicación de
+Cloudera AI sin editar ficheros. En local, FastAPI sirve HTTPS con el certificado
+autofirmado. Cuando existe `CDSW_DOMAIN` (señal inequívoca de ejecución dentro
+de Cloudera), sirve HTTP exclusivamente sobre
+loopback porque el proxy de Cloudera termina TLS y publica la URL HTTPS externa.
+La contraseña nunca atraviesa la red del usuario en claro en ninguno de los dos modos.
+
+Si una variable está vacía se usa el fallback;
+si contiene un valor no numérico, fuera de `1–65535`, o ambos valores coinciden,
+el arranque se detiene con un mensaje explícito.
+
 El panel no sustituye a LiteLLM. Lo administra. Una aplicación de negocio no
-debería llamar al puerto `5100`; debe usar el gateway del puerto `4000`.
+debería llamar al puerto `8081`; debe usar el gateway del puerto `8090`.
 
 ### Configuración fuente y configuración activa
 
@@ -136,7 +156,7 @@ No edites `runtime/active_config.yaml`: se vuelve a generar en cada arranque.
 ```mermaid
 sequenceDiagram
     participant C as Cliente
-    participant L as LiteLLM :4000
+    participant L as LiteLLM :8090
     participant G as Guardrail
     participant P as Proveedor
     participant D as SQLite
@@ -207,6 +227,16 @@ LITELLM_MASTER_KEY=cambia-esto-por-una-clave-larga
 OPENAI_API_KEY=sk-tu-clave-openai
 ```
 
+Para simular localmente los puertos que inyectará Cloudera:
+
+```dotenv
+CDSW_APP_PORT=8081
+CDSW_READONLY_PORT=8090
+```
+
+No es obligatorio definirlos en local. Las variables reales del entorno de
+Cloudera tienen prioridad sobre los fallbacks.
+
 Una clave local aleatoria se puede generar así:
 
 ```bash
@@ -230,14 +260,23 @@ python app.py
 
 Después:
 
-1. Abre <http://127.0.0.1:5100>.
-2. Pulsa **Arrancar**.
-3. Espera `Activo · 127.0.0.1:4000 · PID ...`.
+1. Abre <https://127.0.0.1:8081>.
+2. Acepta una sola vez el aviso del certificado autofirmado local.
+3. Entra con el usuario fijo `admin` y la contraseña inicial `admin`.
+4. El panel obliga a cambiarla por una contraseña robusta antes de permitir operaciones.
+5. Pulsa **Arrancar** y espera `Activo · 127.0.0.1:8090 · PID ...`.
+
+En el primer arranque **local** se generan `runtime/tls/ia-gateway.crt` y su clave privada
+con permisos `0600`. El panel escucha únicamente en `127.0.0.1`, usando
+`CDSW_APP_PORT` o `8081`; la cookie de sesión sólo viaja cifrada. En Cloudera no
+se genera un certificado interno: su proxy ofrece el HTTPS público. Para evitar el aviso del navegador en una
+instalación corporativa, importa el certificado en los equipos administradores
+o sustitúyelo por uno emitido por vuestra CA interna.
 
 El botón **Detener** termina el grupo de procesos. Al cerrar FastAPI de forma
 ordenada, el `lifespan` también intenta detener el proxy hijo.
 
-Si aparece **Conflicto · puerto 4000 ocupado por otro proceso**, existe otra
+Si aparece **Conflicto · puerto 8090 ocupado por otro proceso**, existe otra
 instancia que la app no controla. Detén esa instancia antes de arrancar otra;
 no confundas un proxy antiguo con un error de los modelos nuevos.
 
@@ -248,7 +287,7 @@ no confundas un proxy antiguo con un error de los modelos nuevos.
 Para una aplicación que corre en el mismo equipo:
 
 ```text
-Base URL: http://127.0.0.1:4000/v1
+Base URL: http://127.0.0.1:${CDSW_READONLY_PORT:-8090}/v1
 API key:  valor de LITELLM_MASTER_KEY
 Model:    alias declarado en model_name
 ```
@@ -256,9 +295,20 @@ Model:    alias declarado en model_name
 Ejemplos de alias: `topito`, `qwen-local`, `embedding-local` o
 `goes-nemotron-3-super-120b`.
 
-> El código actual escucha sólo en `127.0.0.1`. Otro servidor no puede acceder
-> directamente. Para consumo por red, publica el gateway detrás de HTTPS y un
-> reverse proxy/autenticación adecuados, o cambia conscientemente el binding.
+> Ambos procesos escuchan sólo en `127.0.0.1`. En Cloudera, la plataforma publica
+> el puerto de la aplicación mediante su proxy administrado. En local, otro
+> servidor no puede acceder directamente sin un reverse proxy seguro.
+
+Dentro de Cloudera, las URLs publicadas siguen normalmente este patrón:
+
+```text
+Panel:    https://<$CDSW_ENGINE_ID>.<$CDSW_DOMAIN>
+LiteLLM:  https://read-only-<$CDSW_ENGINE_ID>.<$CDSW_DOMAIN>/v1
+```
+
+En una Analytical Application, el panel usa el subdominio elegido para la
+aplicación. La URL exterior la proporciona Cloudera; no se construye con
+`127.0.0.1` ni con el número de puerto interno.
 
 ### Python con el SDK de OpenAI
 
@@ -273,7 +323,7 @@ import os
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://127.0.0.1:4000/v1",
+    base_url="http://127.0.0.1:8090/v1",
     # Esta es la clave de entrada a LiteLLM, no OPENAI_API_KEY.
     api_key=os.environ["LITELLM_MASTER_KEY"],
 )
@@ -305,7 +355,7 @@ import os
 import httpx
 
 response = httpx.post(
-    "http://127.0.0.1:4000/v1/chat/completions",
+    "http://127.0.0.1:8090/v1/chat/completions",
     headers={"Authorization": f"Bearer {os.environ['LITELLM_MASTER_KEY']}"},
     json={
         "model": "qwen-local",
@@ -320,7 +370,7 @@ print(response.json()["choices"][0]["message"]["content"])
 ### `curl`
 
 ```bash
-curl http://127.0.0.1:4000/v1/chat/completions \
+curl http://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -d '{
@@ -343,7 +393,7 @@ print(len(vector), vector[:5])
 Endpoint HTTP equivalente:
 
 ```text
-POST http://127.0.0.1:4000/v1/embeddings
+POST http://127.0.0.1:8090/v1/embeddings
 ```
 
 ### Streaming
@@ -363,7 +413,7 @@ for chunk in stream:
 ### Descubrir aliases disponibles
 
 ```bash
-curl http://127.0.0.1:4000/v1/models \
+curl http://127.0.0.1:8090/v1/models \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY"
 ```
 
@@ -550,8 +600,10 @@ y la guía de [sensibilidad del autoscaling](https://docs.cloudera.com/machine-l
 
 ## 11. Guardrail general
 
-El guardrail se ejecuta **antes** de todos los modelos de chat configurados. El
-modelo de seguridad suele ser un `llama-guard` local en Ollama para evitar coste
+El guardrail es **opcional**. Si se elige “Sin guardrail · llamada directa”, las
+peticiones van al modelo de destino sin clasificación previa. Sólo cuando se
+selecciona un modelo guardrail se ejecuta **antes** de los demás modelos de chat.
+El modelo de seguridad suele ser un `llama-guard` local en Ollama para evitar coste
 externo y recursión.
 
 ```yaml
@@ -794,7 +846,7 @@ Funciones destacadas:
 |---|---|
 | `gateway_auth_headers` | Añade la master key sólo en servidor. |
 | `_model_entry` | Convierte formulario seguro a entrada YAML. |
-| `test_model` | Decide chat/embedding y llama al puerto 4000. |
+| `test_model` | Decide chat/embedding y llama al puerto 8090. |
 | `model_latency` | Sonda remota pequeña para el semáforo. |
 | `refresh_cloudera_tokens` | Renueva secretos y recarga el proxy. |
 
@@ -907,10 +959,12 @@ Los tests usan directorios temporales y dobles HTTP; no deben consumir cuota rea
 
 ## 15. API del panel
 
-Swagger: <http://127.0.0.1:5100/api/docs>
+Swagger autenticado: <https://127.0.0.1:8081/api/docs>
 
 | Método | Ruta | Uso |
 |---|---|---|
+| `GET/POST` | `/api/auth/status`, `/api/auth/login` | Estado e inicio de sesión. |
+| `POST` | `/api/auth/change-password`, `/api/auth/logout` | Rotación y cierre de sesión. |
 | `GET` | `/api/status` | Proceso, puerto, PID, conflicto, CPU y RAM. |
 | `POST` | `/api/gateway/start` | Genera runtime y arranca LiteLLM. |
 | `POST` | `/api/gateway/stop` | Detiene LiteLLM. |
@@ -930,8 +984,14 @@ Swagger: <http://127.0.0.1:5100/api/docs>
 
 ## 16. Seguridad
 
-- No publiques el panel sin autenticación adicional.
-- No expongas `:4000` a Internet sin TLS, firewall y gestión de claves.
+- El único usuario es `admin`; la contraseña inicial `admin` debe cambiarse en el primer acceso.
+- La contraseña se almacena como hash **Argon2id** con sal aleatoria, nunca en claro.
+- Las sesiones duran ocho horas: la cookie es opaca, `HttpOnly`, `Secure` y `SameSite=Strict`.
+- Las operaciones de escritura exigen además un token CSRF ligado a la sesión.
+- Tras cinco intentos fallidos desde una IP, el login se bloquea durante 15 minutos.
+- Cambiar la contraseña invalida todas las demás sesiones activas.
+- En local, el panel usa HTTPS autofirmado y cabeceras CSP/HSTS; en Cloudera, el proxy de la plataforma termina TLS y el servicio interno queda limitado a `127.0.0.1`.
+- No expongas `:8090` a Internet sin TLS, firewall y gestión de claves.
 - Rota cualquier token pegado accidentalmente en chat, log o captura.
 - Mantén `.env` y `runtime/` fuera de Git y de copias no cifradas.
 - Restringe permisos del usuario del proceso.
@@ -975,7 +1035,7 @@ Antes de actualizar:
 
 1. Consulta `/v1/models` con la master key.
 2. Verifica que el alias aparece.
-3. Comprueba que no exista un proceso antiguo ocupando `:4000`.
+3. Comprueba que no exista un proceso antiguo ocupando `:8090`.
 4. Reinicia LiteLLM desde el panel.
 5. Revisa el log técnico con timestamps.
 
@@ -983,7 +1043,7 @@ Un `ProxyModelNotFoundError` ocurre dentro del router, antes del proveedor.
 
 ### “Authentication failed”
 
-- Entrada `:4000`: revisa `LITELLM_MASTER_KEY`.
+- Entrada `:8090`: revisa `LITELLM_MASTER_KEY`.
 - OpenAI: revisa `OPENAI_API_KEY` y facturación API.
 - Cloudera: prueba token general/específico, permisos y caducidad.
 - Ollama local: normalmente no necesita API key de proveedor.
@@ -1013,7 +1073,7 @@ capacidad de cluster suficiente.
 
 ![Infografía de arquitectura de IA Gateway](docs/assets/ia-gateway-arquitectura.png)
 
-IA Gateway es deliberadamente pequeño: una capa de control local, una API
-unificada y trazabilidad útil. Para convertirlo en plataforma empresarial deben
-añadirse autenticación del panel, TLS, alta disponibilidad, almacenamiento
-compartido, retención y pruebas de carga con SLO explícitos.
+IA Gateway es deliberadamente pequeño: una capa de control HTTPS autenticada,
+una API unificada y trazabilidad útil. Para una plataforma empresarial distribuida
+deben añadirse alta disponibilidad, una CA corporativa, almacenamiento compartido,
+retención y pruebas de carga con SLO explícitos.

@@ -31,6 +31,30 @@
 
 * { box-sizing: border-box; }
 
+[hidden] { display: none !important; }
+
+.auth-screen {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+.auth-card {
+  display: grid;
+  width: min(440px, 100%);
+  gap: 14px;
+  padding: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 24px;
+  background: rgba(7, 17, 31, 0.97);
+  box-shadow: var(--shadow);
+}
+.auth-card h1 { margin-bottom: 2px; }
+.auth-card p { margin-bottom: 4px; color: #c7d8ea; }
+.auth-card label, #password-form label { display: grid; gap: 6px; color: #d8e5f3; font-size: 11px; font-weight: 750; }
+.auth-card small { color: #91a8bd; }
+.auth-card button { margin-top: 4px; }
+
 /* 1. Lienzo y cabecera: identidad visual, fondo y ancho de lectura. */
 
 html { min-height: 100%; }
@@ -157,6 +181,9 @@ code, pre, .provider, .resources, .model-resources, .request-meta {
 .status.unhealthy { color: var(--red); }
 .status.unhealthy i { background: var(--red); box-shadow: 0 0 0 5px rgba(251, 113, 133, 0.15); }
 .resources { color: #c8d8e9; font-size: 11px; }
+.account-actions { display: flex; gap: 10px; }
+.account-actions button { padding: 0; color: #91a8bd; background: transparent; font-size: 9px; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
+.account-actions button:hover { color: white; transform: none; }
 
 button {
   border: 0;
@@ -221,6 +248,8 @@ section { padding-top: 48px; }
 .model-card.disabled { opacity: 0.62; filter: saturate(0.55); }
 .model-card h3 { margin-bottom: 0; font-size: 19px; letter-spacing: -0.02em; }
 .model-kicker { display: block; margin-bottom: 3px; color: var(--cyan); }
+.source-badge { display: inline-flex; width: max-content; margin-top: 5px; padding: 3px 7px; border-radius: 999px; font-size: 8px; font-weight: 900; letter-spacing: .08em; }
+.source-badge.cloudera { color: #fff7ed; background: #ea580c; border: 1px solid rgba(255,255,255,.22); }
 .badge {
   padding: 4px 9px;
   border: 1px solid rgba(52, 211, 153, 0.24);
@@ -255,6 +284,8 @@ section { padding-top: 48px; }
 .metric-dot.unknown { background: #64748b; }
 .model-resources.remote { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.18); }
 .model-resources.remote .metric-value { color: #ddd6fe; }
+.model-resources.cloudera { color: #fed7aa; border-color: rgba(251,146,60,.28); }
+.model-resources.cloudera .metric-value { color: #ffedd5; }
 .model-resources.unavailable { color: #fda4af; border-color: rgba(251, 113, 133, 0.18); }
 .model-resources.unavailable .metric-value { color: #fecdd3; }
 .meta { padding-top: 15px; border-top: 1px solid var(--line); color: #c6d6e8; font-size: 11px; }
@@ -399,6 +430,8 @@ textarea:focus, select:focus { outline: 2px solid var(--cyan); border-color: tra
 .guardrail-result span { opacity: .8; }
 dialog { max-width: 590px; padding: 24px; border: 1px solid var(--line-strong); border-radius: 18px; color: var(--text); background: var(--ink-900); box-shadow: var(--shadow); }
 dialog::backdrop { background: rgba(3,8,18,.72); backdrop-filter: blur(3px); }
+#password-form { display: grid; min-width: min(430px, 75vw); gap: 12px; }
+#password-form h3, #password-form p { margin-bottom: 0; }
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 9px; margin-top: 22px; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 17px; }
 .panel-heading h3 { margin: 0; font-size: 18px; }

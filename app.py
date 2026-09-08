@@ -11,23 +11,27 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
+import hmac
 import os
 from pathlib import Path
 import re
+import secrets
 import time
 from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from gateway.core import GatewayManager
+from gateway.core import GatewayManager, environment_port
 from gateway.cloudera import ClouderaCatalog
 from gateway.excel_export import build_logs_xlsx
 from gateway.log_store import available_days, log_kpis, parse_day, read_day_logs
+from gateway.auth import AuthStore, AuthenticationError, LoginRateLimited
+from gateway.tls import ensure_self_signed_certificate
 
 
 ROOT = Path(__file__).resolve().parent
@@ -35,6 +39,7 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 manager = GatewayManager(ROOT)
 cloudera = ClouderaCatalog(ROOT / "runtime")
+auth = AuthStore(ROOT / "runtime")
 
 
 def refresh_cloudera_tokens() -> None:
@@ -82,13 +87,107 @@ app = FastAPI(title="IA Gateway", docs_url="/api/docs", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
+def _security_headers(response: Response) -> Response:
+    """Aplica las mismas defensas incluso a respuestas 401/403 tempranas."""
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; img-src 'self' data:; style-src 'self'; "
+        "script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
+
+
 @app.middleware("http")
-async def disable_dashboard_cache(request, call_next):
-    """Evita que el navegador mezcle HTML nuevo con JS/CSS de otra versión."""
+async def secure_dashboard(request: Request, call_next):
+    """Protege la API, valida CSRF y añade cabeceras defensivas al navegador."""
+    path = request.url.path
+    public_api = path in {"/api/auth/status", "/api/auth/login"}
+    if path.startswith("/api/") and not public_api:
+        session = auth.session(request.cookies.get(auth.cookie_name))
+        if not session:
+            return _security_headers(JSONResponse({"detail": "Autenticación requerida"}, status_code=401))
+        if auth.public_status(session)["must_change_password"] and path != "/api/auth/change-password":
+            return _security_headers(JSONResponse({"detail": "Debes cambiar la contraseña inicial"}, status_code=403))
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            supplied = request.headers.get("X-CSRF-Token", "")
+            if not hmac.compare_digest(supplied, str(session.get("csrf_token", ""))):
+                return _security_headers(JSONResponse({"detail": "Token de seguridad CSRF no válido"}, status_code=403))
+        request.state.auth_session = session
     response = await call_next(request)
-    if request.url.path == "/" or request.url.path.startswith("/static/"):
+    if path == "/" or path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
+    return _security_headers(response)
+
+
+class LoginRequest(BaseModel):
+    """Credenciales efímeras recibidas exclusivamente a través de HTTPS."""
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class PasswordChange(BaseModel):
+    """Cambio autenticado: exige conocer la contraseña vigente."""
+
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    """La cookie no es visible a JavaScript ni viaja nunca por HTTP."""
+    response.set_cookie(
+        auth.cookie_name, token, max_age=auth.session_seconds, secure=True,
+        httponly=True, samesite="strict", path="/",
+    )
+
+
+@app.get("/api/auth/status")
+def authentication_status(request: Request):
+    """Permite a la SPA decidir entre login y panel sin exponer la cookie."""
+    return auth.public_status(auth.session(request.cookies.get(auth.cookie_name)))
+
+
+@app.post("/api/auth/login")
+def login(credentials: LoginRequest, request: Request):
+    """Abre una sesión opaca y limita intentos repetidos por dirección origen."""
+    address = request.client.host if request.client else "unknown"
+    try:
+        token, status = auth.login(credentials.username, credentials.password, address)
+    except LoginRateLimited as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": "900"}) from exc
+    except AuthenticationError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    response = JSONResponse(status)
+    _set_session_cookie(response, token)
+    return response
+
+
+@app.post("/api/auth/change-password")
+def change_password(update: PasswordChange, request: Request):
+    """Rota contraseña, versión de credenciales, sesión y token CSRF."""
+    session = request.state.auth_session
+    try:
+        auth.change_password(session, update.current_password, update.new_password)
+    except AuthenticationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    session["csrf_token"] = secrets.token_urlsafe(32)
+    token = auth.replace_session_after_password_change(session)
+    response = JSONResponse(auth.public_status(session))
+    _set_session_cookie(response, token)
+    return response
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(request: Request):
+    """Revoca la sesión en servidor y elimina la cookie del navegador."""
+    auth.logout(request.cookies.get(auth.cookie_name))
+    response = Response(status_code=204)
+    response.delete_cookie(auth.cookie_name, path="/", secure=True, httponly=True, samesite="strict")
     return response
 
 
@@ -128,6 +227,8 @@ class ModelCreate(BaseModel):
     timeout: Optional[float] = None
     fallback_model: str = ""
     drop_params: bool = True
+    source: str = ""
+    cloudera_kind: str = ""
     restart: bool = True
 
 
@@ -199,7 +300,13 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
     if model.reasoning_effort: params["reasoning_effort"] = model.reasoning_effort
     if model.keep_alive.strip(): params["keep_alive"] = model.keep_alive.strip()
     if model.timeout is not None: params["timeout"] = model.timeout
-    return {"model_name": name, "litellm_params": params}
+    entry: dict[str, object] = {"model_name": name, "litellm_params": params}
+    if model.source == "cloudera":
+        entry["model_info"] = {
+            "dashboard_source": "cloudera",
+            "dashboard_cloudera_kind": "workbench" if model.cloudera_kind == "workbench" else "inference",
+        }
+    return entry
 
 
 @app.get("/", include_in_schema=False)
@@ -461,7 +568,7 @@ async def test_model(name: str, test: TestCall):
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
-                f"http://127.0.0.1:4000/v1/{endpoint}",
+                f"http://{manager.host}:{manager.port}/v1/{endpoint}",
                 json=payload,
                 headers=gateway_auth_headers(),
             )
@@ -500,7 +607,7 @@ async def model_latency(name: str):
     try:
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
-                "http://127.0.0.1:4000/v1/chat/completions",
+                f"http://{manager.host}:{manager.port}/v1/chat/completions",
                 json=payload,
                 headers=gateway_auth_headers(),
             )
@@ -580,4 +687,14 @@ def clear_process_log(day: Optional[str] = None):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="127.0.0.1", port=5100, reload=False)
+    web_port = environment_port("CDSW_APP_PORT", 8081)
+    if web_port == manager.port:
+        raise RuntimeError("CDSW_APP_PORT y CDSW_READONLY_PORT deben usar puertos distintos")
+    # Cloudera exige un servicio HTTP sobre loopback y termina TLS en su proxy.
+    # En local no existe ese proxy, de modo que Uvicorn sirve HTTPS directamente.
+    cloudera_proxy = bool(os.environ.get("CDSW_DOMAIN", "").strip())
+    tls: dict[str, str] = {}
+    if not cloudera_proxy:
+        certificate, private_key = ensure_self_signed_certificate(ROOT / "runtime")
+        tls = {"ssl_certfile": str(certificate), "ssl_keyfile": str(private_key)}
+    uvicorn.run("app:app", host="127.0.0.1", port=web_port, reload=False, **tls)

@@ -9,3 +9,5 @@ uvicorn[standard]==0.33.0
 PyYAML>=6.0,<7
 Pillow>=10.4,<12
 cdpcli>=0.9,<1
+# Seguridad de credenciales: hash resistente a GPU/ASIC con Argon2id.
+argon2-cffi>=23.1,<26

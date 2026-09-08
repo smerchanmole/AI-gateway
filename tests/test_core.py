@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import yaml
 
-from gateway.core import GatewayManager
+from gateway.core import GatewayManager, environment_port
 from datetime import date
 import zipfile
 import io
@@ -20,6 +20,25 @@ def make_manager(tmp_path: Path) -> GatewayManager:
         encoding="utf-8",
     )
     return GatewayManager(tmp_path)
+
+
+def test_cloudera_ports_use_environment_with_local_fallback(tmp_path, monkeypatch):
+    monkeypatch.delenv("CDSW_READONLY_PORT", raising=False)
+    assert GatewayManager(tmp_path).port == 8090
+    monkeypatch.setenv("CDSW_READONLY_PORT", "32123")
+    assert GatewayManager(tmp_path).port == 32123
+    assert environment_port("CDSW_APP_PORT", 8081) == 8081
+
+
+def test_environment_port_rejects_invalid_values(monkeypatch):
+    for value in ("texto", "0", "65536"):
+        monkeypatch.setenv("CDSW_APP_PORT", value)
+        try:
+            environment_port("CDSW_APP_PORT", 8081)
+        except RuntimeError as exc:
+            assert "CDSW_APP_PORT" in str(exc)
+        else:
+            raise AssertionError(f"Se esperaba rechazo para el puerto {value}")
 
 
 def test_disable_model_filters_runtime_config(tmp_path):
@@ -223,6 +242,30 @@ def test_dashboard_settings_are_not_forwarded_to_litellm(tmp_path):
     settings = __import__("json").loads(manager.dashboard_settings_file.read_text(encoding="utf-8"))
     assert "dashboard_settings" not in active
     assert settings["guardrail"]["provider_model"] == "dos"
+
+
+def test_guardrail_without_selected_model_is_disabled(tmp_path):
+    manager = make_manager(tmp_path)
+    result = manager.set_guardrail(True, "", policy="warn", restart=False)
+    updated = yaml.safe_load(result["content"])
+    assert updated["dashboard_settings"]["guardrail"]["enabled"] is False
+    assert updated["dashboard_settings"]["guardrail"]["model"] == ""
+    manager._write_active_config()
+    settings = __import__("json").loads(manager.dashboard_settings_file.read_text(encoding="utf-8"))
+    assert settings["guardrail"]["enabled"] is False
+    assert "provider_model" not in settings["guardrail"]
+
+
+def test_cloudera_model_origin_metadata_is_exposed(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.config_text())
+    config["model_list"][0]["model_info"] = {
+        "dashboard_source": "cloudera", "dashboard_cloudera_kind": "workbench",
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+    model = manager.models()[0]
+    assert model["source"] == "cloudera"
+    assert model["cloudera_kind"] == "workbench"
 
 
 def test_update_model_renames_references_and_preserves_advanced_params(tmp_path):

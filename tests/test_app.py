@@ -1,18 +1,33 @@
 from fastapi.testclient import TestClient
+import pytest
 
 import app as dashboard
+from gateway.auth import AuthStore
 
 
-def test_quick_test_requires_running_gateway(monkeypatch):
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    """Cliente HTTPS autenticado; replica el contrato real de navegador."""
+    store = AuthStore(tmp_path / "runtime")
+    monkeypatch.setattr(dashboard, "auth", store)
+    browser = TestClient(dashboard.app, base_url="https://testserver")
+    response = browser.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+    browser.headers["X-CSRF-Token"] = response.json()["csrf_token"]
+    response = browser.post("/api/auth/change-password", json={
+        "current_password": "admin", "new_password": "Clave-Segura-123",
+    })
+    browser.headers["X-CSRF-Token"] = response.json()["csrf_token"]
+    return browser
+
+
+def test_quick_test_requires_running_gateway(monkeypatch, client):
     monkeypatch.setattr(dashboard.manager, "is_running", lambda: False)
-    client = TestClient(dashboard.app)
     response = client.post("/api/models/topito/test", json={"prompt": "SELECT 1"})
     assert response.status_code == 409
     assert "Arranca LiteLLM" in response.json()["detail"]
 
 
-def test_quick_test_rejects_empty_prompt():
-    client = TestClient(dashboard.app)
+def test_quick_test_rejects_empty_prompt(client):
     response = client.post("/api/models/topito/test", json={"prompt": "   "})
     assert response.status_code == 422
 
@@ -36,8 +51,7 @@ def test_gateway_auth_headers_require_general_key(monkeypatch):
         raise AssertionError("Se esperaba un error sin master key")
 
 
-def test_dashboard_disables_cache_and_uses_test_tabs():
-    client = TestClient(dashboard.app)
+def test_dashboard_disables_cache_and_uses_test_tabs(client):
     response = client.get("/")
     assert response.headers["cache-control"].startswith("no-store")
     assert 'id="test-tabs"' in response.text
@@ -47,10 +61,8 @@ def test_dashboard_disables_cache_and_uses_test_tabs():
     assert 'id="model-form"' in response.text
 
 
-def test_dashboard_exposes_architecture_infographic():
+def test_dashboard_exposes_architecture_infographic(client):
     """La portada no debe apuntar a una imagen que el servidor no publique."""
-    client = TestClient(dashboard.app)
-
     dashboard_response = client.get("/")
     image_response = client.get("/static/ia-gateway-arquitectura.png")
 
@@ -76,7 +88,7 @@ def test_model_metrics_use_vertical_rows_and_accessible_statuses():
     assert ".metric-row + .metric-row" in stylesheet
 
 
-def test_remote_latency_probe_uses_gateway_auth(monkeypatch):
+def test_remote_latency_probe_uses_gateway_auth(monkeypatch, client):
     calls = []
 
     class Response:
@@ -100,7 +112,7 @@ def test_remote_latency_probe_uses_gateway_auth(monkeypatch):
     monkeypatch.setattr(dashboard.httpx, "AsyncClient", lambda **_kwargs: Client())
     monkeypatch.setenv("LITELLM_MASTER_KEY", "general-test-key")
 
-    response = TestClient(dashboard.app).post("/api/models/topito/latency")
+    response = client.post("/api/models/topito/latency")
 
     assert response.status_code == 200
     assert response.json()["latency_ms"] >= 0
@@ -109,7 +121,7 @@ def test_remote_latency_probe_uses_gateway_auth(monkeypatch):
     assert calls[0][1]["json"]["model"] == "topito"
 
 
-def test_guided_model_config_uses_environment_reference(monkeypatch):
+def test_guided_model_config_uses_environment_reference(monkeypatch, client):
     captured = []
     monkeypatch.setattr(
         dashboard.manager,
@@ -117,7 +129,7 @@ def test_guided_model_config_uses_environment_reference(monkeypatch):
         lambda entry: captured.append(entry) or {"content": "model_list: []\n", "restarted": False},
     )
 
-    response = TestClient(dashboard.app).post("/api/config/models", json={
+    response = client.post("/api/config/models", json={
         "model_name": "nuevo-openai",
         "model": "openai/modelo",
         "api_key_env": "OPENAI_API_KEY",
@@ -127,8 +139,8 @@ def test_guided_model_config_uses_environment_reference(monkeypatch):
     assert captured[0]["litellm_params"]["api_key"] == "os.environ/OPENAI_API_KEY"
 
 
-def test_guided_model_config_rejects_invalid_environment_name():
-    response = TestClient(dashboard.app).post("/api/config/models", json={
+def test_guided_model_config_rejects_invalid_environment_name(client):
+    response = client.post("/api/config/models", json={
         "model_name": "inseguro",
         "model": "openai/modelo",
         "api_key_env": "sk-clave-en-claro",
@@ -154,4 +166,31 @@ def test_cloudera_models_show_independent_deployment_token_and_probe_states():
     assert "Usará el CDP token general" in javascript
     assert "Respuesta sin probar" in javascript
     assert "Responde correctamente" in javascript
+
+
+def test_api_requires_login_and_rejects_csrf(tmp_path, monkeypatch):
+    store = AuthStore(tmp_path / "runtime")
+    monkeypatch.setattr(dashboard, "auth", store)
+    browser = TestClient(dashboard.app, base_url="https://testserver")
+    assert browser.get("/api/status").status_code == 401
+    login = browser.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+    assert login.status_code == 200
+    assert login.cookies.get(store.cookie_name)
+    assert browser.post("/api/gateway/stop").status_code == 403
+
+
+def test_initial_password_must_be_changed_and_hash_is_persisted(tmp_path):
+    store = AuthStore(tmp_path / "runtime")
+    credentials = store.credentials_file.read_text(encoding="utf-8")
+    assert '"password_hash": "$argon2id$' in credentials
+    assert '"password": "admin"' not in credentials
+    token, status = store.login("admin", "admin", "127.0.0.1")
+    assert token and status["must_change_password"] is True
+
+
+def test_dashboard_exposes_secure_login_and_password_change():
+    html = (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    assert 'id="login-form"' in html
+    assert 'id="change-password-button"' in html
+    assert 'autocomplete="current-password"' in html
 """Pruebas del contrato HTTP y de los elementos esenciales del dashboard."""
