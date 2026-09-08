@@ -41,6 +41,11 @@ def install_runtime_requirements(python: Path) -> None:
     """
     if not REQUIREMENTS_FILE.is_file():
         raise RuntimeError(f"No se encuentra el fichero de dependencias: {REQUIREMENTS_FILE}")
+    pip_environment = os.environ.copy()
+    # Algunas imágenes CML exportan PIP_USER=1 para proteger su Python base.
+    # Dentro de nuestro venv esa opción es inválida; la anulamos sin eliminar
+    # PIP_INDEX_URL/PIP_PROXY, que pueden apuntar al repositorio corporativo.
+    pip_environment["PIP_USER"] = "0"
     try:
         subprocess.run(
             [
@@ -48,12 +53,15 @@ def install_runtime_requirements(python: Path) -> None:
                 "-m",
                 "pip",
                 "install",
+                "--no-user",
+                "--quiet",
                 "--disable-pip-version-check",
                 "--no-input",
                 "-r",
                 str(REQUIREMENTS_FILE),
             ],
             cwd=BOOTSTRAP_ROOT,
+            env=pip_environment,
             check=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
@@ -105,8 +113,24 @@ def bootstrap_private_environment() -> None:
             "Cloudera ejecutó el código como celda, pero no se encuentra app.py "
             f"en el directorio del proyecto: {BOOTSTRAP_ROOT}"
         )
+    # Cloudera puede inyectar rutas del runtime base. No deben adelantarse a las
+    # del venv recién creado, pues reproducirían la mezcla que queremos evitar.
+    runtime_environment = os.environ.copy()
+    runtime_environment.pop("PYTHONHOME", None)
+    runtime_environment.pop("PYTHONPATH", None)
+    runtime_environment["PYTHONNOUSERSITE"] = "1"
+    runtime_environment["VIRTUAL_ENV"] = str(VENV_DIR)
+    runtime_environment["PATH"] = (
+        str(VENV_PYTHON.parent)
+        + os.pathsep
+        + runtime_environment.get("PATH", "")
+    )
     # Sustituir, en vez de crear otro hijo, conserva señales y código de salida.
-    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(application_file)])
+    os.execve(
+        str(VENV_PYTHON),
+        [str(VENV_PYTHON), str(application_file)],
+        runtime_environment,
+    )
 
 
 bootstrap_private_environment()
@@ -215,6 +239,16 @@ async def secure_dashboard(request: Request, call_next):
             return _security_headers(JSONResponse({"detail": "Debes cambiar la contraseña inicial"}, status_code=403))
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             supplied = request.headers.get("X-CSRF-Token", "")
+            if not supplied and request.headers.get("content-type", "").split(";", 1)[0] == "application/json":
+                # Algunos proxies administrados eliminan cabeceras X-* no
+                # registradas. El mismo token sincronizado puede viajar en el
+                # cuerpo JSON sin aparecer en URLs ni logs de acceso.
+                try:
+                    payload = await request.json()
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict):
+                    supplied = str(payload.get("_csrf_token", ""))
             if not hmac.compare_digest(supplied, str(session.get("csrf_token", ""))):
                 return _security_headers(JSONResponse({"detail": "Token de seguridad CSRF no válido"}, status_code=403))
         request.state.auth_session = session

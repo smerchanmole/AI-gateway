@@ -223,6 +223,14 @@ plataforma. Si Cloudera evalúa el fichero como una celda sin `__file__`, se tom
 como raíz el directorio de trabajo. Cualquier fallo de `venv` o `pip` cancela el
 arranque con un mensaje explícito. La instalación manual sigue siendo
 recomendable en local para preparar el entorno con antelación.
+
+El bootstrap fuerza `pip --no-user` dentro del entorno privado. Cloudera puede
+definir `PIP_USER=1` para proteger el runtime compartido, pero esa modalidad no
+es válida dentro de un `venv`. Se conservan, en cambio, las variables de índice
+y proxy de `pip` necesarias para repositorios corporativos. Antes de relanzar,
+se eliminan `PYTHONPATH` y `PYTHONHOME` heredados y se activa
+`PYTHONNOUSERSITE=1`, impidiendo que módulos de `/usr/local` o `~/.local`
+se adelanten a los instalados dentro de `.venv`.
 Si Cloudera evalúa `app.py` como una celda y no define `__file__`, el bootstrap
 usa el directorio de trabajo del proyecto para localizar `requirements.txt`.
 
@@ -1004,6 +1012,8 @@ Swagger autenticado: <https://127.0.0.1:8081/api/docs>
 - La contraseña se almacena como hash **Argon2id** con sal aleatoria, nunca en claro.
 - Las sesiones duran ocho horas: la cookie es opaca, `HttpOnly`, `Secure` y `SameSite=Strict`.
 - Las operaciones de escritura exigen además un token CSRF ligado a la sesión.
+- El token CSRF viaja en cabecera y, como respaldo para proxies Cloudera que
+  filtren cabeceras personalizadas, dentro del cuerpo JSON; nunca en la URL.
 - Tras cinco intentos fallidos desde una IP, el login se bloquea durante 15 minutos.
 - Cambiar la contraseña invalida todas las demás sesiones activas.
 - En local, el panel usa HTTPS autofirmado y cabeceras CSP/HSTS; en Cloudera, el proxy de la plataforma termina TLS y el servicio interno queda limitado a `127.0.0.1`.

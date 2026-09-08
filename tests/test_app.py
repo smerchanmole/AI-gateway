@@ -16,7 +16,9 @@ def test_dependency_bootstrap_runs_before_external_imports():
     assert 'globals().get("__file__")' in source
     assert "Path.cwd().resolve()" in source
     assert 'VENV_DIR = BOOTSTRAP_ROOT / ".venv"' in source
-    assert "os.execv" in source
+    assert "os.execve" in source
+    assert 'runtime_environment.pop("PYTHONPATH", None)' in source
+    assert 'runtime_environment["PYTHONNOUSERSITE"] = "1"' in source
 
 
 @pytest.fixture
@@ -191,6 +193,17 @@ def test_api_requires_login_and_rejects_csrf(tmp_path, monkeypatch):
     assert login.status_code == 200
     assert login.cookies.get(store.cookie_name)
     assert browser.post("/api/gateway/stop").status_code == 403
+
+
+def test_csrf_json_fallback_survives_proxy_header_filter(monkeypatch, client):
+    """El proxy puede retirar X-CSRF-Token sin inutilizar operaciones seguras."""
+    csrf_token = client.headers.pop("X-CSRF-Token")
+    monkeypatch.setattr(dashboard.manager, "stop", lambda: {"process_alive": False})
+
+    response = client.post("/api/gateway/stop", json={"_csrf_token": csrf_token})
+
+    assert response.status_code == 200
+    assert response.json()["process_alive"] is False
 
 
 def test_initial_password_must_be_changed_and_hash_is_persisted(tmp_path):
