@@ -8,26 +8,52 @@ mantiene los endpoints pequeños, comprobables y fáciles de leer.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
+from contextlib import suppress
 import os
 from pathlib import Path
+import re
 import time
+from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from gateway.core import GatewayManager
-from gateway.log_store import read_logs
+from gateway.cloudera import ClouderaCatalog
+from gateway.excel_export import build_logs_xlsx
+from gateway.log_store import available_days, log_kpis, parse_day, read_day_logs
 
 
 ROOT = Path(__file__).resolve().parent
 # Las claves permanecen fuera del YAML y de Git, pero se heredan al proxy hijo.
 load_dotenv(ROOT / ".env")
 manager = GatewayManager(ROOT)
+cloudera = ClouderaCatalog(ROOT / "runtime")
+
+
+def refresh_cloudera_tokens() -> None:
+    """Renueva secretos y reinicia el proxy sólo cuando cambió alguno."""
+    results = cloudera.renew_due_tokens()
+    if any(item.get("renewed") for item in results) and manager.process_alive():
+        manager.stop()
+        manager.start()
+
+
+async def cloudera_token_supervisor() -> None:
+    """Reintenta cada minuto; una incidencia aislada no detiene el supervisor."""
+    while True:
+        try:
+            await asyncio.to_thread(refresh_cloudera_tokens)
+        except Exception:
+            # El detalle queda persistido por ClouderaCatalog y visible en UI.
+            pass
+        await asyncio.sleep(60)
 
 
 def gateway_auth_headers() -> dict[str, str]:
@@ -41,9 +67,15 @@ def gateway_auth_headers() -> dict[str, str]:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Garantiza que el proxy hijo no sobreviva accidentalmente al panel."""
-    yield
-    # El proxy es hijo del panel y no debe quedar huérfano al cerrar la app.
-    manager.stop()
+    supervisor = asyncio.create_task(cloudera_token_supervisor())
+    try:
+        yield
+    finally:
+        supervisor.cancel()
+        with suppress(asyncio.CancelledError):
+            await supervisor
+        # El proxy es hijo del panel y no debe quedar huérfano al cerrar la app.
+        manager.stop()
 
 
 app = FastAPI(title="IA Gateway", docs_url="/api/docs", lifespan=lifespan)
@@ -61,15 +93,119 @@ async def disable_dashboard_cache(request, call_next):
 
 
 class ModelState(BaseModel):
+    """Contrato mínimo para activar o desactivar un alias desde la interfaz."""
+
     enabled: bool
 
 
 class TestCall(BaseModel):
+    """Texto introducido en «Prueba rápida»; el backend decide chat o embedding."""
+
     prompt: str
+
+
+class ConfigUpdate(BaseModel):
+    """Edición completa del YAML y decisión de aplicarla inmediatamente."""
+
+    content: str
+    restart: bool = True
+
+
+class ModelCreate(BaseModel):
+    """Representación segura del formulario CRUD de modelos.
+
+    ``api_key_env`` contiene el *nombre* de una variable, nunca el secreto. Los
+    campos vacíos se omiten al serializar para no imponer opciones innecesarias
+    a LiteLLM. ``restart`` permite guardar varios cambios y aplicarlos juntos.
+    """
+
+    model_name: str
+    model: str
+    api_base: str = ""
+    api_key_env: str = ""
+    reasoning_effort: str = ""
+    keep_alive: str = ""
+    timeout: Optional[float] = None
+    fallback_model: str = ""
+    drop_params: bool = True
+    restart: bool = True
+
+
+class GuardrailUpdate(BaseModel):
+    """Política transversal: avisar y continuar (`warn`) o bloquear (`block`)."""
+
+    enabled: bool
+    model: str = ""
+    policy: str = "warn"
+    restart: bool = True
+
+
+class ClouderaConnection(BaseModel):
+    """Datos de conexión y renovación para una instalación Cloudera.
+
+    El modelo admite Public Cloud y Private Cloud/on-premise. Los campos de
+    contraseña, clave privada y token sólo viajan navegador→servidor y jamás se
+    devuelven en las respuestas de lectura.
+    """
+
+    name: str = ""
+    kind: str
+    url: str
+    token: str = ""
+    platform: str = "cloud"
+    probe_interval_minutes: int = 5
+    workload_user: str = ""
+    workload_password: str = ""
+    cdp_access_key_id: str = ""
+    cdp_private_key: str = ""
+    renewal_url: str = ""
+    workload_name: str = "DE"
+
+
+class ClouderaTokenRenewal(BaseModel):
+    """Permite forzar una renovación aunque todavía queden más de diez minutos."""
+
+    force: bool = False
+
+
+class ClouderaModelToken(BaseModel):
+    """Credencial opcional y específica de un endpoint descubierto."""
+
+    token: str
+
+
+class ClouderaModelProbe(BaseModel):
+    """Metadatos necesarios para reproducir el contrato publicado por Cloudera."""
+
+    external_id: str
+    url: str
+    protocol: str
+    model_name: str = ""
+    task: str = ""
+    has_chat_template: bool = True
+
+
+def _model_entry(model: ModelCreate) -> dict[str, object]:
+    """Traduce el formulario a YAML sin aceptar claves secretas en claro."""
+    name = model.model_name.strip()
+    provider_model = model.model.strip()
+    if not name or not provider_model:
+        raise RuntimeError("Alias y modelo LiteLLM son obligatorios")
+    if model.api_key_env and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", model.api_key_env.strip()):
+        raise RuntimeError("La variable API key debe tener formato MAYUSCULAS_CON_GUIONES_BAJOS")
+    params: dict[str, object] = {"model": provider_model, "drop_params": model.drop_params}
+    if model.api_base.strip(): params["api_base"] = model.api_base.strip()
+    if model.api_key_env.strip(): params["api_key"] = f"os.environ/{model.api_key_env.strip()}"
+    if model.reasoning_effort: params["reasoning_effort"] = model.reasoning_effort
+    if model.keep_alive.strip(): params["keep_alive"] = model.keep_alive.strip()
+    if model.timeout is not None: params["timeout"] = model.timeout
+    return {"model_name": name, "litellm_params": params}
 
 
 @app.get("/", include_in_schema=False)
 def home():
+    """Entrega la SPA estática; el resto de recursos cuelgan de ``/static``."""
+
     return FileResponse(ROOT / "static" / "index.html")
 
 
@@ -92,6 +228,184 @@ def models():
 def model_resources():
     """Separa métricas locales de proveedores remotos no observables."""
     return manager.model_resources()
+
+
+@app.get("/api/config")
+def get_config():
+    """Entrega el YAML fuente; nunca expande variables de entorno ni secretos."""
+    return {"content": manager.config_text(), "dashboard_settings": manager.dashboard_settings()}
+
+
+@app.get("/api/cloudera/connections")
+def cloudera_connections():
+    """Lista conexiones saneadas: muestra presencia/caducidad, nunca secretos."""
+
+    return cloudera.connections()
+
+
+@app.post("/api/cloudera/connections")
+def save_cloudera_connection(connection: ClouderaConnection):
+    """Valida, normaliza y persiste una nueva conexión Cloudera."""
+
+    try:
+        return cloudera.save_connection(connection.name, connection.kind, connection.url, connection.token,
+            connection.platform, connection.probe_interval_minutes, connection.workload_user,
+            connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
+            connection.renewal_url, connection.workload_name)
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/cloudera/connections/{connection_id}")
+def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection):
+    """Actualiza una conexión conservando los secretos cuyos campos estén vacíos."""
+
+    try:
+        return cloudera.update_connection(connection_id, connection.name, connection.kind, connection.url, connection.token,
+            connection.platform, connection.probe_interval_minutes, connection.workload_user,
+            connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
+            connection.renewal_url, connection.workload_name)
+    except KeyError as exc:
+        raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/cloudera/connections/{connection_id}/renew-token")
+def renew_cloudera_token(connection_id: str, request: ClouderaTokenRenewal):
+    """Renueva un CDP token y recarga LiteLLM si la credencial cambió."""
+
+    try:
+        result = cloudera.renew_token(connection_id, force=request.force)
+        if result["renewed"] and manager.process_alive():
+            manager.stop(); manager.start()
+            result["litellm_restarted"] = True
+        return result
+    except KeyError as exc:
+        raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete("/api/cloudera/connections/{connection_id}", status_code=204)
+def delete_cloudera_connection(connection_id: str):
+    """Elimina conexión y tokens por-modelo asociados a su identificador."""
+
+    cloudera.delete_connection(connection_id)
+
+
+@app.post("/api/cloudera/connections/{connection_id}/discover")
+def discover_cloudera(connection_id: str):
+    """Consulta APIs Cloudera y normaliza endpoints heterogéneos para la UI."""
+
+    try:
+        return cloudera.discover(connection_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.put("/api/cloudera/connections/{connection_id}/models/{external_id}/token")
+def save_cloudera_model_token(connection_id: str, external_id: str, credential: ClouderaModelToken):
+    """Guarda una credencial particular cuando el CDP token general no basta."""
+
+    if not credential.token.strip(): raise HTTPException(422, "El token del modelo está vacío")
+    try:
+        variable = cloudera.save_model_token(connection_id, external_id, credential.token)
+        return {"api_key_env": variable, "saved": True,
+                **cloudera.model_token_status(connection_id, external_id)}
+    except KeyError as exc:
+        raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/cloudera/connections/{connection_id}/probe-model")
+def probe_cloudera_model(connection_id: str, model: ClouderaModelProbe):
+    """Realiza una prueba mínima con la URL y el tipo de tarea descubiertos."""
+
+    try:
+        return cloudera.probe_model(connection_id, model.external_id, model.url, model.protocol,
+                                    model.model_name, model.task, model.has_chat_template)
+    except KeyError as exc:
+        raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/config/guardrail")
+def update_guardrail(update: GuardrailUpdate):
+    """Cambia el clasificador global y su política, con reinicio transaccional."""
+
+    try:
+        return manager.set_guardrail(update.enabled, update.model.strip(), update.policy, restart=update.restart)
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/config")
+def update_config(update: ConfigUpdate):
+    """Valida y aplica la edición completa con reinicio transaccional."""
+    try:
+        return manager.update_config(update.content, restart=update.restart)
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/config/validate")
+def validate_config(update: ConfigUpdate):
+    """Valida sin escribir ni reiniciar, útil para el editor avanzado."""
+    try:
+        return manager.validate_config_text(update.content)
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/config/apply")
+def apply_config():
+    """Aplica una configuración que se guardó posponiendo el reinicio."""
+    try:
+        return manager.apply_pending_config()
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+@app.post("/api/config/models")
+def create_model(model: ModelCreate):
+    """Construye una entrada LiteLLM sin aceptar secretos en claro."""
+    try:
+        entry = _model_entry(model)
+        if not model.fallback_model.strip() and model.restart:
+            return manager.add_model(entry)
+        return manager.add_model(entry,
+                                 fallback_model=model.fallback_model.strip(), restart=model.restart)
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/config/models/{name}")
+def edit_model(name: str, model: ModelCreate):
+    """Edita campos conocidos conservando parámetros avanzados ajenos al formulario."""
+    try:
+        entry = _model_entry(model)
+        return manager.update_model(name, entry, model.fallback_model.strip(), model.restart)
+    except KeyError as exc:
+        raise HTTPException(404, f"Modelo no encontrado: {name}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.delete("/api/config/models/{name}")
+def remove_model(name: str, restart: bool = Query(True)):
+    """Borra un alias y limpia fallbacks, estado y referencias de guardrail."""
+
+    try:
+        return manager.delete_model(name, restart=restart)
+    except KeyError as exc:
+        raise HTTPException(404, f"Modelo no encontrado: {name}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/api/gateway/start")
@@ -205,15 +519,62 @@ async def model_latency(name: str):
 
 
 @app.get("/api/models/{name}/logs")
-def logs(name: str, limit: int = Query(100, ge=1, le=500)):
+def logs(name: str, day: Optional[str] = None, limit: int = Query(500, ge=1, le=5000)):
     """Consulta eventos estructurados con un límite defensivo de filas."""
-    return read_logs(ROOT / "runtime" / "requests.sqlite3", name, limit)
+    try:
+        selected = parse_day(day)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    rows = read_day_logs(ROOT / "runtime", name, selected, limit)
+    return {"day": selected.isoformat(), "rows": rows, "kpis": log_kpis(rows)}
+
+
+@app.get("/api/models/{name}/log-days")
+def log_days(name: str):
+    """Enumera jornadas disponibles para un alias, de más reciente a más antigua."""
+
+    return {"days": available_days(ROOT / "runtime", name)}
+
+
+@app.get("/api/models/{name}/logs.xlsx")
+def export_logs(name: str, day: Optional[str] = None):
+    """Genera en memoria el Excel operativo de una jornada y un modelo."""
+
+    try:
+        selected = parse_day(day)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    rows = read_day_logs(ROOT / "runtime", name, selected, 50_000)
+    content = build_logs_xlsx(name, selected.isoformat(), rows, log_kpis(rows))
+    filename = re.sub(r"[^A-Za-z0-9_.-]", "_", f"logs-{name}-{selected.isoformat()}.xlsx")
+    return Response(content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/api/process-log", response_class=PlainTextResponse)
-def process_log():
+def process_log(day: Optional[str] = None):
     """Muestra stdout/stderr de LiteLLM para diagnosticar fallos de arranque."""
-    return manager.process_log(200)
+    try:
+        return manager.process_log(500, parse_day(day))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/process-log-days")
+def process_log_days():
+    """Enumera ficheros diarios de stdout/stderr del proceso LiteLLM."""
+
+    return {"days": manager.process_log_days()}
+
+
+@app.delete("/api/process-log", status_code=204)
+def clear_process_log(day: Optional[str] = None):
+    """Vacía sólo el log técnico elegido; no borra trazas estructuradas."""
+
+    try:
+        manager.clear_process_log(parse_day(day))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 if __name__ == "__main__":

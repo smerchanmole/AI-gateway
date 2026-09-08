@@ -1,10 +1,32 @@
-Creamos un entorno virtual
-python -m venv litellm
-cambiamos a ese entorno
-source litellm/bin/activate
+GUÍA RÁPIDA DE INSTALACIÓN
+==========================
 
-luego pip install 'litellm[proxy]'
+Este fichero es una chuleta para terminal. README.md es la documentación
+canónica y explica arquitectura, seguridad, YAML, Ollama, Cloudera y capacidad.
 
-comprobamos
-litellm --version
-para ejecutar el streamlit poner streamlit run dashboard.py
+1. Crear y activar el entorno aislado:
+
+   python3 -m venv .venv
+   source .venv/bin/activate
+
+2. Instalar exactamente las dependencias del proyecto:
+
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+
+3. Crear `.env` a partir de `.env.example` y rellenar, como mínimo:
+
+   LITELLM_MASTER_KEY=<clave larga y aleatoria del gateway>
+   OPENAI_API_KEY=<sólo si se usan modelos OpenAI>
+
+4. Revisar `config.yaml`. Nunca edites `runtime/active_config.yaml`: es una
+   copia generada automáticamente.
+
+5. Arrancar el panel:
+
+   ./start.sh
+
+6. Abrir http://127.0.0.1:5100 y pulsar «Arrancar».
+
+El panel escucha en 5100. Las aplicaciones consumidoras llaman al gateway
+OpenAI-compatible en http://127.0.0.1:4000/v1 usando LITELLM_MASTER_KEY.

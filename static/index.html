@@ -1,64 +1,58 @@
 <!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>IA Gateway</title>
-  <link rel="stylesheet" href="/static/style.css?v=beta-5">
-</head>
-<body>
-  <main>
-    <!-- Cabecera operativa: estado y control del proceso LiteLLM. -->
-    <header>
-      <div><p class="eyebrow">CONTROL LOCAL</p><h1>IA Gateway</h1><p class="subtitle">Panel de LiteLLM · <code>localhost:4000</code></p></div>
-      <div class="gateway-control">
-        <div class="status-wrap">
-          <span id="status" class="status"><i></i><span>Comprobando…</span></span>
-          <span id="resources" class="resources">CPU — · RAM —</span>
-        </div>
-        <button id="gateway-button" class="primary" disabled>Arrancar</button>
-      </div>
-    </header>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IA Gateway</title><link rel="stylesheet" href="/static/style.css?v=baseline-1"></head>
+<body><main>
+  <!-- Cabecera operativa: proceso, puerto, PID y recursos del gateway. -->
+  <header>
+    <div><p class="eyebrow">CONTROL LOCAL</p><h1>IA Gateway</h1><p class="subtitle">Panel de LiteLLM · <code>localhost:4000</code></p></div>
+    <div class="gateway-control"><div class="status-wrap"><span id="status" class="status"><i></i><span>Comprobando…</span></span><span id="resources" class="resources">CPU — · RAM —</span></div><button id="apply-config-button" class="secondary pending-button" hidden>Aplicar cambios</button><button id="gateway-button" class="primary" disabled>Arrancar</button></div>
+  </header>
 
-    <!-- Inventario de modelos cargados desde config.yaml. -->
-    <section>
-      <div class="section-title"><div><h2>Modelos</h2><p>Configurados en <code>config.yaml</code></p></div><span id="model-count"></span></div>
-      <div id="models" class="model-grid"><p class="empty">Cargando modelos…</p></div>
+  <!-- Las tres áreas son vistas de una sola SPA; JavaScript conserva ?tab=. -->
+  <nav class="primary-tabs" aria-label="Secciones principales">
+    <button class="primary-tab active" data-view="models" aria-pressed="true">Modelos</button>
+    <button class="primary-tab" data-view="config" aria-pressed="false">Configuración</button>
+    <button class="primary-tab" data-view="logs" aria-pressed="false">Logs</button>
+  </nav>
+
+  <!-- MODELOS: inventario, recursos y prueba real a través del gateway. -->
+  <div id="view-models" class="page-view">
+    <section><div class="section-title"><div><h2>Modelos</h2><p>Inventario y estado operativo</p></div><span id="model-count"></span></div><div id="models" class="model-grid"><p class="empty">Cargando modelos…</p></div></section>
+    <section class="test-section"><div class="section-title"><div><h2>Prueba rápida</h2><p>Envía una llamada sencilla a cualquiera de los modelos activos</p></div></div><div class="test-panel"><nav id="test-tabs" class="tabs test-tabs"></nav><textarea id="test-prompt" rows="4" placeholder="Escribe aquí el mensaje de prueba…"></textarea><div class="test-actions"><div class="test-hint"><span id="test-mode" class="mode-badge"></span><span id="test-help"></span></div><button id="test-button" class="primary">Enviar prueba</button></div><div id="test-result" class="test-result" hidden><div class="result-head"><span>Resultado</span><span id="test-time"></span></div><pre></pre></div></div></section>
+  </div>
+
+  <!-- CONFIGURACIÓN: CRUD guiado, guardrail, Cloudera y YAML avanzado. -->
+  <div id="view-config" class="page-view" hidden>
+    <section><div class="section-title"><div><h2>Configuración YAML</h2><p>Gestiona modelos, resiliencia y seguridad sin editar archivos a mano</p></div></div>
+      <div class="config-panel configured-panel"><div class="panel-heading"><h3>Modelos existentes</h3><span>Los secretos sólo muestran su referencia</span></div><div id="configured-models" class="config-model-list"></div></div>
+      <form id="model-form" class="config-panel"><div class="panel-heading"><h3>Añadir modelo</h3><span>Modo guiado</span></div><div class="field-grid">
+        <label>Alias<input id="config-name" required placeholder="qwen-local"></label><label>Modelo LiteLLM<input id="config-model" required placeholder="ollama/qwen3.5:9b"></label>
+        <label class="wide">API base <span>(opcional)</span><input id="config-api-base" placeholder="http://localhost:11434"></label><label>Variable API key <span>(nunca el secreto)</span><input id="config-api-key" placeholder="OPENAI_API_KEY"></label>
+        <label>Razonamiento<select id="config-reasoning"><option value="">Por defecto</option><option>low</option><option>medium</option><option>high</option></select></label><label>Keep alive<input id="config-keep-alive" placeholder="-1"></label>
+        <label>Timeout (segundos)<input id="config-timeout" type="number" min="1" step="1" placeholder="120"></label><label>Si falla, usar<select id="config-fallback"><option value="">Sin fallback</option></select></label>
+        <label class="check-field"><input id="config-drop-params" type="checkbox" checked> Descartar parámetros incompatibles</label>
+      </div><div class="config-actions"><p id="model-form-status" class="inline-status" role="status"></p><div class="action-group"><button id="cancel-model-edit" class="secondary" type="button" hidden>Cancelar edición</button><button id="save-model" class="primary" type="submit">Añadir modelo</button></div></div></form>
+
+      <div class="config-panel guardrail-panel"><div><p class="model-kicker">SEGURIDAD CONFIGURABLE</p><h3>Guardrail previo</h3><p id="guardrail-help">Clasifica cada conversación antes del modelo principal. La política permisiva avisa y continúa; la restringida bloquea riesgos y fallos de evaluación.</p></div><div class="guardrail-controls"><label class="check-field"><input id="guardrail-enabled" type="checkbox"> Activar para modelos de chat</label><label>Modelo guardrail<select id="guardrail-model"></select></label><label>Política<select id="guardrail-policy"><option value="warn">Permisiva · avisar y continuar</option><option value="block">Restringida · bloquear</option></select></label><span id="policy-chip" class="policy-chip">Política permisiva</span></div></div>
+
+      <section class="cloudera-section config-panel"><div class="panel-heading"><div><p class="model-kicker">INTEGRACIÓN OPCIONAL</p><h3>Cloudera</h3><p>Descubre Model Endpoints de AI Inference y modelos desplegados en uno o varios Workbenches.</p></div><span>Credenciales locales · nunca se muestran</span></div>
+        <form id="cloudera-connection-form" class="cloudera-form"><label>Nombre<input id="cloudera-name" placeholder="Producción EU"></label><label>Servicio<select id="cloudera-kind"><option value="inference">Cloudera AI Inference</option><option value="workbench">Cloudera AI Workbench</option></select></label><label>Instalación<select id="cloudera-platform"><option value="cloud">Cloud</option><option value="onpremise">On-premise</option></select></label><label>Comprobar cada<input id="cloudera-probe-interval" type="number" min="1" max="1440" value="5"><small>Minutos · mientras el panel esté abierto</small></label><label class="wide"><span class="label-with-help">URL base <details class="field-help"><summary aria-label="Ayuda para encontrar la URL base">?</summary><span>Busca la URL de un Model Endpoint y pega sólo el dominio, sin la ruta que empieza por <code>/namespaces/…</code>. Por ejemplo, de <code>https://ml-ejemplo.cloudera.site/namespaces/serving-default/endpoints/modelo/openai/v1</code> usa <code>https://ml-ejemplo.cloudera.site</code>. Si pegas la URL completa, la aplicación extraerá el dominio.</span></details></span><input id="cloudera-url" type="url" required placeholder="https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site" aria-describedby="cloudera-url-hint"><small id="cloudera-url-hint">Sólo protocolo y dominio. No uses la URL de console.cdp.cloudera.com.</small></label><label class="wide">CDP token o API v2 key<input id="cloudera-token" type="password" autocomplete="new-password" placeholder="Déjalo vacío al editar para conservar el actual"></label><div class="cloudera-renewal-fields"><p>Renovación automática del CDP token</p><label class="wide">URL de renovación<input id="cloudera-renewal-url" type="url" placeholder="Cloud: https://iamapi.us-west-1.altus.cloudera.com"><small>On-premise: URL completa de Knox terminada en /token.</small></label><label>Workload name<input id="cloudera-workload-name" value="DE" placeholder="DE"></label><label>WORKLOAD-USER<input id="cloudera-workload-user" autocomplete="username" placeholder="Usuario de workload"></label><label>WORKLOAD-PASS<input id="cloudera-workload-password" type="password" autocomplete="new-password" placeholder="Vacío conserva el actual"></label><label>CDP_ACCESS_KEY_ID<input id="cloudera-access-key-id" autocomplete="off" placeholder="Access key ID"></label><label>CDP_PRIVATE_KEY<input id="cloudera-private-key" type="password" autocomplete="new-password" placeholder="Vacío conserva la actual"></label></div><div class="cloudera-form-actions"><button id="cancel-cloudera-edit" class="secondary" type="button" hidden>Cancelar</button><button id="save-cloudera-connection" class="primary" type="submit">Guardar conexión</button></div><p id="cloudera-status" class="inline-status" role="status"></p></form>
+        <p class="cloudera-token-note"><b>Credenciales:</b> cada modelo puede usar su propio JWT/API key o heredar el CDP token de la conexión. Los JWT UMS son temporales; Cloudera no publica una API de renovación por modelo. Para uso estable, genera una Knox API key desde <i>Generate Key / Token</i> en Model Endpoint Details.</p>
+        <div id="cloudera-connections" class="cloudera-connections"><p class="empty">No hay conexiones Cloudera configuradas.</p></div>
+      </section>
+
+      <div class="config-panel yaml-panel"><div class="panel-heading"><h3>Editor avanzado de config.yaml</h3><span>Fuente de verdad · ancho completo</span></div><textarea id="yaml-editor" class="yaml-editor" spellcheck="false" aria-label="Contenido de config.yaml"></textarea><div class="config-actions"><p id="yaml-status" class="inline-status" role="status"></p><div class="action-group"><button id="validate-yaml" class="secondary" type="button">Validar</button><button id="save-yaml" class="primary" type="button">Validar y guardar</button></div></div></div>
+      <p class="config-note">Los cambios requieren reiniciar LiteLLM. Al guardar podrás aplicarlos ahora o dejarlos pendientes.</p>
     </section>
+  </div>
 
-    <!-- Banco de pruebas: una pestaña independiente por modelo. -->
-    <section class="test-section">
-      <div class="section-title"><div><h2>Prueba rápida</h2><p>Envía una llamada sencilla a cualquiera de los modelos activos</p></div></div>
-      <div class="test-panel">
-        <nav id="test-tabs" class="tabs test-tabs"></nav>
-        <textarea id="test-prompt" rows="4" placeholder="Escribe aquí el mensaje de prueba…"></textarea>
-        <div class="test-actions">
-          <div class="test-hint"><span id="test-mode" class="mode-badge"></span><span id="test-help">Se enviará como un mensaje de usuario.</span></div>
-          <button id="test-button" class="primary">Enviar prueba</button>
-        </div>
-        <div id="test-result" class="test-result" hidden>
-          <div class="result-head"><span>Resultado</span><span id="test-time"></span></div>
-          <pre></pre>
-        </div>
-      </div>
-    </section>
+  <div id="view-logs" class="page-view" hidden><section class="logs-section"><div class="section-title"><div><h2>Logs</h2><p>Actividad, rendimiento y trazabilidad por modelo</p></div><div class="log-toolbar"><label>Jornada<select id="log-day" aria-label="Jornada del log"></select></label><a id="download-logs" class="download-button" href="#" hidden>Descargar Excel</a><button id="clear-process-log" class="danger" hidden>Limpiar</button><button id="refresh" class="secondary">Actualizar</button></div></div><nav id="tabs" class="tabs"></nav><div id="log-dashboard" hidden><div id="log-kpis" class="kpi-grid"></div><div class="chart-panel"><div class="panel-heading"><h3>Peticiones por hora</h3><span id="chart-summary"></span></div><div id="hourly-chart" class="hourly-chart" role="img" aria-label="Peticiones por hora durante la jornada"></div></div></div><div id="logs" class="logs"><p class="empty">Selecciona un modelo.</p></div></section></div>
 
-    <!-- Observabilidad: log nativo de LiteLLM y trazas por modelo. -->
-    <section class="logs-section">
-      <div class="section-title"><div><h2>Actividad</h2><p>Contenido enviado y recibido por cada modelo</p></div><button id="refresh" class="secondary">Actualizar</button></div>
-      <nav id="tabs" class="tabs"></nav>
-      <div id="logs" class="logs"><p class="empty">Selecciona un modelo.</p></div>
-    </section>
+  <figure class="architecture-hero"><img src="/static/ia-gateway-arquitectura.png" alt="Arquitectura de IA Gateway: panel web, LiteLLM, proveedores, control, pruebas y logs"></figure>
 
-    <!-- Cierre visual: resume la arquitectura después de las áreas operativas. -->
-    <figure class="architecture-hero">
-      <img
-        src="/static/ia-gateway-beta-infografia.png"
-        alt="Arquitectura de IA Gateway: panel web, LiteLLM, OpenAI, Ollama, control, pruebas, logs y métricas"
-      >
-    </figure>
-    <p id="notice" role="alert" class="notice" hidden></p>
-  </main>
-  <script src="/static/app.js?v=beta-5"></script>
-</body>
-</html>
+  <dialog id="restart-dialog"><form method="dialog"><h3>¿Reiniciar LiteLLM ahora?</h3><p>La configuración ya está validada. El reinicio aplicará los cambios y puede interrumpir llamadas durante unos segundos.</p><div class="dialog-actions"><button value="cancel" class="secondary">Cancelar</button><button value="later" class="secondary">Guardar sin reiniciar</button><button value="restart" class="primary">Sí, guardar y reiniciar</button></div></form></dialog>
+  <dialog id="clear-log-dialog"><form method="dialog"><h3>¿Limpiar este log de LiteLLM?</h3><p>Se eliminarán las líneas de la jornada seleccionada. Los logs de peticiones de los modelos no se verán afectados.</p><div class="dialog-actions"><button value="cancel" class="secondary">Cancelar</button><button value="clear" class="danger">Sí, limpiar</button></div></form></dialog>
+  <dialog id="delete-dialog"><form method="dialog"><h3>¿Eliminar este modelo?</h3><p id="delete-message"></p><p>También se limpiarán sus fallbacks, estado y uso como guardrail. Los logs históricos se conservarán.</p><div class="dialog-actions"><button value="cancel" class="secondary">Cancelar</button><button value="delete" class="danger">Eliminar modelo</button></div></form></dialog>
+  <dialog id="delete-cloudera-dialog"><form method="dialog"><h3>¿Eliminar esta conexión?</h3><p id="delete-cloudera-message"></p><p>Se eliminarán también las credenciales de modelos asociadas. Los modelos ya incorporados a config.yaml no se borrarán.</p><div class="dialog-actions"><button value="cancel" class="secondary">Cancelar</button><button value="delete" class="danger">Eliminar conexión</button></div></form></dialog>
+  <p id="notice" role="alert" class="notice" hidden></p>
+</main><script src="/static/app.js?v=baseline-1"></script></body></html>

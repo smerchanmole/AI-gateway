@@ -14,8 +14,11 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any
@@ -36,10 +39,35 @@ class GatewayManager:
         self.state_file = self.runtime_dir / "state.json"
         self.pid_file = self.runtime_dir / "litellm.pid"
         self.output_log = self.runtime_dir / "litellm-process.log"
+        self.dashboard_settings_file = self.runtime_dir / "dashboard_settings.json"
+        self.restart_pending_file = self.runtime_dir / "config-restart-pending"
         self.port = 4000
         self._metric_processes: dict[int, psutil.Process] = {}
         self._ollama_metric_processes: dict[int, psutil.Process] = {}
+        self._config_lock = threading.RLock()
         self.runtime_dir.mkdir(exist_ok=True)
+
+    def process_log_path(self, day: date | None = None) -> Path:
+        """Calcula el fichero técnico diario usando el calendario de Madrid."""
+
+        selected = day or datetime.now(ZoneInfo("Europe/Madrid")).date()
+        path = self.runtime_dir / "logs" / f"litellm-{selected.isoformat()}.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def clear_process_log(self, day: date | None = None) -> None:
+        """Vacía únicamente la jornada elegida, sin tocar logs de modelos."""
+        self.process_log_path(day).write_text("", encoding="utf-8")
+
+    def _capture_process_output(self, process: subprocess.Popen) -> None:
+        """Añade hora Madrid a cada línea emitida por LiteLLM."""
+        if process.stdout is None:
+            return
+        with self.process_log_path().open("a", encoding="utf-8") as output:
+            for line in process.stdout:
+                stamp = datetime.now(ZoneInfo("Europe/Madrid")).isoformat(timespec="milliseconds")
+                output.write(f"[{stamp}] {line}")
+                output.flush()
 
     def _source(self) -> dict[str, Any]:
         """Carga y valida la forma mínima del contrato YAML del usuario."""
@@ -49,6 +77,224 @@ class GatewayManager:
         if not isinstance(data.get("model_list", []), list):
             raise RuntimeError("config.yaml debe contener una lista 'model_list'")
         return data
+
+    @staticmethod
+    def _validate_config(data: Any) -> dict[str, Any]:
+        """Valida el contrato editable antes de tocar la fuente de verdad."""
+        if not isinstance(data, dict):
+            raise RuntimeError("El YAML debe contener un objeto en el nivel raíz")
+        model_list = data.get("model_list")
+        if not isinstance(model_list, list):
+            raise RuntimeError("El YAML debe contener una lista 'model_list'")
+        names: list[str] = []
+        for position, entry in enumerate(model_list, start=1):
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"El modelo {position} debe ser un objeto YAML")
+            name = str(entry.get("model_name") or "").strip()
+            params = entry.get("litellm_params")
+            if not name:
+                raise RuntimeError(f"El modelo {position} no tiene 'model_name'")
+            if not isinstance(params, dict) or not str(params.get("model") or "").strip():
+                raise RuntimeError(f"El modelo '{name}' necesita 'litellm_params.model'")
+            names.append(name)
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise RuntimeError(f"Alias duplicados: {', '.join(duplicates)}")
+        for mapping in (data.get("router_settings") or {}).get("fallbacks", []):
+            if not isinstance(mapping, dict):
+                raise RuntimeError("Cada fallback debe ser un mapa alias: [alternativas]")
+            for source, alternatives in mapping.items():
+                if source not in names or not isinstance(alternatives, list) or any(item not in names for item in alternatives):
+                    raise RuntimeError(f"Fallback no válido para '{source}': usa alias existentes")
+        guardrail = (data.get("dashboard_settings") or {}).get("guardrail", {})
+        if guardrail.get("enabled") and guardrail.get("model") not in names:
+            raise RuntimeError("El modelo guardrail debe ser un alias existente")
+        return data
+
+    def validate_config_text(self, content: str) -> dict[str, Any]:
+        """Analiza el YAML sin modificarlo y resume lo que se aplicaría."""
+        if len(content.encode("utf-8")) > 1_000_000:
+            raise RuntimeError("El YAML no puede superar 1 MB")
+        try:
+            parsed = yaml.safe_load(content)
+        except yaml.YAMLError as exc:
+            raise RuntimeError(f"YAML no válido: {exc}") from exc
+        config = self._validate_config(parsed)
+        referenced: set[str] = set()
+
+        def visit(value: Any) -> None:
+            """Recorre contenedores YAML y acumula referencias de entorno."""
+
+            if isinstance(value, dict):
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+            elif isinstance(value, str) and value.startswith("os.environ/"):
+                referenced.add(value.removeprefix("os.environ/"))
+
+        visit(config)
+        names = [str(item["model_name"]) for item in config["model_list"]]
+        from gateway.cloudera import ClouderaCatalog
+        local_credentials = ClouderaCatalog(self.runtime_dir).environment()
+        return {"valid": True, "model_count": len(names), "models": names,
+                "missing_environment_variables": sorted(v for v in referenced if not os.environ.get(v) and not local_credentials.get(v))}
+
+    def config_text(self) -> str:
+        """Devuelve el YAML fuente, incluidos comentarios y formato manual."""
+        return self.source_config.read_text(encoding="utf-8")
+
+    def dashboard_settings(self) -> dict[str, Any]:
+        """Expone sólo opciones propias del panel conservadas en el YAML fuente."""
+
+        return dict(self._source().get("dashboard_settings") or {})
+
+    def set_guardrail(self, enabled: bool, model: str, policy: str = "warn", restart: bool = True) -> dict[str, Any]:
+        """Configura el filtro global y reutiliza la actualización transaccional."""
+
+        with self._config_lock:
+            config = self._source()
+            names = {str(item.get("model_name")) for item in config.get("model_list", [])}
+            if enabled and model not in names:
+                raise RuntimeError("Selecciona un modelo guardrail existente")
+            if policy not in {"warn", "block"}:
+                raise RuntimeError("La política del guardrail debe ser permisiva o restringida")
+            config["dashboard_settings"] = {"guardrail": {
+                "enabled": enabled, "model": model, "policy": policy, "timeout": 8,
+            }}
+            return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
+
+    def update_config(self, content: str, restart: bool = True) -> dict[str, Any]:
+        """Valida, sustituye atómicamente y reinicia con rollback ante error."""
+        self.validate_config_text(content)
+
+        with self._config_lock:
+            previous = self.config_text()
+            was_running = self.process_alive()
+            if was_running and restart:
+                self.stop()
+            temp = self.source_config.with_suffix(".yaml.tmp")
+            temp.write_text(content.rstrip() + "\n", encoding="utf-8")
+            temp.replace(self.source_config)
+            try:
+                if was_running and restart:
+                    self.start()
+            except RuntimeError as exc:
+                temp.write_text(previous, encoding="utf-8")
+                temp.replace(self.source_config)
+                recovery = ""
+                try:
+                    self.start()
+                except RuntimeError:
+                    recovery = " No se pudo recuperar automáticamente el gateway anterior."
+                raise RuntimeError(f"La configuración fue rechazada y se restauró la anterior.{recovery} {exc}") from exc
+            if was_running and not restart:
+                self.restart_pending_file.touch()
+            elif restart:
+                self.restart_pending_file.unlink(missing_ok=True)
+            return {"content": self.config_text(), "restarted": was_running and restart,
+                    "restart_pending": self.restart_pending_file.exists()}
+
+    def add_model(self, entry: dict[str, Any], fallback_model: str = "", restart: bool = True) -> dict[str, Any]:
+        """Añade un modelo mediante el mismo camino transaccional del editor."""
+        with self._config_lock:
+            config = self._source()
+            name = str(entry.get("model_name") or "").strip()
+            if any(str(item.get("model_name")) == name for item in config.get("model_list", [])):
+                raise RuntimeError(f"Ya existe un modelo con el alias '{name}'")
+            config.setdefault("model_list", []).append(entry)
+            if fallback_model:
+                names = {str(item.get("model_name")) for item in config["model_list"]}
+                if fallback_model not in names or fallback_model == name:
+                    raise RuntimeError("El fallback debe ser otro alias existente")
+                config.setdefault("router_settings", {}).setdefault("fallbacks", []).append({name: [fallback_model]})
+            content = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+            return self.update_config(content, restart=restart)
+
+    @staticmethod
+    def _set_fallback(config: dict[str, Any], source: str, target: str) -> None:
+        """Sustituye el fallback de un alias sin alterar los de otros modelos."""
+        router = config.setdefault("router_settings", {})
+        existing = router.get("fallbacks", [])
+        router["fallbacks"] = [item for item in existing if not (isinstance(item, dict) and source in item)]
+        if target:
+            router["fallbacks"].append({source: [target]})
+        if not router["fallbacks"]:
+            router.pop("fallbacks", None)
+        if not router:
+            config.pop("router_settings", None)
+
+    def update_model(self, current_name: str, entry: dict[str, Any], fallback_model: str = "",
+                     restart: bool = True) -> dict[str, Any]:
+        """Modifica un modelo y repara todas las referencias si cambia el alias."""
+        with self._config_lock:
+            config = self._source()
+            models = config.get("model_list", [])
+            index = next((i for i, item in enumerate(models) if str(item.get("model_name")) == current_name), None)
+            if index is None:
+                raise KeyError(current_name)
+            new_name = str(entry.get("model_name") or "").strip()
+            if new_name != current_name and any(str(item.get("model_name")) == new_name for item in models):
+                raise RuntimeError(f"Ya existe un modelo con el alias '{new_name}'")
+            old_params = dict(models[index].get("litellm_params") or {})
+            new_params = dict(entry.get("litellm_params") or {})
+            managed = {"model", "api_base", "api_key", "reasoning_effort", "keep_alive", "timeout", "drop_params"}
+            if "api_key" not in new_params and old_params.get("api_key"):
+                managed.remove("api_key")
+            models[index] = {**models[index], "model_name": new_name,
+                             "litellm_params": {**{k: v for k, v in old_params.items() if k not in managed}, **new_params}}
+            router = config.get("router_settings") or {}
+            for mapping in router.get("fallbacks", []):
+                if isinstance(mapping, dict):
+                    if current_name in mapping and new_name != current_name:
+                        mapping[new_name] = mapping.pop(current_name)
+                    for source, targets in mapping.items():
+                        if isinstance(targets, list):
+                            mapping[source] = [new_name if target == current_name else target for target in targets]
+            self._set_fallback(config, new_name, fallback_model)
+            guardrail = (config.get("dashboard_settings") or {}).get("guardrail", {})
+            if guardrail.get("model") == current_name:
+                guardrail["model"] = new_name
+            disabled = set(self._state().get("disabled_models", []))
+            if current_name in disabled:
+                disabled.remove(current_name); disabled.add(new_name); self._write_state(disabled)
+            return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
+
+    def delete_model(self, name: str, restart: bool = True) -> dict[str, Any]:
+        """Elimina el alias y limpia fallbacks, guardrail y estado asociados."""
+        with self._config_lock:
+            config = self._source()
+            before = len(config.get("model_list", []))
+            config["model_list"] = [item for item in config.get("model_list", []) if str(item.get("model_name")) != name]
+            if len(config["model_list"]) == before:
+                raise KeyError(name)
+            router = config.get("router_settings") or {}
+            cleaned = []
+            for mapping in router.get("fallbacks", []):
+                if not isinstance(mapping, dict) or name in mapping:
+                    continue
+                revised = {source: [target for target in targets if target != name]
+                           for source, targets in mapping.items() if isinstance(targets, list)}
+                cleaned.extend([{source: targets} for source, targets in revised.items() if targets])
+            if cleaned:
+                router["fallbacks"] = cleaned
+            else:
+                router.pop("fallbacks", None)
+            guardrail = (config.get("dashboard_settings") or {}).get("guardrail", {})
+            if guardrail.get("model") == name:
+                guardrail.update({"enabled": False, "model": ""})
+            disabled = set(self._state().get("disabled_models", [])); disabled.discard(name); self._write_state(disabled)
+            return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
+
+    def apply_pending_config(self) -> dict[str, Any]:
+        """Reinicia explícitamente una configuración guardada sin aplicar."""
+        with self._config_lock:
+            if self.process_alive():
+                self.stop()
+                self.start()
+            self.restart_pending_file.unlink(missing_ok=True)
+            return self.status()
 
     def _state(self) -> dict[str, Any]:
         """Lee estado efímero; ante corrupción vuelve a un estado seguro vacío."""
@@ -63,8 +309,13 @@ class GatewayManager:
     def models(self) -> list[dict[str, Any]]:
         """Proyecta el YAML en datos de UI sin exponer parámetros sensibles."""
         disabled = set(self._state().get("disabled_models", []))
+        source = self._source()
+        fallback_map: dict[str, list[str]] = {}
+        for mapping in (source.get("router_settings") or {}).get("fallbacks", []):
+            if isinstance(mapping, dict):
+                fallback_map.update({str(k): [str(v) for v in values] for k, values in mapping.items() if isinstance(values, list)})
         result = []
-        for entry in self._source().get("model_list", []):
+        for entry in source.get("model_list", []):
             name = str(entry.get("model_name", "sin-nombre"))
             params = entry.get("litellm_params") or {}
             provider_model = str(params.get("model", ""))
@@ -75,6 +326,13 @@ class GatewayManager:
                 "name": name,
                 "provider_model": provider_model,
                 "api_base": params.get("api_base", ""),
+                "api_key": (params.get("api_key", "") if str(params.get("api_key", "")).startswith("os.environ/")
+                            else ("Configurada (oculta)" if params.get("api_key") else "")),
+                "reasoning_effort": params.get("reasoning_effort", ""),
+                "keep_alive": params.get("keep_alive", ""),
+                "timeout": params.get("timeout", ""),
+                "drop_params": bool(params.get("drop_params", False)),
+                "fallbacks": fallback_map.get(name, []),
                 "enabled": name not in disabled,
                 "mode": "embedding" if "embedding" in searchable_name or "bge-" in searchable_name else "chat",
             })
@@ -156,6 +414,8 @@ class GatewayManager:
         return round(memory.available / memory.total * 100, 1) if memory.total else None
 
     def _write_state(self, disabled: set[str]) -> None:
+        """Persiste la lista de aliases apagados mediante sustitución atómica."""
+
         temp = self.state_file.with_suffix(".tmp")
         temp.write_text(json.dumps({"disabled_models": sorted(disabled)}, indent=2), encoding="utf-8")
         temp.replace(self.state_file)
@@ -165,6 +425,8 @@ class GatewayManager:
         referenced: set[str] = set()
 
         def visit(value: Any) -> None:
+            """Busca referencias ``os.environ`` dentro de estructuras anidadas."""
+
             if isinstance(value, dict):
                 for child in value.values():
                     visit(child)
@@ -175,16 +437,35 @@ class GatewayManager:
                 referenced.add(value.removeprefix("os.environ/"))
 
         visit(self._source())
-        return sorted(name for name in referenced if not os.environ.get(name))
+        from gateway.cloudera import ClouderaCatalog
+        local_credentials = ClouderaCatalog(self.runtime_dir).environment()
+        return sorted(name for name in referenced if not os.environ.get(name) and not local_credentials.get(name))
 
     def _write_active_config(self) -> None:
         """Genera una configuración filtrada y carga el callback junto a ella."""
         config = self._source()
+        dashboard_settings = config.pop("dashboard_settings", {}) or {}
         disabled = set(self._state().get("disabled_models", []))
         config["model_list"] = [
             item for item in config.get("model_list", [])
             if item.get("model_name") not in disabled
         ]
+        # Los endpoints OpenAI-compatible de Cloudera validan estrictamente el
+        # identificador interno del modelo. Conservamos aquí la traducción para
+        # que el callback sustituya el alias sólo después de que el router haya
+        # elegido el deployment correcto.
+        provider_models: dict[str, str] = {}
+        for item in config["model_list"]:
+            params = item.get("litellm_params") or {}
+            provider_model = str(params.get("model") or "")
+            api_key = str(params.get("api_key") or "")
+            if provider_model.startswith("openai/") and api_key.startswith("os.environ/CLOUDERA_"):
+                public_alias = str(item.get("model_name") or "")
+                if public_alias:
+                    provider_models[public_alias] = provider_model
+                # `extra_body.model` no sustituye el campo superior que genera
+                # el SDK OpenAI y puede producir dos valores contradictorios.
+                params.pop("extra_body", None)
         settings = dict(config.get("litellm_settings") or {})
         current_callbacks = settings.get("callbacks", [])
         if isinstance(current_callbacks, str):
@@ -193,6 +474,17 @@ class GatewayManager:
         callback = "litellm_callback.dashboard_logger"
         settings["callbacks"] = list(dict.fromkeys([*current_callbacks, callback]))
         config["litellm_settings"] = settings
+        guardrail = dict(dashboard_settings.get("guardrail") or {})
+        guardrail_name = guardrail.get("model")
+        guardrail_entry = next((item for item in config.get("model_list", []) if item.get("model_name") == guardrail_name), None)
+        if guardrail_entry:
+            params = guardrail_entry.get("litellm_params") or {}
+            guardrail["provider_model"] = str(params.get("model", "")).removeprefix("ollama/")
+            guardrail["api_base"] = params.get("api_base", "http://localhost:11434")
+        self.dashboard_settings_file.write_text(
+            json.dumps({"guardrail": guardrail, "provider_models": provider_models}, indent=2),
+            encoding="utf-8",
+        )
         shutil.copy2(Path(__file__).with_name("litellm_callback.py"), self.runtime_dir / "litellm_callback.py")
         self.active_config.write_text(
             yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8"
@@ -209,6 +501,8 @@ class GatewayManager:
         disponibles con normalidad.
         """
         env = os.environ.copy()
+        from gateway.cloudera import ClouderaCatalog
+        env.update(ClouderaCatalog(self.runtime_dir).environment())
         general_settings = self._source().get("general_settings") or {}
         if not general_settings.get("master_key"):
             env["LITELLM_MASTER_KEY"] = ""
@@ -217,6 +511,8 @@ class GatewayManager:
         return env
 
     def _pid(self) -> int | None:
+        """Lee el PID gestionado; un valor ausente o corrupto equivale a parado."""
+
         try:
             return int(self.pid_file.read_text(encoding="utf-8").strip())
         except (FileNotFoundError, ValueError, OSError):
@@ -224,6 +520,8 @@ class GatewayManager:
 
     @staticmethod
     def _alive(pid: int) -> bool:
+        """Comprueba existencia del proceso sin enviarle una señal destructiva."""
+
         try:
             os.kill(pid, 0)
             return True
@@ -288,13 +586,16 @@ class GatewayManager:
         """Construye el snapshot que la interfaz renueva cada tres segundos."""
         process_alive = self.process_alive()
         pid = self._pid() if process_alive else None
-        running = process_alive and self._port_ready()
+        port_ready = self._port_ready()
+        running = process_alive and port_ready
         return {
             "running": running,
             "process_alive": process_alive,
+            "port_conflict": port_ready and not process_alive,
             "pid": pid,
             "host": "127.0.0.1",
             "port": self.port,
+            "restart_pending": self.restart_pending_file.exists(),
             **self._metrics(pid),
         }
 
@@ -304,8 +605,11 @@ class GatewayManager:
             if self.is_running():
                 return self.status()
             self.stop()
-        if self.is_running():
-            return self.status()
+        if self._port_ready():
+            raise RuntimeError(
+                f"El puerto {self.port} está ocupado por un proceso que esta app no controla. "
+                "Detén ese LiteLLM antiguo antes de arrancar una instancia nueva."
+            )
         missing = self.missing_environment_variables()
         if missing:
             variables = ", ".join(missing)
@@ -315,7 +619,6 @@ class GatewayManager:
             )
         self._write_active_config()
         env = self._process_environment()
-        output = self.output_log.open("a", encoding="utf-8")
         litellm_cli = self.root / ".venv" / "bin" / "litellm"
         if not litellm_cli.exists():
             raise RuntimeError("No se encuentra el ejecutable de LiteLLM en el entorno activo")
@@ -324,11 +627,12 @@ class GatewayManager:
              "--host", "127.0.0.1", "--port", str(self.port)],
             cwd=self.root,
             env=env,
-            stdout=output,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            text=True,
             start_new_session=True,
         )
-        output.close()
+        threading.Thread(target=self._capture_process_output, args=(process,), daemon=True).start()
         self.pid_file.write_text(str(process.pid), encoding="utf-8")
         # `monotonic()` no cambia si el reloj del sistema se sincroniza durante
         # el arranque, por eso es preferible a comparar timestamps de pared.
@@ -385,9 +689,18 @@ class GatewayManager:
             self.start()
         return next(model for model in self.models() if model["name"] == name)
 
-    def process_log(self, lines: int = 100) -> str:
+    def process_log(self, lines: int = 100, day: date | None = None) -> str:
         """Devuelve la cola del log sin códigos ANSI propios de terminal."""
-        if not self.output_log.exists():
-            return ""
-        content = "\n".join(self.output_log.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+        path = self.process_log_path(day)
+        if not path.exists() and (day is None or day == datetime.now(ZoneInfo("Europe/Madrid")).date()):
+            path = self.output_log
+        if not path.exists(): return ""
+        content = "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
         return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", content)
+
+    def process_log_days(self) -> list[str]:
+        """Lista las jornadas técnicas existentes, incluida la fecha de hoy."""
+
+        days = {path.stem.removeprefix("litellm-") for path in (self.runtime_dir / "logs").glob("litellm-????-??-??.log")}
+        if self.output_log.exists(): days.add(datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat())
+        return sorted(days, reverse=True)

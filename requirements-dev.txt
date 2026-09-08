@@ -1,2 +1,3 @@
+# Desarrollo = runtime completo + ejecutor de pruebas.
 -r requirements.txt
 pytest>=8.3,<9

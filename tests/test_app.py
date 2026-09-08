@@ -42,6 +42,9 @@ def test_dashboard_disables_cache_and_uses_test_tabs():
     assert response.headers["cache-control"].startswith("no-store")
     assert 'id="test-tabs"' in response.text
     assert 'id="test-model"' not in response.text
+    assert "Configuración YAML" in response.text
+    assert 'id="yaml-editor"' in response.text
+    assert 'id="model-form"' in response.text
 
 
 def test_dashboard_exposes_architecture_infographic():
@@ -49,9 +52,9 @@ def test_dashboard_exposes_architecture_infographic():
     client = TestClient(dashboard.app)
 
     dashboard_response = client.get("/")
-    image_response = client.get("/static/ia-gateway-beta-infografia.png")
+    image_response = client.get("/static/ia-gateway-arquitectura.png")
 
-    assert "ia-gateway-beta-infografia.png" in dashboard_response.text
+    assert "ia-gateway-arquitectura.png" in dashboard_response.text
     assert image_response.status_code == 200
     assert image_response.headers["content-type"] == "image/png"
     assert dashboard_response.text.index('class="logs-section"') < dashboard_response.text.index(
@@ -104,3 +107,51 @@ def test_remote_latency_probe_uses_gateway_auth(monkeypatch):
     assert len(calls) == 1
     assert calls[0][1]["headers"] == {"Authorization": "Bearer general-test-key"}
     assert calls[0][1]["json"]["model"] == "topito"
+
+
+def test_guided_model_config_uses_environment_reference(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        dashboard.manager,
+        "add_model",
+        lambda entry: captured.append(entry) or {"content": "model_list: []\n", "restarted": False},
+    )
+
+    response = TestClient(dashboard.app).post("/api/config/models", json={
+        "model_name": "nuevo-openai",
+        "model": "openai/modelo",
+        "api_key_env": "OPENAI_API_KEY",
+    })
+
+    assert response.status_code == 200
+    assert captured[0]["litellm_params"]["api_key"] == "os.environ/OPENAI_API_KEY"
+
+
+def test_guided_model_config_rejects_invalid_environment_name():
+    response = TestClient(dashboard.app).post("/api/config/models", json={
+        "model_name": "inseguro",
+        "model": "openai/modelo",
+        "api_key_env": "sk-clave-en-claro",
+    })
+
+    assert response.status_code == 422
+    assert "MAYUSCULAS" in response.json()["detail"]
+
+
+def test_dashboard_has_three_primary_areas_and_warn_only_guardrail():
+    html = (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    assert 'data-view="models"' in html
+    assert 'data-view="config"' in html
+    assert 'data-view="logs"' in html
+    assert "Riesgo detectado; la petición continuó" in javascript
+
+
+def test_cloudera_models_show_independent_deployment_token_and_probe_states():
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    assert "clouderaDeploymentState" in javascript
+    assert "Token propio disponible" in javascript
+    assert "Usará el CDP token general" in javascript
+    assert "Respuesta sin probar" in javascript
+    assert "Responde correctamente" in javascript
+"""Pruebas del contrato HTTP y de los elementos esenciales del dashboard."""

@@ -1,30 +1,78 @@
+# Fuente de verdad declarativa. Las aplicaciones llaman a `model_name`; LiteLLM
+# usa `litellm_params` para localizar y autenticar al proveedor. No escribas
+# secretos aquí: referencia variables con `os.environ/NOMBRE`.
 model_list:
-  - model_name: topito
-    litellm_params:
-      model: openai/gpt-5.6-sol
-      api_key: os.environ/OPENAI_API_KEY
-      reasoning_effort: high
-      drop_params: true
-
-  - model_name: qwen-local
-    litellm_params:
-      model: ollama/qwen3.5:9b
-      api_base: http://localhost:11434
-      keep_alive: -1
-      drop_params: true
-
-  - model_name: embedding-local
-    litellm_params:
-      model: ollama/bge-m3:latest
-      api_base: http://localhost:11434
-      keep_alive: -1
-      drop_params: true
-
-  - model_name: guardian-seguridad
-    litellm_params:
-      model: ollama/llama-guard3
-      api_base: http://localhost:11434
-      keep_alive: -1
-
+- model_name: topito
+  litellm_params:
+    model: openai/gpt-5.6-sol
+    drop_params: true
+    api_key: os.environ/OPENAI_API_KEY
+    reasoning_effort: high
+- model_name: qwen-local
+  litellm_params:
+    model: ollama/qwen3.5:9b
+    api_base: http://localhost:11434
+    keep_alive: -1
+    drop_params: true
+- model_name: embedding-local
+  litellm_params:
+    model: ollama/bge-m3:latest
+    api_base: http://localhost:11434
+    keep_alive: -1
+    drop_params: true
+- model_name: guardian-seguridad
+  litellm_params:
+    model: ollama/llama-guard3
+    api_base: http://localhost:11434
+    keep_alive: -1
+- model_name: goes-nemotron-3-super-120b
+  litellm_params:
+    model: openai/nvidia/nemotron-3-super-120b-a12b
+    drop_params: true
+    api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/goes---nemotron-3-super-120b/v1
+    api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+- model_name: hermes-3-llama-3-1-8b
+  litellm_params:
+    model: openai/NousResearch/Hermes-3-Llama-3.1-8B
+    drop_params: true
+    api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/hermes-3-llama-3-1-8b/openai/v1
+    api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+- model_name: llama-guard-3
+  litellm_params:
+    model: openai/meta-llama/Llama-Guard-3-8B
+    drop_params: true
+    api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/llama-guard-3/openai/v1
+    api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+- model_name: qwen2-vl-2b-instruct
+  litellm_params:
+    model: openai/Qwen/Qwen2-VL-2B-Instruct
+    drop_params: true
+    api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/qwen2-vl-2b-instruct/openai/v1
+    api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+- model_name: qwen25-7b-instruct
+  litellm_params:
+    model: openai/Qwen/Qwen2.5-7B-Instruct
+    drop_params: true
+    api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/qwen25-7b-instruct/openai/v1
+    api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+- model_name: npant-innovation-llm
+  litellm_params:
+    model: openai/meta/llama-3.1-8b-instruct
+    drop_params: true
+    api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/npant-innovation-llm/v1
+    api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
 general_settings:
+  # Clave que protege la entrada común al proxy, no la salida al proveedor.
   master_key: os.environ/LITELLM_MASTER_KEY
+dashboard_settings:
+  # Extensión del panel; core.py la retira antes de lanzar LiteLLM.
+  guardrail:
+    enabled: true
+    model: guardian-seguridad
+    policy: warn
+    timeout: 8
+router_settings:
+  # Fallback técnico: se usa si falla el grupo principal.
+  fallbacks:
+  - topito:
+    - qwen-local

@@ -1,7 +1,9 @@
+# Entornos y artefactos locales reproducibles.
 .venv/
 venv/
 __pycache__/
 *.py[cod]
+# Secretos y estado de ejecución nunca se versionan.
 .env
 .vscode/
 .idea/
