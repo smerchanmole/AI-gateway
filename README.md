@@ -214,13 +214,15 @@ Para desarrollo:
 python -m pip install -r requirements-dev.txt
 ```
 
-`app.py` ejecuta además `python -m pip install -r requirements.txt` al comienzo
-de cada arranque y antes de importar cualquier dependencia externa. Este
-*bootstrap* permite desplegar la aplicación en Cloudera aunque la sesión no
-ofrezca una fase de instalación previa. Se usa siempre el mismo intérprete que
-ejecuta el panel, una ruta absoluta al fichero y una llamada sin shell; cualquier
-fallo de `pip` cancela el arranque con un mensaje explícito. La instalación
-manual sigue siendo recomendable en local para preparar el entorno con antelación.
+`app.py` prepara además el entorno al comienzo de cada arranque y antes de
+importar cualquier dependencia externa. Si Cloudera lo ejecuta con su Python
+administrado, crea automáticamente `.venv`, instala allí `requirements.txt` y
+se relanza con `.venv/bin/python`. Esto evita mezclar LiteLLM con las versiones
+de `protobuf`, `typing_extensions`, MLflow y otros paquetes incluidos por la
+plataforma. Si Cloudera evalúa el fichero como una celda sin `__file__`, se toma
+como raíz el directorio de trabajo. Cualquier fallo de `venv` o `pip` cancela el
+arranque con un mensaje explícito. La instalación manual sigue siendo
+recomendable en local para preparar el entorno con antelación.
 Si Cloudera evalúa `app.py` como una celda y no define `__file__`, el bootstrap
 usa el directorio de trabajo del proyecto para localizar `requirements.txt`.
 
@@ -842,8 +844,8 @@ ia-gateway/
 
 Es la composición principal:
 
-- instala `requirements.txt` antes de cargar módulos externos, para sesiones de
-  Cloudera sin fase de construcción;
+- crea y activa mediante relanzamiento un `.venv` privado, e instala allí
+  `requirements.txt` antes de cargar módulos externos;
 - carga `.env`;
 - crea `GatewayManager` y `ClouderaCatalog`;
 - define modelos Pydantic para validar entradas;
@@ -856,7 +858,8 @@ Funciones destacadas:
 
 | Función | Papel |
 |---|---|
-| `install_runtime_requirements` | Ejecuta `pip` con el Python activo y detiene el arranque si falla. |
+| `bootstrap_private_environment` | Crea `.venv` y relanza la app para aislarla del Python de Cloudera. |
+| `install_runtime_requirements` | Ejecuta `pip` dentro del Python privado y detiene el arranque si falla. |
 | `gateway_auth_headers` | Añade la master key sólo en servidor. |
 | `_model_entry` | Convierte formulario seguro a entrada YAML. |
 | `test_model` | Decide chat/embedding y llama al puerto 8090. |

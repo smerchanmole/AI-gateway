@@ -12,6 +12,7 @@ from __future__ import annotations
 # puede ejecutar directamente ``python app.py`` sobre una sesión nueva, sin una
 # fase previa de construcción; por eso materializamos primero las dependencias
 # declaradas y sólo después importamos FastAPI, LiteLLM y el código del gateway.
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -27,15 +28,15 @@ BOOTSTRAP_ROOT = (
     else Path.cwd().resolve()
 )
 REQUIREMENTS_FILE = BOOTSTRAP_ROOT / "requirements.txt"
+VENV_DIR = BOOTSTRAP_ROOT / ".venv"
+VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
-def install_runtime_requirements() -> None:
-    """Instala el contrato de dependencias antes de cargar módulos externos.
+def install_runtime_requirements(python: Path) -> None:
+    """Instala el contrato de dependencias con el intérprete privado indicado.
 
-    Se invoca ``pip`` mediante el mismo intérprete que ejecuta la aplicación;
-    así los paquetes nunca terminan por accidente en otro Python del sistema.
-    La lista de argumentos evita tanto el shell como preguntas interactivas. Si
-    la instalación falla, abortamos inmediatamente: arrancar un panel parcial
+    La lista de argumentos evita tanto el shell como preguntas interactivas.
+    Ante cualquier fallo se aborta: arrancar un panel parcialmente instalado
     produciría después errores de importación mucho menos explicativos.
     """
     if not REQUIREMENTS_FILE.is_file():
@@ -43,7 +44,7 @@ def install_runtime_requirements() -> None:
     try:
         subprocess.run(
             [
-                sys.executable,
+                str(python),
                 "-m",
                 "pip",
                 "install",
@@ -55,20 +56,65 @@ def install_runtime_requirements() -> None:
             cwd=BOOTSTRAP_ROOT,
             check=True,
         )
-    except subprocess.CalledProcessError as exc:
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return_code = getattr(exc, "returncode", "no disponible")
         raise RuntimeError(
             f"No se pudieron instalar las dependencias de {REQUIREMENTS_FILE} "
-            f"(pip terminó con código {exc.returncode})"
+            f"(código de salida: {return_code})"
         ) from exc
 
 
-install_runtime_requirements()
+def bootstrap_private_environment() -> None:
+    """Aísla la aplicación del Python administrado por Cloudera.
+
+    Las imágenes de Cloudera incluyen MLflow y versiones fijadas de bibliotecas
+    comunes. Instalar LiteLLM sobre ese entorno puede dejar, por ejemplo,
+    ``pydantic_core`` y ``typing_extensions`` en ubicaciones incompatibles. La
+    primera ejecución crea ``.venv``, instala el contrato dentro y reemplaza el
+    proceso actual por ``.venv/bin/python app.py``. Dentro del entorno privado
+    sólo se verifica/actualiza el contrato y el arranque continúa normalmente.
+    """
+    if sys.version_info < (3, 11):
+        raise RuntimeError(
+            f"IA Gateway requiere Python 3.11 o superior; se está usando {sys.version.split()[0]}"
+        )
+
+    running_inside_private_venv = Path(sys.prefix).resolve() == VENV_DIR.resolve()
+    if running_inside_private_venv:
+        install_runtime_requirements(Path(sys.executable))
+        return
+
+    if not VENV_PYTHON.is_file():
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(VENV_DIR)],
+                cwd=BOOTSTRAP_ROOT,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            return_code = getattr(exc, "returncode", "no disponible")
+            raise RuntimeError(
+                f"No se pudo crear el entorno privado {VENV_DIR} "
+                f"(código de salida: {return_code})"
+            ) from exc
+
+    install_runtime_requirements(VENV_PYTHON)
+    application_file = BOOTSTRAP_ROOT / "app.py"
+    if not application_file.is_file():
+        raise RuntimeError(
+            "Cloudera ejecutó el código como celda, pero no se encuentra app.py "
+            f"en el directorio del proyecto: {BOOTSTRAP_ROOT}"
+        )
+    # Sustituir, en vez de crear otro hijo, conserva señales y código de salida.
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(application_file)])
+
+
+bootstrap_private_environment()
 
 import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
 import hmac
-import os
 import re
 import secrets
 import time
