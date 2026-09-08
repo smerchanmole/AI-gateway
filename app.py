@@ -8,12 +8,59 @@ mantiene los endpoints pequeños, comprobables y fáciles de leer.
 
 from __future__ import annotations
 
+# Este bloque de arranque usa exclusivamente la biblioteca estándar. Cloudera
+# puede ejecutar directamente ``python app.py`` sobre una sesión nueva, sin una
+# fase previa de construcción; por eso materializamos primero las dependencias
+# declaradas y sólo después importamos FastAPI, LiteLLM y el código del gateway.
+from pathlib import Path
+import subprocess
+import sys
+
+
+BOOTSTRAP_ROOT = Path(__file__).resolve().parent
+REQUIREMENTS_FILE = BOOTSTRAP_ROOT / "requirements.txt"
+
+
+def install_runtime_requirements() -> None:
+    """Instala el contrato de dependencias antes de cargar módulos externos.
+
+    Se invoca ``pip`` mediante el mismo intérprete que ejecuta la aplicación;
+    así los paquetes nunca terminan por accidente en otro Python del sistema.
+    La lista de argumentos evita tanto el shell como preguntas interactivas. Si
+    la instalación falla, abortamos inmediatamente: arrancar un panel parcial
+    produciría después errores de importación mucho menos explicativos.
+    """
+    if not REQUIREMENTS_FILE.is_file():
+        raise RuntimeError(f"No se encuentra el fichero de dependencias: {REQUIREMENTS_FILE}")
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                "-r",
+                str(REQUIREMENTS_FILE),
+            ],
+            cwd=BOOTSTRAP_ROOT,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"No se pudieron instalar las dependencias de {REQUIREMENTS_FILE} "
+            f"(pip terminó con código {exc.returncode})"
+        ) from exc
+
+
+install_runtime_requirements()
+
 import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
 import hmac
 import os
-from pathlib import Path
 import re
 import secrets
 import time
@@ -34,7 +81,7 @@ from gateway.auth import AuthStore, AuthenticationError, LoginRateLimited
 from gateway.tls import ensure_self_signed_certificate
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = BOOTSTRAP_ROOT
 # Las claves permanecen fuera del YAML y de Git, pero se heredan al proxy hijo.
 load_dotenv(ROOT / ".env")
 manager = GatewayManager(ROOT)

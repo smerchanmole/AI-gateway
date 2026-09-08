@@ -214,6 +214,14 @@ Para desarrollo:
 python -m pip install -r requirements-dev.txt
 ```
 
+`app.py` ejecuta además `python -m pip install -r requirements.txt` al comienzo
+de cada arranque y antes de importar cualquier dependencia externa. Este
+*bootstrap* permite desplegar la aplicación en Cloudera aunque la sesión no
+ofrezca una fase de instalación previa. Se usa siempre el mismo intérprete que
+ejecuta el panel, una ruta absoluta al fichero y una llamada sin shell; cualquier
+fallo de `pip` cancela el arranque con un mensaje explícito. La instalación
+manual sigue siendo recomendable en local para preparar el entorno con antelación.
+
 ### Secretos
 
 ```bash
@@ -832,6 +840,8 @@ ia-gateway/
 
 Es la composición principal:
 
+- instala `requirements.txt` antes de cargar módulos externos, para sesiones de
+  Cloudera sin fase de construcción;
 - carga `.env`;
 - crea `GatewayManager` y `ClouderaCatalog`;
 - define modelos Pydantic para validar entradas;
@@ -844,6 +854,7 @@ Funciones destacadas:
 
 | Función | Papel |
 |---|---|
+| `install_runtime_requirements` | Ejecuta `pip` con el Python activo y detiene el arranque si falla. |
 | `gateway_auth_headers` | Añade la master key sólo en servidor. |
 | `_model_entry` | Convierte formulario seguro a entrada YAML. |
 | `test_model` | Decide chat/embedding y llama al puerto 8090. |

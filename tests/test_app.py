@@ -5,6 +5,16 @@ import app as dashboard
 from gateway.auth import AuthStore
 
 
+def test_dependency_bootstrap_runs_before_external_imports():
+    """Cloudera debe preparar el entorno antes de cargar FastAPI o HTTPX."""
+    source = (dashboard.ROOT / "app.py").read_text(encoding="utf-8")
+
+    bootstrap_call = source.index("\ninstall_runtime_requirements()\n")
+    first_external_import = source.index("import httpx")
+
+    assert bootstrap_call < first_external_import
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """Cliente HTTPS autenticado; replica el contrato real de navegador."""

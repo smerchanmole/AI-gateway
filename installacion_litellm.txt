@@ -26,6 +26,10 @@ canónica y explica arquitectura, seguridad, YAML, Ollama, Cloudera y capacidad.
 
    ./start.sh
 
+   Si Cloudera ejecuta directamente "python app.py", el propio módulo instala
+   requirements.txt antes de cargar FastAPI y las demás dependencias externas.
+   Un fallo de pip cancela el arranque y muestra la causa en el log de sesión.
+
 6. Abrir https://127.0.0.1:8081 y pulsar «Arrancar».
 
 El panel escucha en 127.0.0.1:${CDSW_APP_PORT:-8081}. Las aplicaciones
