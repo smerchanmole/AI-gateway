@@ -6,13 +6,15 @@ from gateway.auth import AuthStore
 
 
 def test_dependency_bootstrap_runs_before_external_imports():
-    """Cloudera debe preparar el entorno antes de cargar FastAPI o HTTPX."""
+    """Cloudera debe preparar el entorno incluso si ejecuta el código como celda."""
     source = (dashboard.ROOT / "app.py").read_text(encoding="utf-8")
 
     bootstrap_call = source.index("\ninstall_runtime_requirements()\n")
     first_external_import = source.index("import httpx")
 
     assert bootstrap_call < first_external_import
+    assert 'globals().get("__file__")' in source
+    assert "Path.cwd().resolve()" in source
 
 
 @pytest.fixture

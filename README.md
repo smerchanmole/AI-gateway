@@ -221,6 +221,8 @@ ofrezca una fase de instalación previa. Se usa siempre el mismo intérprete que
 ejecuta el panel, una ruta absoluta al fichero y una llamada sin shell; cualquier
 fallo de `pip` cancela el arranque con un mensaje explícito. La instalación
 manual sigue siendo recomendable en local para preparar el entorno con antelación.
+Si Cloudera evalúa `app.py` como una celda y no define `__file__`, el bootstrap
+usa el directorio de trabajo del proyecto para localizar `requirements.txt`.
 
 ### Secretos
 

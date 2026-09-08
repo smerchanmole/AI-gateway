@@ -17,7 +17,15 @@ import subprocess
 import sys
 
 
-BOOTSTRAP_ROOT = Path(__file__).resolve().parent
+# Un script normal dispone de ``__file__``; una Cloudera Session que evalúa el
+# código como celda no. En ese segundo caso, Cloudera sitúa el proceso en el
+# directorio del proyecto, de modo que ``cwd`` es la referencia correcta.
+SOURCE_FILE = globals().get("__file__")
+BOOTSTRAP_ROOT = (
+    Path(SOURCE_FILE).resolve().parent
+    if SOURCE_FILE
+    else Path.cwd().resolve()
+)
 REQUIREMENTS_FILE = BOOTSTRAP_ROOT / "requirements.txt"
 
 
