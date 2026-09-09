@@ -224,10 +224,10 @@ como raíz el directorio de trabajo. Cualquier fallo de `venv` o `pip` cancela e
 arranque con un mensaje explícito. La instalación manual sigue siendo
 recomendable en local para preparar el entorno con antelación.
 
-El bootstrap fuerza `pip --no-user` dentro del entorno privado. Cloudera puede
-definir `PIP_USER=1` para proteger el runtime compartido, pero esa modalidad no
-es válida dentro de un `venv`. Se conservan, en cambio, las variables de índice
-y proxy de `pip` necesarias para repositorios corporativos. Antes de relanzar,
+El bootstrap elimina cualquier `PIP_USER` heredado y deja que `pip` aplique su
+comportamiento normal dentro del entorno privado; no utiliza `--user` ni
+`--no-user`. Se conservan las variables de índice y proxy necesarias para
+repositorios corporativos. Antes de relanzar,
 se eliminan `PYTHONPATH` y `PYTHONHOME` heredados y se activa
 `PYTHONNOUSERSITE=1`, impidiendo que módulos de `/usr/local` o `~/.local`
 se adelanten a los instalados dentro de `.venv`.
@@ -236,7 +236,10 @@ modo aislado de Python (`-I`) y sin los constraints, prefijos o destinos que
 Cloudera aplica a su MLflow. De este modo `mlflow-cml-plugin` y su requisito
 `typing-extensions==4.10.0` no participan en la resolución privada de LiteLLM.
 Si Cloudera evalúa `app.py` como una celda y no define `__file__`, el bootstrap
-usa el directorio de trabajo del proyecto para localizar `requirements.txt`.
+usa el directorio de trabajo del proyecto para localizar `requirements.txt` y
+mantiene el engine como proceso padre. Esto evita que un `exec` cierre el kernel
+y permite ver en directo cada fase, toda la salida de `pip`, el resultado de
+`pip check` y posteriormente los logs del servidor.
 
 ### Secretos
 

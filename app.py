@@ -32,6 +32,11 @@ VENV_DIR = BOOTSTRAP_ROOT / ".venv"
 VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
+def bootstrap_log(message: str) -> None:
+    """Escribe hitos visibles incluso en el visor de engines de Cloudera."""
+    print(f"[IA Gateway · bootstrap] {message}", flush=True)
+
+
 def install_runtime_requirements(python: Path) -> None:
     """Instala el contrato de dependencias con el intérprete privado indicado.
 
@@ -54,14 +59,16 @@ def install_runtime_requirements(python: Path) -> None:
         "PIP_BUILD_CONSTRAINT",
         "PIP_PREFIX",
         "PIP_TARGET",
+        "PIP_USER",
     ):
         pip_environment.pop(inherited_name, None)
-    pip_environment["PIP_USER"] = "0"
     pip_environment["PYTHONNOUSERSITE"] = "1"
     pip_environment["VIRTUAL_ENV"] = str(VENV_DIR)
     pip_environment["PATH"] = (
         str(python.parent) + os.pathsep + pip_environment.get("PATH", "")
     )
+    bootstrap_log(f"Instalando dependencias con: {python}")
+    bootstrap_log(f"Fichero de dependencias: {REQUIREMENTS_FILE}")
     try:
         subprocess.run(
             [
@@ -70,8 +77,6 @@ def install_runtime_requirements(python: Path) -> None:
                 "-m",
                 "pip",
                 "install",
-                "--no-user",
-                "--quiet",
                 "--disable-pip-version-check",
                 "--no-input",
                 "-r",
@@ -81,8 +86,16 @@ def install_runtime_requirements(python: Path) -> None:
             env=pip_environment,
             check=True,
         )
+        bootstrap_log("Validando coherencia de dependencias con pip check")
+        subprocess.run(
+            [str(python), "-I", "-m", "pip", "check"],
+            cwd=BOOTSTRAP_ROOT,
+            env=pip_environment,
+            check=True,
+        )
     except (OSError, subprocess.CalledProcessError) as exc:
         return_code = getattr(exc, "returncode", "no disponible")
+        bootstrap_log(f"ERROR: la preparación de dependencias terminó con código {return_code}")
         raise RuntimeError(
             f"No se pudieron instalar las dependencias de {REQUIREMENTS_FILE} "
             f"(código de salida: {return_code})"
@@ -104,12 +117,19 @@ def bootstrap_private_environment() -> None:
             f"IA Gateway requiere Python 3.11 o superior; se está usando {sys.version.split()[0]}"
         )
 
+    execution_mode = "script" if SOURCE_FILE else "celda/engine Cloudera"
+    bootstrap_log(f"Modo de ejecución: {execution_mode}")
+    bootstrap_log(f"Python inicial: {sys.executable} ({sys.version.split()[0]})")
+    bootstrap_log(f"Directorio del proyecto: {BOOTSTRAP_ROOT}")
     running_inside_private_venv = Path(sys.prefix).resolve() == VENV_DIR.resolve()
     if running_inside_private_venv:
+        bootstrap_log(f"Entorno privado activo: {VENV_DIR}")
         install_runtime_requirements(Path(sys.executable))
+        bootstrap_log("Dependencias preparadas; cargando IA Gateway")
         return
 
     if not VENV_PYTHON.is_file():
+        bootstrap_log(f"Creando entorno privado: {VENV_DIR}")
         try:
             subprocess.run(
                 [sys.executable, "-m", "venv", str(VENV_DIR)],
@@ -122,6 +142,8 @@ def bootstrap_private_environment() -> None:
                 f"No se pudo crear el entorno privado {VENV_DIR} "
                 f"(código de salida: {return_code})"
             ) from exc
+    else:
+        bootstrap_log(f"Reutilizando entorno privado existente: {VENV_DIR}")
 
     install_runtime_requirements(VENV_PYTHON)
     application_file = BOOTSTRAP_ROOT / "app.py"
@@ -142,12 +164,31 @@ def bootstrap_private_environment() -> None:
         + os.pathsep
         + runtime_environment.get("PATH", "")
     )
-    # Sustituir, en vez de crear otro hijo, conserva señales y código de salida.
-    os.execve(
-        str(VENV_PYTHON),
-        [str(VENV_PYTHON), str(application_file)],
-        runtime_environment,
-    )
+    command = [str(VENV_PYTHON), str(application_file)]
+    if SOURCE_FILE:
+        # En un script normal, sustituir el proceso conserva señales y código.
+        bootstrap_log(f"Relanzando el script con: {VENV_PYTHON}")
+        os.execve(str(VENV_PYTHON), command, runtime_environment)
+
+    # Una Cloudera Application evalúa el fichero dentro de su engine. Sustituir
+    # ese proceso mata el kernel y la plataforma sólo muestra "Engine exited".
+    # Mantenerlo como padre permite ver todos los logs del servidor hijo.
+    bootstrap_log(f"Iniciando IA Gateway como proceso hijo: {VENV_PYTHON}")
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=BOOTSTRAP_ROOT,
+            env=runtime_environment,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"No se pudo iniciar {application_file}: {exc}") from exc
+    if completed.returncode:
+        raise RuntimeError(
+            f"IA Gateway terminó con código {completed.returncode}; "
+            "revisa las líneas inmediatamente anteriores del log"
+        )
+    raise SystemExit(0)
 
 
 bootstrap_private_environment()

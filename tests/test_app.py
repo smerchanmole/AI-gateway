@@ -20,7 +20,11 @@ def test_dependency_bootstrap_runs_before_external_imports():
     assert 'runtime_environment.pop("PYTHONPATH", None)' in source
     assert 'runtime_environment["PYTHONNOUSERSITE"] = "1"' in source
     assert '"PIP_CONSTRAINT",' in source
+    assert '"PIP_USER",' in source
     assert '"-I",' in source
+    assert 'completed = subprocess.run(' in source
+    assert 'Modo de ejecución:' in source
+    assert '"pip", "check"' in source
 
 
 @pytest.fixture
