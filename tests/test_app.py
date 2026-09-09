@@ -66,15 +66,10 @@ def test_gateway_auth_headers_use_general_key(monkeypatch):
     }
 
 
-def test_gateway_auth_headers_require_general_key(monkeypatch):
+def test_gateway_auth_headers_allow_disabled_master_key(monkeypatch):
     monkeypatch.delenv("LITELLM_MASTER_KEY", raising=False)
 
-    try:
-        dashboard.gateway_auth_headers()
-    except RuntimeError as exc:
-        assert "LITELLM_MASTER_KEY" in str(exc)
-    else:
-        raise AssertionError("Se esperaba un error sin master key")
+    assert dashboard.gateway_auth_headers() == {}
 
 
 def test_dynamic_cloudera_credentials_do_not_restart_litellm(monkeypatch):

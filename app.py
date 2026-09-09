@@ -313,11 +313,9 @@ async def cloudera_token_supervisor() -> None:
 
 
 def gateway_auth_headers() -> dict[str, str]:
-    """Autentica el salto panel→LiteLLM sin revelar la clave al navegador."""
+    """Usa la master key sólo cuando el despliegue la configura explícitamente."""
     master_key = os.environ.get("LITELLM_MASTER_KEY", "").strip()
-    if not master_key:
-        raise RuntimeError("Falta LITELLM_MASTER_KEY en el fichero .env")
-    return {"Authorization": f"Bearer {master_key}"}
+    return {"Authorization": f"Bearer {master_key}"} if master_key else {}
 
 
 @asynccontextmanager

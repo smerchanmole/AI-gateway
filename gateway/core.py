@@ -17,10 +17,9 @@ import subprocess
 import threading
 import time
 import urllib.request
-import urllib.error
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any
 
@@ -487,7 +486,11 @@ class GatewayManager:
         visit(self._source())
         from gateway.cloudera import ClouderaCatalog
         local_credentials = ClouderaCatalog(self.runtime_dir).environment()
-        return sorted(name for name in referenced if not os.environ.get(name) and not local_credentials.get(name))
+        optional = {"LITELLM_MASTER_KEY"}
+        return sorted(
+            name for name in referenced
+            if name not in optional and not os.environ.get(name) and not local_credentials.get(name)
+        )
 
     def _write_active_config(self) -> None:
         """Genera una configuración filtrada y carga el callback junto a ella."""
@@ -503,18 +506,16 @@ class GatewayManager:
         # que el callback sustituya el alias sólo después de que el router haya
         # elegido el deployment correcto.
         provider_models: dict[str, str] = {}
-        database_enabled = bool(os.environ.get("DATABASE_URL", "").strip())
+        provider_api_key_env: dict[str, str] = {}
         for item in config["model_list"]:
             params = item.get("litellm_params") or {}
             provider_model = str(params.get("model") or "")
             api_key = str(params.get("api_key") or "")
             if provider_model.startswith("openai/") and api_key.startswith("os.environ/CLOUDERA_"):
-                if database_enabled:
-                    variable_name = api_key.removeprefix("os.environ/")
-                    params["litellm_credential_name"] = self.credential_name(variable_name)
                 public_alias = str(item.get("model_name") or "")
                 if public_alias:
                     provider_models[public_alias] = provider_model
+                    provider_api_key_env[public_alias] = api_key.removeprefix("os.environ/")
                 # `extra_body.model` no sustituye el campo superior que genera
                 # el SDK OpenAI y puede producir dos valores contradictorios.
                 params.pop("extra_body", None)
@@ -526,16 +527,16 @@ class GatewayManager:
         callback = "litellm_callback.dashboard_logger"
         settings["callbacks"] = list(dict.fromkeys([*current_callbacks, callback]))
         config["litellm_settings"] = settings
-        if database_enabled:
-            if not os.environ.get("LITELLM_SALT_KEY", "").strip():
-                raise RuntimeError(
-                    "DATABASE_URL está configurada, pero falta LITELLM_SALT_KEY. "
-                    "Debe ser estable para poder descifrar las credenciales tras un reinicio."
-                )
-            general_settings = dict(config.get("general_settings") or {})
-            general_settings["database_url"] = "os.environ/DATABASE_URL"
-            general_settings["store_model_in_db"] = True
+        general_settings = dict(config.get("general_settings") or {})
+        if (
+            general_settings.get("master_key") == "os.environ/LITELLM_MASTER_KEY"
+            and not os.environ.get("LITELLM_MASTER_KEY", "").strip()
+        ):
+            general_settings.pop("master_key", None)
+        if general_settings:
             config["general_settings"] = general_settings
+        else:
+            config.pop("general_settings", None)
         guardrail = dict(dashboard_settings.get("guardrail") or {})
         guardrail["enabled"] = bool(guardrail.get("enabled") and guardrail.get("model"))
         guardrail_name = guardrail.get("model")
@@ -545,7 +546,11 @@ class GatewayManager:
             guardrail["provider_model"] = str(params.get("model", "")).removeprefix("ollama/")
             guardrail["api_base"] = params.get("api_base", "http://localhost:11434")
         self.dashboard_settings_file.write_text(
-            json.dumps({"guardrail": guardrail, "provider_models": provider_models}, indent=2),
+            json.dumps({
+                "guardrail": guardrail,
+                "provider_models": provider_models,
+                "provider_api_key_env": provider_api_key_env,
+            }, indent=2),
             encoding="utf-8",
         )
         shutil.copy2(Path(__file__).with_name("litellm_callback.py"), self.runtime_dir / "litellm_callback.py")
@@ -567,108 +572,15 @@ class GatewayManager:
         from gateway.cloudera import ClouderaCatalog
         env.update(ClouderaCatalog(self.runtime_dir).environment())
         general_settings = self._source().get("general_settings") or {}
-        if not general_settings.get("master_key"):
+        if not general_settings.get("master_key") or not os.environ.get("LITELLM_MASTER_KEY", "").strip():
             env["LITELLM_MASTER_KEY"] = ""
         env["PYTHONPATH"] = str(self.root) + os.pathsep + env.get("PYTHONPATH", "")
         env["IA_GATEWAY_ROOT"] = str(self.root)
         return env
 
-    def _prepare_database(self, env: dict[str, str]) -> None:
-        """Genera el cliente Prisma y aplica migraciones antes de LiteLLM."""
-
-        if not env.get("DATABASE_URL", "").strip():
-            return
-        prisma = self.root / ".venv" / "bin" / "prisma"
-        try:
-            import litellm_proxy_extras
-        except ImportError as exc:
-            raise RuntimeError("LiteLLM no incluye el esquema PostgreSQL requerido") from exc
-        schema = Path(litellm_proxy_extras.__file__).resolve().with_name("schema.prisma")
-        if not prisma.exists() or not schema.exists():
-            raise RuntimeError("No se encuentran Prisma o el esquema de base de datos de LiteLLM")
-        prisma_env = env.copy()
-        prisma_home = self.runtime_dir / "prisma"
-        prisma_home.mkdir(exist_ok=True)
-        prisma_env["PATH"] = str(prisma.parent) + os.pathsep + prisma_env.get("PATH", "")
-        prisma_env.setdefault("PRISMA_HOME_DIR", str(prisma_home))
-        for action in (("generate",), ("migrate", "deploy")):
-            completed = subprocess.run(
-                [str(prisma), *action, "--schema", str(schema)],
-                cwd=self.root,
-                env=prisma_env,
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            if completed.returncode:
-                detail = (completed.stderr or completed.stdout).strip()[-1500:]
-                label = "generar el cliente" if action == ("generate",) else "aplicar las migraciones"
-                raise RuntimeError(f"No se pudo {label} Prisma: {detail}")
-
-    @staticmethod
-    def credential_name(variable_name: str) -> str:
-        """Nombre estable de la credencial cifrada asociada a un token CDP."""
-
-        safe = re.sub(r"[^A-Z0-9_]+", "_", variable_name.upper()).strip("_")
-        return f"ia_gateway_{safe.lower()}"
-
     def sync_cloudera_credentials(self) -> bool:
-        """Actualiza tokens en PostgreSQL y memoria de LiteLLM sin reiniciarlo.
+        """Confirma el modo dinámico: el callback lee SQLite en cada petición."""
 
-        LiteLLM cifra ``credential_values`` usando ``LITELLM_SALT_KEY``. La API
-        PATCH actualiza además la lista de credenciales del proceso en curso,
-        por lo que las peticiones siguientes reciben el token nuevo.
-        """
-
-        if not os.environ.get("DATABASE_URL", "").strip():
-            return False
-        master_key = os.environ.get("LITELLM_MASTER_KEY", "").strip()
-        if not master_key:
-            raise RuntimeError("Falta LITELLM_MASTER_KEY para sincronizar credenciales con LiteLLM")
-        from gateway.cloudera import ClouderaCatalog
-
-        headers = {
-            "Authorization": f"Bearer {master_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        for variable_name, token in ClouderaCatalog(self.runtime_dir).environment().items():
-            if not variable_name.startswith("CLOUDERA_") or not token:
-                continue
-            name = self.credential_name(variable_name)
-            quoted_name = quote(name, safe="")
-            payload = json.dumps({
-                "credential_name": name,
-                "credential_info": {"managed_by": "ia-gateway", "source": variable_name},
-                "credential_values": {"api_key": token},
-            }).encode()
-            lookup = urllib.request.Request(
-                f"http://{self.host}:{self.port}/credentials/by_name/{quoted_name}",
-                headers=headers,
-                method="GET",
-            )
-            exists = False
-            try:
-                with urllib.request.urlopen(lookup, timeout=10):
-                    exists = True
-            except urllib.error.HTTPError as exc:
-                if exc.code != 404:
-                    detail = exc.read().decode(errors="replace")[:500]
-                    raise RuntimeError(f"LiteLLM no pudo consultar la credencial {name}: HTTP {exc.code} {detail}") from exc
-            method = "PATCH" if exists else "POST"
-            url = (
-                f"http://{self.host}:{self.port}/credentials/{quoted_name}"
-                if exists else f"http://{self.host}:{self.port}/credentials"
-            )
-            request = urllib.request.Request(url, data=payload, headers=headers, method=method)
-            try:
-                with urllib.request.urlopen(request, timeout=15):
-                    pass
-            except urllib.error.HTTPError as exc:
-                detail = exc.read().decode(errors="replace")[:500]
-                raise RuntimeError(f"LiteLLM no pudo guardar la credencial {name}: HTTP {exc.code} {detail}") from exc
-            except OSError as exc:
-                raise RuntimeError(f"No se pudo sincronizar la credencial {name} con LiteLLM: {exc}") from exc
         return True
 
     def _pid(self) -> int | None:
@@ -780,7 +692,6 @@ class GatewayManager:
             )
         self._write_active_config()
         env = self._process_environment()
-        self._prepare_database(env)
         litellm_cli = self.root / ".venv" / "bin" / "litellm"
         if not litellm_cli.exists():
             raise RuntimeError("No se encuentra el ejecutable de LiteLLM en el entorno activo")
@@ -823,7 +734,7 @@ class GatewayManager:
                     return self.status()
                 except RuntimeError as exc:
                     # Uvicorn puede abrir el socket antes de que LiteLLM termine
-                    # de conectar/migrar PostgreSQL y registrar sus rutas.
+                    # de registrar sus rutas y callbacks.
                     credential_error = exc
             time.sleep(0.25)
         self.stop()

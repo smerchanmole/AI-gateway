@@ -61,9 +61,6 @@ model_list:
     drop_params: true
     api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/npant-innovation-llm/v1
     api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
-general_settings:
-  # Clave que protege la entrada común al proxy, no la salida al proveedor.
-  master_key: os.environ/LITELLM_MASTER_KEY
 dashboard_settings:
   # Extensión del panel; core.py la retira antes de lanzar LiteLLM.
   guardrail:

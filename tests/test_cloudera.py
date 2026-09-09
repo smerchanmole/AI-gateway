@@ -28,6 +28,20 @@ def test_connection_and_model_tokens_are_never_returned(tmp_path):
     assert oct(catalog.path.stat().st_mode & 0o777) == "0o600"
 
 
+def test_legacy_json_is_migrated_to_sqlite_without_losing_tokens(tmp_path):
+    legacy = tmp_path / "cloudera-connections.json"
+    legacy.write_text(
+        '{"connections":[{"id":"abc","name":"CDP","kind":"inference",'
+        '"url":"https://ml.example","token":"legacy-token"}],"model_tokens":{}}',
+        encoding="utf-8",
+    )
+
+    catalog = ClouderaCatalog(tmp_path)
+
+    assert catalog.path.name == "cloudera.sqlite3"
+    assert catalog.environment()["CLOUDERA_ABC_CDP_TOKEN"] == "legacy-token"
+
+
 def test_connection_crud_preserves_and_removes_credentials(tmp_path):
     catalog = ClouderaCatalog(tmp_path)
     original = catalog.save_connection("Original", "inference", "https://old.example", "secret")

@@ -1,7 +1,5 @@
 # Runtime: gateway y servidor HTTP.
 litellm[proxy]==1.83.9
-# Cliente requerido por LiteLLM para persistencia PostgreSQL de credenciales.
-prisma==0.11.0
 fastapi==0.124.4
 httpx==0.28.1
 # Operación: métricas, entorno, YAML, imágenes y firma de APIs CDP.

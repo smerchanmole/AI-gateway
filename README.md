@@ -98,7 +98,7 @@ flowchart LR
     end
 
     WEB --> EDGE --> UI --> API
-    APP -->|"OpenAI API + master key"| EDGE --> LLM
+    APP -->|"OpenAI API"| EDGE --> LLM
     API --> CORE --> LLM
     YAML --> CORE --> RUN --> LLM
     ENV --> CORE
@@ -123,7 +123,7 @@ Los puertos efectivos se resuelven al arrancar:
 
 | Proceso | Variable | Fallback local | Binding |
 |---|---|---:|---|
-| Proxy de borde | primer puerto CDSW disponible / `IA_GATEWAY_PORT` | `8090` | `127.0.0.1` (`0.0.0.0` en Docker local) |
+| Proxy de borde | primer puerto CDSW disponible / `IA_GATEWAY_PORT` | `8090` | `127.0.0.1` |
 | Panel FastAPI | `IA_GATEWAY_DASHBOARD_PORT` | `18080` | `127.0.0.1` |
 | LiteLLM OpenAI-compatible | `IA_GATEWAY_LITELLM_PORT` | `14000` | `127.0.0.1` |
 
@@ -166,7 +166,7 @@ sequenceDiagram
     participant P as Proveedor
     participant D as SQLite
 
-    C->>N: POST /v1/chat/completions + LITELLM_MASTER_KEY
+    C->>N: POST /v1/chat/completions
     N->>L: Streaming directo
     L->>G: Mensajes y alias
     G-->>L: safe / warning / unavailable
@@ -183,13 +183,9 @@ sequenceDiagram
     end
 ```
 
-Hay dos autenticaciones independientes:
-
-1. El cliente entra a LiteLLM con `LITELLM_MASTER_KEY`.
-2. LiteLLM sale al proveedor con `OPENAI_API_KEY`, CDP token, token de modelo o
-   ninguna clave para un Ollama local.
-
-Nunca uses `OPENAI_API_KEY` como clave de entrada del gateway.
+La entrada queda protegida por el control de acceso de la WebApp de Cloudera.
+LiteLLM no exige master key. Para salir al proveedor usa `OPENAI_API_KEY`, CDP
+token, token específico de modelo o ninguna clave para un Ollama local.
 
 ## 4. Instalación
 
@@ -259,26 +255,23 @@ dentro de la excepción para que Cloudera no oculte la causa al cerrar el engine
 cp .env.example .env
 ```
 
-Contenido mínimo:
+Contenido cuando se usan modelos OpenAI:
 
 ```dotenv
-LITELLM_MASTER_KEY=cambia-esto-por-una-clave-larga
 OPENAI_API_KEY=sk-tu-clave-openai
 ```
 
-Para ejecutar sin Docker y fijar explícitamente los puertos:
+Para fijar explícitamente los puertos:
 
 ```dotenv
 IA_GATEWAY_PORT=8090
 IA_GATEWAY_LITELLM_PORT=14000
 IA_GATEWAY_DASHBOARD_PORT=18080
-DATABASE_URL=postgresql://usuario:clave@servidor:5432/litellm
-LITELLM_SALT_KEY=otra-clave-larga-y-estable
 ```
 
-`DATABASE_URL` y `LITELLM_SALT_KEY` son obligatorias para actualizar tokens CDP
-sin reiniciar. Las variables reales del entorno de Cloudera tienen prioridad
-sobre el fallback público.
+Las conexiones y credenciales Cloudera se guardan automáticamente en SQLite,
+sin variables ni servicios de base de datos adicionales. Las variables reales
+del entorno de Cloudera tienen prioridad sobre el fallback público.
 
 Una clave local aleatoria se puede generar así:
 
@@ -290,22 +283,9 @@ openssl rand -hex 32
 
 ## 5. Arranque y parada
 
-La opción local completa usa Docker y PostgreSQL:
-
-```bash
-cp .env.example .env
-docker compose up --build
-```
-
-El volumen `litellm-postgres` conserva las credenciales cifradas y `./runtime`
-conserva el estado del panel. Para ejecutar directamente con `./start.sh` debe
-existir un PostgreSQL accesible en el equipo. El proxy streaming `aiohttp` se
+El directorio `./runtime` conserva SQLite, los logs y el estado del panel. No
+hace falta Docker ni ninguna base externa. El proxy streaming `aiohttp` se
 instala automáticamente desde `requirements.txt`.
-
-Antes de arrancar LiteLLM, IA Gateway genera su cliente Prisma y aplica las
-migraciones pendientes sobre `DATABASE_URL`. En Cloudera conviene construir la
-imagen proporcionada para que los binarios de Prisma ya estén incluidos;
-la base PostgreSQL debe ser externa y persistente.
 
 ```bash
 ./start.sh
@@ -348,7 +328,7 @@ Para una aplicación que corre en el mismo equipo:
 
 ```text
 Base URL: https://127.0.0.1:${IA_GATEWAY_PORT:-8090}/v1
-API key:  valor de LITELLM_MASTER_KEY
+API key:  no requerida
 Model:    alias declarado en model_name
 ```
 
@@ -356,7 +336,7 @@ Ejemplos de alias: `topito`, `qwen-local`, `embedding-local` o
 `goes-nemotron-3-super-120b`.
 
 > El panel y LiteLLM escuchan sólo en `127.0.0.1`. El proxy de borde es la única
-> entrada: loopback en Cloudera y `0.0.0.0` dentro del contenedor Docker local.
+> entrada tanto en Cloudera como en local.
 > El proxy `aiohttp` transmite en streaming desde un proceso separado y no hace
 > pasar las inferencias por el FastAPI administrativo.
 
@@ -386,8 +366,8 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="https://127.0.0.1:8090/v1",
-    # Esta es la clave de entrada a LiteLLM, no OPENAI_API_KEY.
-    api_key=os.environ["LITELLM_MASTER_KEY"],
+    # El SDK exige un valor, aunque el gateway no valida una master key.
+    api_key="not-required",
     # Sólo para el certificado autofirmado de desarrollo local.
     http_client=httpx.Client(verify=False),
 )
@@ -415,12 +395,10 @@ response = client.chat.completions.create(
 ### Python con `httpx`
 
 ```python
-import os
 import httpx
 
 response = httpx.post(
     "https://127.0.0.1:8090/v1/chat/completions",
-    headers={"Authorization": f"Bearer {os.environ['LITELLM_MASTER_KEY']}"},
     json={
         "model": "qwen-local",
         "messages": [{"role": "user", "content": "Hola"}],
@@ -437,7 +415,6 @@ print(response.json()["choices"][0]["message"]["content"])
 ```bash
 curl -k https://127.0.0.1:8090/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -d '{
     "model": "topito",
     "messages": [{"role": "user", "content": "Devuelve SELECT 1"}]
@@ -478,8 +455,7 @@ for chunk in stream:
 ### Descubrir aliases disponibles
 
 ```bash
-curl -k https://127.0.0.1:8090/v1/models \
-  -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+curl -k https://127.0.0.1:8090/v1/models
 ```
 
 La [documentación de LiteLLM](https://docs.litellm.ai/) explica el contrato
@@ -650,16 +626,16 @@ Cada minuto el supervisor comprueba caducidad. Cuando quedan diez minutos:
 
 1. marca “token próximo a caducar, generando de nuevo”;
 2. solicita un token nuevo;
-3. guarda la credencial cifrada en PostgreSQL mediante la API interna de LiteLLM;
+3. guarda la credencial en `runtime/cloudera.sqlite3`;
 4. reintenta al minuto si falla;
-5. actualiza la credencial en memoria; las peticiones posteriores usan el token
-   nuevo sin detener LiteLLM ni interrumpir llamadas en curso.
+5. el callback lee el token vigente antes de la siguiente petición, sin detener
+   LiteLLM ni interrumpir llamadas en curso.
 
-El YAML fuente contiene sólo `os.environ/...`. En el YAML activo IA Gateway añade
-un `litellm_credential_name` estable. LiteLLM cifra sus valores con
-`LITELLM_SALT_KEY` antes de guardarlos en PostgreSQL. El catálogo administrativo
-mantiene además su copia operativa en `runtime/cloudera-connections.json`, con
-permisos `0600`; ese fichero debe residir en un volumen cifrado en producción.
+El YAML fuente contiene sólo `os.environ/...`. El catálogo administrativo usa
+`runtime/cloudera.sqlite3`, con permisos `0600`, y el callback resuelve desde ahí
+la credencial asociada al alias. La primera ejecución importa automáticamente el
+antiguo `runtime/cloudera-connections.json` si existe. `runtime` debe residir en
+almacenamiento persistente y cifrado en producción.
 
 Cloudera AI Inference soporta autoscaling por RPS o concurrencia por réplica,
 incluido scale-to-zero. Véanse los conceptos de
@@ -894,8 +870,6 @@ ia-gateway/
 │   ├── test_core.py
 │   ├── test_edge.py
 │   └── test_cloudera.py
-├── Dockerfile
-├── compose.yaml
 └── runtime/                 # generado, privado y fuera de Git
 ```
 
@@ -920,7 +894,7 @@ Funciones destacadas:
 |---|---|
 | `bootstrap_private_environment` | Crea `.venv` y relanza la app para aislarla del Python de Cloudera. |
 | `install_runtime_requirements` | Ejecuta `pip` dentro del Python privado y detiene el arranque si falla. |
-| `gateway_auth_headers` | Añade la master key sólo en servidor. |
+| `gateway_auth_headers` | Añade la master key sólo si se configuró expresamente. |
 | `_model_entry` | Convierte formulario seguro a entrada YAML. |
 | `test_model` | Decide chat/embedding y llama al upstream LiteLLM `14000`. |
 | `model_latency` | Sonda remota pequeña para el semáforo. |
@@ -1019,7 +993,7 @@ adaptan tarjetas y formularios; color y texto comunican conjuntamente el estado.
 - `config.yaml`: comportamiento declarativo versionable.
 - `.env`: secretos generales no versionados.
 - `runtime/state.json`: aliases temporalmente apagados.
-- `runtime/cloudera-connections.json`: conexiones y secretos locales.
+- `runtime/cloudera.sqlite3`: conexiones y secretos Cloudera.
 - `runtime/dashboard_settings.json`: puente panel→callback.
 - `runtime/active_config.yaml`: configuración efectiva.
 - `runtime/litellm.pid`: proceso administrado.
@@ -1103,7 +1077,7 @@ Después reinicia el panel y aplica la configuración desde la cabecera.
 Antes de actualizar:
 
 - revisa cambios locales;
-- respalda `.env`, `config.yaml` y `runtime/cloudera-connections.json` de forma
+- respalda `.env`, `config.yaml` y `runtime/cloudera.sqlite3` de forma
   segura;
 - no sobrescribas una configuración operativa con ejemplos.
 
@@ -1111,7 +1085,7 @@ Antes de actualizar:
 
 ### “Invalid model name” para modelos recién añadidos
 
-1. Consulta `/v1/models` con la master key.
+1. Consulta `/v1/models`.
 2. Verifica que el alias aparece.
 3. Comprueba que el proxy posea `:8090` y LiteLLM no tenga conflicto en `:14000`.
 4. Reinicia LiteLLM desde el panel.
@@ -1121,7 +1095,7 @@ Un `ProxyModelNotFoundError` ocurre dentro del router, antes del proveedor.
 
 ### “Authentication failed”
 
-- Entrada `:8090`: revisa `LITELLM_MASTER_KEY`.
+- Entrada `:8090`: revisa la autenticación y permisos de la WebApp Cloudera.
 - OpenAI: revisa `OPENAI_API_KEY` y facturación API.
 - Cloudera: prueba token general/específico, permisos y caducidad.
 - Ollama local: normalmente no necesita API key de proveedor.

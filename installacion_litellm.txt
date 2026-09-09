@@ -14,10 +14,8 @@ canónica y explica arquitectura, seguridad, YAML, Ollama, Cloudera y capacidad.
    python -m pip install --upgrade pip
    python -m pip install -r requirements.txt
 
-3. Crear `.env` a partir de `.env.example` y rellenar, como mínimo:
-
-   LITELLM_MASTER_KEY=<clave larga y aleatoria del gateway>
-   OPENAI_API_KEY=<sólo si se usan modelos OpenAI>
+3. Crear `.env` a partir de `.env.example`. `OPENAI_API_KEY` sólo es necesaria
+   si se usan modelos OpenAI. La entrada LiteLLM no requiere master key.
 
 4. Revisar `config.yaml`. Nunca edites `runtime/active_config.yaml`: es una
    copia generada automáticamente.
@@ -48,6 +46,7 @@ directamente a LiteLLM en 127.0.0.1:${IA_GATEWAY_LITELLM_PORT:-14000} y las dem�
 rutas al panel en 127.0.0.1:${IA_GATEWAY_DASHBOARD_PORT:-18080}. Cloudera sólo
 publica esa entrada. En local el proxy usa el certificado HTTPS autofirmado.
 
-Para renovar CDP tokens sin reiniciar LiteLLM configura DATABASE_URL hacia
-PostgreSQL y una LITELLM_SALT_KEY estable. Gateway AI crea o actualiza las
-credenciales cifradas mediante la API interna de LiteLLM.
+Las conexiones y tokens CDP se guardan en `runtime/cloudera.sqlite3`. SQLite
+forma parte de Python y no requiere servidor, Docker ni instalación adicional.
+El callback lee el token vigente antes de cada llamada, por lo que una renovación
+se aplica sin reiniciar LiteLLM.

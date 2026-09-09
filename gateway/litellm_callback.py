@@ -141,6 +141,23 @@ def _provider_model(alias: str) -> str | None:
         return None
 
 
+def _provider_api_key(alias: str) -> str | None:
+    """Obtiene desde SQLite el token más reciente asociado al alias Cloudera."""
+
+    try:
+        settings = json.loads(
+            (_root() / "runtime" / "dashboard_settings.json").read_text(encoding="utf-8")
+        )
+        variable_name = (settings.get("provider_api_key_env") or {}).get(alias)
+        if not variable_name:
+            return None
+        from gateway.cloudera import ClouderaCatalog
+
+        return ClouderaCatalog(_root() / "runtime").environment().get(str(variable_name))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _classify_with_ollama(settings: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, str]:
     """Consulta llama-guard directamente; cualquier fallo se convierte en aviso."""
     body = json.dumps({"model": settings["provider_model"], "messages": messages, "stream": False}).encode()
@@ -175,6 +192,9 @@ class DashboardLogger(CustomLogger):
             metadata = dict(data.get("metadata") or {})
             metadata["dashboard_model_alias"] = target
             data["metadata"] = metadata
+            api_key = _provider_api_key(target)
+            if api_key:
+                data["api_key"] = api_key
         if (not settings.get("enabled") or not settings.get("provider_model") or
                 not isinstance(messages, list) or target == settings.get("model")):
             if provider_model:

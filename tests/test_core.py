@@ -1,6 +1,5 @@
 from pathlib import Path
 from types import SimpleNamespace
-import urllib.error
 import asyncio
 from datetime import datetime
 
@@ -86,9 +85,15 @@ def test_cloudera_callback_logs_with_public_alias_after_provider_rewrite(tmp_pat
 
     runtime = tmp_path / "runtime"
     runtime.mkdir()
+    from gateway.cloudera import ClouderaCatalog
+
+    catalog = ClouderaCatalog(runtime)
+    connection = catalog.save_connection("CDP", "inference", "https://ml.example", "fresh-token")
+    variable_name = catalog.connection_environment_name(connection["id"])
     (runtime / "dashboard_settings.json").write_text(
-        '{"guardrail":{"enabled":false},"provider_models":'
-        '{"nemotron-publico":"openai/nvidia/nemotron-3-super-120b-a12b"}}',
+        '{"guardrail":{"enabled":false},'
+        '"provider_models":{"nemotron-publico":"openai/nvidia/nemotron-3-super-120b-a12b"},'
+        f'"provider_api_key_env":{{"nemotron-publico":"{variable_name}"}}}}',
         encoding="utf-8",
     )
     monkeypatch.setenv("IA_GATEWAY_ROOT", str(tmp_path))
@@ -96,6 +101,7 @@ def test_cloudera_callback_logs_with_public_alias_after_provider_rewrite(tmp_pat
     data = {"model": "nemotron-publico", "messages": [], "metadata": {}}
     rewritten = asyncio.run(callback.async_pre_call_hook(None, None, data, "completion"))
     assert rewritten["model"] == "openai/nvidia/nemotron-3-super-120b-a12b"
+    assert rewritten["api_key"] == "fresh-token"
 
     now = datetime.now().astimezone()
     kwargs = {
@@ -197,6 +203,19 @@ def test_process_environment_keeps_explicit_master_key(tmp_path, monkeypatch):
     assert manager._process_environment()["LITELLM_MASTER_KEY"] == "explicit-key"
 
 
+def test_missing_master_key_is_optional_and_removed_from_active_config(tmp_path, monkeypatch):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.config_text())
+    config["general_settings"] = {"master_key": "os.environ/LITELLM_MASTER_KEY"}
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.delenv("LITELLM_MASTER_KEY", raising=False)
+
+    assert "LITELLM_MASTER_KEY" not in manager.missing_environment_variables()
+    manager._write_active_config()
+    active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
+    assert "master_key" not in active.get("general_settings", {})
+
+
 def test_local_ollama_reports_host_free_memory(tmp_path, monkeypatch):
     manager = make_manager(tmp_path)
 
@@ -274,7 +293,7 @@ def test_dashboard_settings_are_not_forwarded_to_litellm(tmp_path):
     assert settings["guardrail"]["provider_model"] == "dos"
 
 
-def test_database_mode_uses_named_dynamic_cloudera_credentials(tmp_path, monkeypatch):
+def test_sqlite_mode_maps_dynamic_cloudera_credentials(tmp_path):
     manager = make_manager(tmp_path)
     config = yaml.safe_load(manager.config_text())
     config["model_list"][0]["litellm_params"] = {
@@ -282,80 +301,19 @@ def test_database_mode_uses_named_dynamic_cloudera_credentials(tmp_path, monkeyp
         "api_key": "os.environ/CLOUDERA_ABC_CDP_TOKEN",
     }
     manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
-    monkeypatch.setenv("LITELLM_SALT_KEY", "stable-test-salt")
-
     manager._write_active_config()
 
     active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
     params = active["model_list"][0]["litellm_params"]
-    assert params["litellm_credential_name"] == "ia_gateway_cloudera_abc_cdp_token"
     assert params["api_key"] == "os.environ/CLOUDERA_ABC_CDP_TOKEN"
-    assert active["general_settings"]["database_url"] == "os.environ/DATABASE_URL"
-    assert active["general_settings"]["store_model_in_db"] is True
+    assert "database_url" not in active.get("general_settings", {})
+    dashboard = __import__("json").loads(manager.dashboard_settings_file.read_text(encoding="utf-8"))
+    assert dashboard["provider_api_key_env"]["uno"] == "CLOUDERA_ABC_CDP_TOKEN"
 
 
-def test_database_mode_requires_stable_salt(tmp_path, monkeypatch):
+def test_cloudera_credential_sync_is_dynamic_without_external_database(tmp_path):
     manager = make_manager(tmp_path)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
-    monkeypatch.delenv("LITELLM_SALT_KEY", raising=False)
-    try:
-        manager._write_active_config()
-    except RuntimeError as exc:
-        assert "LITELLM_SALT_KEY" in str(exc)
-    else:
-        raise AssertionError("Se esperaba exigir una clave de cifrado estable")
-
-
-def test_cloudera_credential_sync_creates_and_updates_without_restart(tmp_path, monkeypatch):
-    from gateway.cloudera import ClouderaCatalog
-
-    manager = make_manager(tmp_path)
-    catalog = ClouderaCatalog(manager.runtime_dir)
-    catalog.save_connection("CDP", "inference", "https://ml.example", "fresh-token")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
-    monkeypatch.setenv("LITELLM_MASTER_KEY", "master-key")
-    calls = []
-
-    class Response:
-        def __enter__(self): return self
-        def __exit__(self, *_args): return False
-
-    def create_flow(request, timeout=10):
-        calls.append(request)
-        if request.method == "GET":
-            raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, None)
-        return Response()
-
-    monkeypatch.setattr("gateway.core.urllib.request.urlopen", create_flow)
     assert manager.sync_cloudera_credentials() is True
-    assert [request.method for request in calls] == ["GET", "POST"]
-    assert b'"api_key": "fresh-token"' in calls[-1].data
-
-    calls.clear()
-    monkeypatch.setattr("gateway.core.urllib.request.urlopen", lambda request, timeout=10: calls.append(request) or Response())
-    assert manager.sync_cloudera_credentials() is True
-    assert [request.method for request in calls] == ["GET", "PATCH"]
-
-
-def test_database_preparation_generates_client_and_applies_migrations(tmp_path, monkeypatch):
-    manager = make_manager(tmp_path)
-    prisma = tmp_path / ".venv" / "bin" / "prisma"
-    prisma.parent.mkdir(parents=True)
-    prisma.write_text("", encoding="utf-8")
-    calls = []
-
-    def completed(command, **kwargs):
-        calls.append((command, kwargs))
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
-
-    monkeypatch.setattr("gateway.core.subprocess.run", completed)
-    manager._prepare_database({"DATABASE_URL": "postgresql://example/db"})
-
-    assert calls[0][0][1] == "generate"
-    assert calls[1][0][1:3] == ["migrate", "deploy"]
-    assert calls[0][1]["env"]["PRISMA_HOME_DIR"].endswith("runtime/prisma")
-    assert str(prisma.parent) in calls[0][1]["env"]["PATH"]
 
 
 def test_guardrail_without_selected_model_is_disabled(tmp_path):

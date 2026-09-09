@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import threading
 import urllib.error
@@ -29,28 +30,68 @@ class ClouderaCatalog:
     SECRET_FIELDS = {"token", "workload_password", "cdp_private_key"}
 
     def __init__(self, runtime_dir: Path) -> None:
-        """Ubica el almacén privado dentro de ``runtime`` y crea su cerrojo."""
+        """Ubica el almacén SQLite privado y migra el JSON legado si existe."""
 
-        self.path = runtime_dir / "cloudera-connections.json"
+        self.path = runtime_dir / "cloudera.sqlite3"
+        self.legacy_path = runtime_dir / "cloudera-connections.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._renewal_lock = threading.RLock()
+        self._initialize_store()
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.path, timeout=10)
+
+    def _initialize_store(self) -> None:
+        """Crea SQLite e importa una sola vez el catálogo JSON anterior."""
+
+        with self._renewal_lock, self._connect() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS catalog_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                )"""
+            )
+            os.chmod(self.path, 0o600)
+            exists = connection.execute("SELECT 1 FROM catalog_state WHERE id=1").fetchone()
+            if exists:
+                return
+            initial: dict[str, Any] = {"connections": [], "model_tokens": {}}
+            try:
+                legacy = json.loads(self.legacy_path.read_text(encoding="utf-8"))
+                if isinstance(legacy, dict):
+                    initial = legacy
+            except (OSError, ValueError):
+                pass
+            connection.execute(
+                "INSERT INTO catalog_state(id,payload) VALUES(1,?)",
+                (json.dumps(initial, ensure_ascii=False),),
+            )
 
     def _read(self) -> dict[str, Any]:
-        """Lee el JSON privado y degrada a un catálogo vacío si está ausente."""
+        """Lee el documento del catálogo dentro de una transacción SQLite corta."""
 
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            with self._renewal_lock, self._connect() as connection:
+                row = connection.execute("SELECT payload FROM catalog_state WHERE id=1").fetchone()
+            data = json.loads(row[0]) if row else {}
             return data if isinstance(data, dict) else {"connections": [], "model_tokens": {}}
-        except (OSError, ValueError):
+        except (OSError, ValueError, sqlite3.Error):
             return {"connections": [], "model_tokens": {}}
 
     def _write(self, data: dict[str, Any]) -> None:
-        """Sustituye el almacén atómicamente y restringe permisos a su dueño."""
+        """Actualiza el catálogo atómicamente y restringe permisos a su dueño."""
 
-        temp = self.path.with_suffix(".tmp")
-        temp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.chmod(temp, 0o600)
-        temp.replace(self.path)
+        payload = json.dumps(data, ensure_ascii=False)
+        with self._renewal_lock, self._connect() as connection:
+            connection.execute(
+                """INSERT INTO catalog_state(id,payload,updated_at)
+                VALUES(1,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
+                updated_at=excluded.updated_at""",
+                (payload,),
+            )
+        os.chmod(self.path, 0o600)
 
     @staticmethod
     def _id(kind: str, url: str) -> str:
