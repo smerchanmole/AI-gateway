@@ -915,9 +915,12 @@ def clear_process_log(day: Optional[str] = None):
 if __name__ == "__main__":
     import uvicorn
 
-    web_port = environment_port("CDSW_APP_PORT", 8081)
+    # CDSW_APP_PORT puede estar ocupado por el editor del proyecto. El panel
+    # conserva su autenticación propia y usa el puerto público legado, mientras
+    # LiteLLM permanece en CDSW_READONLY_PORT para los clientes de inferencia.
+    web_port = environment_port("CDSW_PUBLIC_PORT", 8080)
     if web_port == manager.port:
-        raise RuntimeError("CDSW_APP_PORT y CDSW_READONLY_PORT deben usar puertos distintos")
+        raise RuntimeError("CDSW_PUBLIC_PORT y CDSW_READONLY_PORT deben usar puertos distintos")
     # Cloudera exige un servicio HTTP sobre loopback y termina TLS en su proxy.
     # En local no existe ese proxy, de modo que Uvicorn sirve HTTPS directamente.
     cloudera_proxy = bool(os.environ.get("CDSW_DOMAIN", "").strip())

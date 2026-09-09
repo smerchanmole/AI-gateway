@@ -15,7 +15,7 @@ valores locales por defecto; en Cloudera se leen automáticamente de las
 variables proporcionadas por el Workbench:
 
 - las aplicaciones consumen una única API en el puerto `8090`;
-- el panel de administración vive por **HTTPS** en el puerto `8081`;
+- el panel de administración vive por **HTTPS** en el puerto `8080`;
 - `config.yaml` es la fuente de verdad versionable;
 - los secretos y artefactos de ejecución permanecen fuera de Git;
 - cada petición deja una traza diaria consultable y exportable.
@@ -68,7 +68,7 @@ flowchart LR
         APP["Aplicación / agente / SDK OpenAI"]
     end
 
-    subgraph PANEL["IA Gateway · puerto 8081"]
+    subgraph PANEL["IA Gateway · puerto 8080"]
         API["FastAPI · app.py"]
         UI["HTML + CSS + JavaScript"]
         CORE["GatewayManager"]
@@ -111,7 +111,7 @@ flowchart LR
 
 | Plano | Puerto/almacén | Responsabilidad |
 |---|---|---|
-| Administración | `https://servidor:8081` | UI autenticada, CRUD, pruebas, salud y logs. |
+| Administración | `https://servidor:8080` | UI autenticada, CRUD, pruebas, salud y logs. |
 | Inferencia | `127.0.0.1:8090` | API OpenAI-compatible que consumen las aplicaciones. |
 | Proveedores | remoto o `:11434` | Ejecución real del modelo. |
 
@@ -119,7 +119,7 @@ Los puertos efectivos se resuelven al arrancar:
 
 | Proceso | Variable | Fallback local | Binding |
 |---|---|---:|---|
-| Panel FastAPI | `CDSW_APP_PORT` | `8081` | `127.0.0.1` |
+| Panel FastAPI | `CDSW_PUBLIC_PORT` | `8080` | `127.0.0.1` |
 | LiteLLM OpenAI-compatible | `CDSW_READONLY_PORT` | `8090` | `127.0.0.1` |
 
 Esto permite ejecutar el mismo código en macOS/Linux y como aplicación de
@@ -134,7 +134,7 @@ si contiene un valor no numérico, fuera de `1–65535`, o ambos valores coincid
 el arranque se detiene con un mensaje explícito.
 
 El panel no sustituye a LiteLLM. Lo administra. Una aplicación de negocio no
-debería llamar al puerto `8081`; debe usar el gateway del puerto `8090`.
+debería llamar al puerto `8080`; debe usar el gateway del puerto `8090`.
 
 ### Configuración fuente y configuración activa
 
@@ -261,7 +261,7 @@ OPENAI_API_KEY=sk-tu-clave-openai
 Para simular localmente los puertos que inyectará Cloudera:
 
 ```dotenv
-CDSW_APP_PORT=8081
+CDSW_PUBLIC_PORT=8080
 CDSW_READONLY_PORT=8090
 ```
 
@@ -291,7 +291,7 @@ python app.py
 
 Después:
 
-1. Abre <https://127.0.0.1:8081>.
+1. Abre <https://127.0.0.1:8080>.
 2. Acepta una sola vez el aviso del certificado autofirmado local.
 3. Entra con el usuario fijo `admin` y la contraseña inicial `admin`.
 4. El panel obliga a cambiarla por una contraseña robusta antes de permitir operaciones.
@@ -299,7 +299,7 @@ Después:
 
 En el primer arranque **local** se generan `runtime/tls/ia-gateway.crt` y su clave privada
 con permisos `0600`. El panel escucha únicamente en `127.0.0.1`, usando
-`CDSW_APP_PORT` o `8081`; la cookie de sesión sólo viaja cifrada. En Cloudera no
+`CDSW_PUBLIC_PORT` o `8080`; la cookie de sesión sólo viaja cifrada. En Cloudera no
 se genera un certificado interno: su proxy ofrece el HTTPS público. Para evitar el aviso del navegador en una
 instalación corporativa, importa el certificado en los equipos administradores
 o sustitúyelo por uno emitido por vuestra CA interna.
@@ -333,7 +333,7 @@ Ejemplos de alias: `topito`, `qwen-local`, `embedding-local` o
 Dentro de Cloudera, las URLs publicadas siguen normalmente este patrón:
 
 ```text
-Panel:    https://<$CDSW_ENGINE_ID>.<$CDSW_DOMAIN>
+Panel:    https://public-<$CDSW_ENGINE_ID>.<$CDSW_DOMAIN>
 LiteLLM:  https://read-only-<$CDSW_ENGINE_ID>.<$CDSW_DOMAIN>/v1
 ```
 
@@ -994,7 +994,7 @@ Los tests usan directorios temporales y dobles HTTP; no deben consumir cuota rea
 
 ## 15. API del panel
 
-Swagger autenticado: <https://127.0.0.1:8081/api/docs>
+Swagger autenticado: <https://127.0.0.1:8080/api/docs>
 
 | Método | Ruta | Uso |
 |---|---|---|

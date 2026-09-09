@@ -39,9 +39,9 @@ canónica y explica arquitectura, seguridad, YAML, Ollama, Cloudera y capacidad.
    Si el runtime lo evalúa como celda y no existe __file__, usa como alternativa
    el directorio de trabajo actual del proyecto.
 
-6. Abrir https://127.0.0.1:8081 y pulsar «Arrancar».
+6. Abrir https://127.0.0.1:8080 y pulsar «Arrancar».
 
-El panel escucha en 127.0.0.1:${CDSW_APP_PORT:-8081}. Las aplicaciones
+El panel escucha en 127.0.0.1:${CDSW_PUBLIC_PORT:-8080}. Las aplicaciones
 consumidoras llaman al gateway OpenAI-compatible en
 http://127.0.0.1:${CDSW_READONLY_PORT:-8090}/v1 usando LITELLM_MASTER_KEY.
 Cloudera define ambas variables automáticamente y publica ambos servicios por
