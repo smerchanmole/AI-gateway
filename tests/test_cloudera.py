@@ -256,9 +256,9 @@ def test_cloud_renewal_repairs_markdown_url_and_calls_cdp_cli(tmp_path, monkeypa
     result = catalog.renew_token(connection["id"], force=True)
 
     assert result["renewed"] is True
-    assert captured["command"][2] == "https://iamapi.us-west-1.cdp.cloudera.com"
+    assert captured["command"][2] == "https://iamapi.us-west-1.altus.cloudera.com"
     assert captured["timeout"] == 60
-    assert catalog.connections()[0]["renewal_url"] == "https://iamapi.us-west-1.cdp.cloudera.com"
+    assert catalog.connections()[0]["renewal_url"] == "https://iamapi.us-west-1.altus.cloudera.com"
 
 
 def test_cloud_renewal_timeout_becomes_controlled_runtime_error(tmp_path, monkeypatch):
@@ -281,7 +281,7 @@ def test_cloud_renewal_timeout_becomes_controlled_runtime_error(tmp_path, monkey
         catalog.renew_token(connection["id"], force=True)
     except RuntimeError as exc:
         assert "salida HTTPS" in str(exc)
-        assert "iamapi.us-west-1.cdp.cloudera.com" in str(exc)
+        assert "iamapi.us-west-1.altus.cloudera.com" in str(exc)
     else:
         raise AssertionError("El timeout del CDP CLI debe convertirse en un error controlado")
 

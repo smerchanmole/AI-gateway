@@ -60,4 +60,4 @@ def test_proxy_preserves_envoy_external_ip_in_internal_header():
     headers = forwarded_headers(request, forward_authorization=False)
 
     assert headers["X-IA-Gateway-Client-IP"] == "198.51.100.27"
-    assert headers["X-Forwarded-For"].endswith("127.0.0.6")
+    assert headers["X-Forwarded-For"] == "198.51.100.27"

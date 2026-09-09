@@ -77,11 +77,13 @@ def forwarded_headers(
         if name.lower() not in blocked
     )
     peer = request.remote or ""
-    previous = request.headers.get("X-Forwarded-For", "").strip()
-    headers["X-Forwarded-For"] = ", ".join(item for item in (previous, peer) if item)
-    # Siempre sobrescribimos nuestra cabecera interna: el cliente no puede
-    # escoger el valor que consumirá el logger situado detrás de este proxy.
+    # Este proceso es la frontera de confianza del servicio. Entrega al
+    # downstream una única IP normalizada para que Uvicorn no seleccione como
+    # cliente el último sidecar 127.0.0.6 de una cadena X-Forwarded-For.
     client_ip = _client_ip(request)
+    headers["X-Forwarded-For"] = client_ip or peer
+    # Siempre sobrescribimos nuestra cabecera interna: el logger no consume
+    # directamente un valor X-IA-Gateway-Client-IP aportado desde Internet.
     if client_ip:
         headers["X-IA-Gateway-Client-IP"] = client_ip
     headers["X-Forwarded-Proto"] = request.headers.get("X-Forwarded-Proto", request.scheme)

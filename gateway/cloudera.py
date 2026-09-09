@@ -43,6 +43,12 @@ class ClouderaCatalog:
         parsed = urllib.parse.urlparse(candidate)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise RuntimeError("La URL de renovación debe ser una URL HTTP o HTTPS válida")
+        # IAM conserva el hostname histórico ``altus`` para el Control Plane
+        # us-west-1. El nombre simétrico bajo ``cdp.cloudera.com`` parece
+        # plausible, pero no tiene DNS y provoca NameResolutionError.
+        if (parsed.hostname or "").lower() == "iamapi.us-west-1.cdp.cloudera.com":
+            parsed = parsed._replace(netloc="iamapi.us-west-1.altus.cloudera.com")
+            candidate = urllib.parse.urlunparse(parsed)
         return candidate
 
     def __init__(self, runtime_dir: Path) -> None:
