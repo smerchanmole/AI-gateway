@@ -40,10 +40,23 @@ const escapeHtml = (value) => String(value ?? "").replace(
 async function api(url, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
-  if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  let body = options.body;
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
+    headers["X-CSRF-Token"] = csrfToken;
+    // Redundancia deliberada para proxies Cloudera que retiren cabeceras X-*.
+    // El token permanece en el cuerpo y nunca se incorpora a la URL.
+    if (headers["Content-Type"].startsWith("application/json")) {
+      let payload = {};
+      if (typeof body === "string" && body.length) payload = JSON.parse(body);
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        body = JSON.stringify({...payload, _csrf_token: csrfToken});
+      }
+    }
+  }
   const response = await fetch(url, {
     ...options,
     headers,
+    body,
     credentials: "same-origin",
   });
   if (!response.ok) {
@@ -355,7 +368,7 @@ async function loadStatus() {
   /** Refresca salud del proceso; se ejecuta cada tres segundos al final. */
   const status = await api("/api/status");
   gatewayProcessAlive = status.process_alive;
-  $("#gateway-address").textContent = `${status.host}:${status.port}`;
+  $("#gateway-address").textContent = `${status.host}:${status.public_port || status.port}`;
 
   $("#status").classList.toggle("online", status.running);
   $("#status").classList.toggle("unhealthy", (status.process_alive && !status.running) || status.port_conflict);
@@ -861,7 +874,11 @@ function renderKpis(kpis) {
   $("#log-kpis").innerHTML = cards.map(([label, value, note]) => `<article class="kpi-card"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join("");
   const peak = Math.max(...kpis.hourly, 0);
   $("#chart-summary").textContent = peak ? `Máximo ${peak} peticiones en una hora` : "Sin actividad";
-  $("#hourly-chart").innerHTML = kpis.hourly.map((value, hour) => `<div class="hour-column" title="${String(hour).padStart(2, "0")}:00 · ${value} peticiones"><span>${value || ""}</span><i style="height:${peak ? Math.max(3, value / peak * 100) : 3}%"></i><small>${[0, 6, 12, 18, 23].includes(hour) ? String(hour).padStart(2, "0") : ""}</small></div>`).join("");
+  $("#hourly-chart").innerHTML = kpis.hourly.map((value, hour) => {
+    const height = peak && value ? Math.max(3, value / peak * 100) : 3;
+    const y = 100 - height;
+    return `<div class="hour-column" title="${String(hour).padStart(2, "0")}:00 · ${value} peticiones"><span>${value || ""}</span><svg class="hour-bar" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect x="0" y="${y}" width="100" height="${height}" rx="3"></rect></svg><small>${[0, 6, 12, 18, 23].includes(hour) ? String(hour).padStart(2, "0") : ""}</small></div>`;
+  }).join("");
 }
 
 function logTable(rows) {

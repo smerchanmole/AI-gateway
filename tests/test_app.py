@@ -1,8 +1,10 @@
 from fastapi.testclient import TestClient
+from datetime import date
 import pytest
 
 import app as dashboard
 from gateway.auth import AuthStore
+from gateway.log_store import daily_log_path, insert_log
 
 
 def test_dependency_bootstrap_runs_before_external_imports():
@@ -73,6 +75,19 @@ def test_gateway_auth_headers_require_general_key(monkeypatch):
         assert "LITELLM_MASTER_KEY" in str(exc)
     else:
         raise AssertionError("Se esperaba un error sin master key")
+
+
+def test_dynamic_cloudera_credentials_do_not_restart_litellm(monkeypatch):
+    calls = []
+    monkeypatch.setattr(dashboard.manager, "process_alive", lambda: True)
+    monkeypatch.setattr(dashboard.manager, "sync_cloudera_credentials", lambda: True)
+    monkeypatch.setattr(dashboard.manager, "stop", lambda: calls.append("stop"))
+    monkeypatch.setattr(dashboard.manager, "start", lambda: calls.append("start"))
+
+    result = dashboard.apply_cloudera_credential_changes()
+
+    assert result == {"litellm_credentials_updated": True, "litellm_restarted": False}
+    assert calls == []
 
 
 def test_dashboard_disables_cache_and_uses_test_tabs(client):
@@ -228,4 +243,35 @@ def test_dashboard_exposes_secure_login_and_password_change():
     assert 'id="login-form"' in html
     assert 'id="change-password-button"' in html
     assert 'autocomplete="current-password"' in html
+
+
+def test_hourly_chart_does_not_depend_on_inline_styles_blocked_by_csp():
+    """La CSP style-src self debe ser compatible con la altura de las barras."""
+
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    assert 'style="height:' not in javascript
+    assert 'class="hour-bar"' in javascript
+    assert 'viewBox="0 0 100 100"' in javascript
+
+
+def test_cloudera_log_reader_includes_historical_provider_model_rows(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "dashboard_settings.json").write_text(
+        '{"provider_models":{"nemotron-publico":'
+        '"openai/nvidia/nemotron-3-super-120b-a12b"}}',
+        encoding="utf-8",
+    )
+    selected = date(2026, 9, 9)
+    insert_log(
+        daily_log_path(runtime, selected),
+        "openai/nvidia/nemotron-3-super-120b-a12b",
+        "success",
+        100,
+        {},
+        {"usage": {}},
+    )
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    rows = dashboard.read_model_day_logs("nemotron-publico", selected, 500)
+    assert len(rows) == 1
 """Pruebas del contrato HTTP y de los elementos esenciales del dashboard."""

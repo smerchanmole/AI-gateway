@@ -39,7 +39,13 @@ def _log_path(start: Any) -> Path:
 def _model(kwargs: dict[str, Any]) -> str:
     """Prefiere el alias público (`model_group`) al identificador del proveedor."""
     metadata = (kwargs.get("litellm_params") or {}).get("metadata") or {}
-    return str(metadata.get("model_group") or metadata.get("user_api_key_model") or kwargs.get("model") or "desconocido")
+    return str(
+        metadata.get("dashboard_model_alias")
+        or metadata.get("model_group")
+        or metadata.get("user_api_key_model")
+        or kwargs.get("model")
+        or "desconocido"
+    )
 
 
 def _duration_ms(start: Any, end: Any) -> int | None:
@@ -165,6 +171,10 @@ class DashboardLogger(CustomLogger):
         target = str(data.get("model") or "")
         provider_model = _provider_model(target)
         messages = data.get("messages")
+        if provider_model:
+            metadata = dict(data.get("metadata") or {})
+            metadata["dashboard_model_alias"] = target
+            data["metadata"] = metadata
         if (not settings.get("enabled") or not settings.get("provider_model") or
                 not isinstance(messages, list) or target == settings.get("model")):
             if provider_model:

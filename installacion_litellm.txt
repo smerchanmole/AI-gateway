@@ -39,10 +39,15 @@ canónica y explica arquitectura, seguridad, YAML, Ollama, Cloudera y capacidad.
    Si el runtime lo evalúa como celda y no existe __file__, usa como alternativa
    el directorio de trabajo actual del proyecto.
 
-6. Abrir https://127.0.0.1:8080 y pulsar «Arrancar».
+6. El proxy streaming `aiohttp` se instala desde requirements.txt. No requiere
+   paquetes del sistema y se ejecuta como proceso separado del panel.
+7. Abrir https://127.0.0.1:8090 y pulsar «Arrancar».
 
-El panel escucha en 127.0.0.1:${CDSW_PUBLIC_PORT:-8080}. Las aplicaciones
-consumidoras llaman al gateway OpenAI-compatible en
-http://127.0.0.1:${CDSW_READONLY_PORT:-8090}/v1 usando LITELLM_MASTER_KEY.
-Cloudera define ambas variables automáticamente y publica ambos servicios por
-HTTPS. En local se usan los fallbacks y el panel genera un certificado HTTPS.
+El proxy escucha en ${IA_GATEWAY_PORT:-8090}; dentro del contenedor reenvía `/v1/*`
+directamente a LiteLLM en 127.0.0.1:${IA_GATEWAY_LITELLM_PORT:-14000} y las demás
+rutas al panel en 127.0.0.1:${IA_GATEWAY_DASHBOARD_PORT:-18080}. Cloudera sólo
+publica esa entrada. En local el proxy usa el certificado HTTPS autofirmado.
+
+Para renovar CDP tokens sin reiniciar LiteLLM configura DATABASE_URL hacia
+PostgreSQL y una LITELLM_SALT_KEY estable. Gateway AI crea o actualiza las
+credenciales cifradas mediante la API interna de LiteLLM.

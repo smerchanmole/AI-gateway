@@ -1,0 +1,35 @@
+services:
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - litellm-postgres:/var/lib/postgresql/data
+
+  gateway:
+    build: .
+    depends_on:
+      database:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      IA_GATEWAY_PORT: "8090"
+      IA_GATEWAY_BIND_HOST: "0.0.0.0"
+      IA_GATEWAY_LITELLM_PORT: "14000"
+      IA_GATEWAY_DASHBOARD_PORT: "18080"
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@database:5432/litellm
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./runtime:/app/runtime
+
+volumes:
+  litellm-postgres:

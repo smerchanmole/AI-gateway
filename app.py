@@ -232,6 +232,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
 import hmac
+import json
 import re
 import secrets
 import time
@@ -246,6 +247,7 @@ from pydantic import BaseModel, Field
 
 from gateway.core import GatewayManager, environment_port
 from gateway.cloudera import ClouderaCatalog
+from gateway.edge import EdgeProxy, public_gateway_port
 from gateway.excel_export import build_logs_xlsx
 from gateway.log_store import available_days, log_kpis, parse_day, read_day_logs
 from gateway.auth import AuthStore, AuthenticationError, LoginRateLimited
@@ -255,17 +257,48 @@ from gateway.tls import ensure_self_signed_certificate
 ROOT = BOOTSTRAP_ROOT
 # Las claves permanecen fuera del YAML y de Git, pero se heredan al proxy hijo.
 load_dotenv(ROOT / ".env")
+PUBLIC_GATEWAY_PORT = public_gateway_port()
+INTERNAL_DASHBOARD_PORT = environment_port("IA_GATEWAY_DASHBOARD_PORT", 18080)
 manager = GatewayManager(ROOT)
 cloudera = ClouderaCatalog(ROOT / "runtime")
 auth = AuthStore(ROOT / "runtime")
 
+# En local el proxy de borde también termina TLS; dentro de Cloudera esa función pertenece
+# al proxy de la plataforma y nuestro listener recibe HTTP sobre loopback.
+_behind_cloudera = bool(os.environ.get("CDSW_DOMAIN", "").strip())
+_edge_certificate: Path | None = None
+_edge_private_key: Path | None = None
+if not _behind_cloudera:
+    _edge_certificate, _edge_private_key = ensure_self_signed_certificate(ROOT / "runtime")
+edge = EdgeProxy(
+    ROOT,
+    PUBLIC_GATEWAY_PORT,
+    INTERNAL_DASHBOARD_PORT,
+    manager.port,
+    os.environ.get("IA_GATEWAY_BIND_HOST", "127.0.0.1").strip() or "127.0.0.1",
+    _edge_certificate,
+    _edge_private_key,
+)
+
 
 def refresh_cloudera_tokens() -> None:
-    """Renueva secretos y reinicia el proxy sólo cuando cambió alguno."""
+    """Renueva secretos y los inyecta dinámicamente en LiteLLM."""
     results = cloudera.renew_due_tokens()
     if any(item.get("renewed") for item in results) and manager.process_alive():
-        manager.stop()
-        manager.start()
+        apply_cloudera_credential_changes()
+
+
+def apply_cloudera_credential_changes() -> dict[str, bool]:
+    """Aplica secretos en vivo o reinicia sólo en el modo legado sin DB."""
+
+    if not manager.process_alive():
+        return {"litellm_credentials_updated": False, "litellm_restarted": False}
+    dynamic = manager.sync_cloudera_credentials()
+    if dynamic:
+        return {"litellm_credentials_updated": True, "litellm_restarted": False}
+    manager.stop()
+    manager.start()
+    return {"litellm_credentials_updated": False, "litellm_restarted": True}
 
 
 async def cloudera_token_supervisor() -> None:
@@ -289,7 +322,19 @@ def gateway_auth_headers() -> dict[str, str]:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Garantiza que el proxy hijo no sobreviva accidentalmente al panel."""
+    """Supervisa el proxy, la renovación de tokens, el panel y LiteLLM."""
+    edge.start()
+    public_scheme = "http" if _behind_cloudera else "https"
+    print(
+        f"[IA Gateway] Entrada pública Python: "
+        f"{public_scheme}://{edge.listen_host}:{PUBLIC_GATEWAY_PORT}",
+        flush=True,
+    )
+    print(
+        f"[IA Gateway] Rutas: /v1/* → LiteLLM 127.0.0.1:{manager.port}; "
+        f"resto → panel 127.0.0.1:{INTERNAL_DASHBOARD_PORT}",
+        flush=True,
+    )
     supervisor = asyncio.create_task(cloudera_token_supervisor())
     try:
         yield
@@ -299,6 +344,7 @@ async def lifespan(_app: FastAPI):
             await supervisor
         # El proxy es hijo del panel y no debe quedar huérfano al cerrar la app.
         manager.stop()
+        edge.stop()
 
 
 app = FastAPI(title="IA Gateway", docs_url="/api/docs", lifespan=lifespan)
@@ -547,7 +593,7 @@ def home():
 @app.get("/api/status")
 def status():
     """Devuelve salud real y telemetría; un PID por sí solo no implica servicio."""
-    return manager.status()
+    return {**manager.status(), "public_port": PUBLIC_GATEWAY_PORT}
 
 
 @app.get("/api/models")
@@ -583,10 +629,13 @@ def save_cloudera_connection(connection: ClouderaConnection):
     """Valida, normaliza y persiste una nueva conexión Cloudera."""
 
     try:
-        return cloudera.save_connection(connection.name, connection.kind, connection.url, connection.token,
+        result = cloudera.save_connection(connection.name, connection.kind, connection.url, connection.token,
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
             connection.renewal_url, connection.workload_name)
+        if manager.process_alive() and connection.token.strip():
+            result.update(apply_cloudera_credential_changes())
+        return result
     except RuntimeError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -596,10 +645,13 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
     """Actualiza una conexión conservando los secretos cuyos campos estén vacíos."""
 
     try:
-        return cloudera.update_connection(connection_id, connection.name, connection.kind, connection.url, connection.token,
+        result = cloudera.update_connection(connection_id, connection.name, connection.kind, connection.url, connection.token,
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
             connection.renewal_url, connection.workload_name)
+        if manager.process_alive() and connection.token.strip():
+            result.update(apply_cloudera_credential_changes())
+        return result
     except KeyError as exc:
         raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
     except RuntimeError as exc:
@@ -608,13 +660,12 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
 
 @app.post("/api/cloudera/connections/{connection_id}/renew-token")
 def renew_cloudera_token(connection_id: str, request: ClouderaTokenRenewal):
-    """Renueva un CDP token y recarga LiteLLM si la credencial cambió."""
+    """Renueva un CDP token y actualiza la credencial activa sin reinicio."""
 
     try:
         result = cloudera.renew_token(connection_id, force=request.force)
         if result["renewed"] and manager.process_alive():
-            manager.stop(); manager.start()
-            result["litellm_restarted"] = True
+            result.update(apply_cloudera_credential_changes())
         return result
     except KeyError as exc:
         raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
@@ -648,8 +699,11 @@ def save_cloudera_model_token(connection_id: str, external_id: str, credential: 
     if not credential.token.strip(): raise HTTPException(422, "El token del modelo está vacío")
     try:
         variable = cloudera.save_model_token(connection_id, external_id, credential.token)
-        return {"api_key_env": variable, "saved": True,
-                **cloudera.model_token_status(connection_id, external_id)}
+        result = {"api_key_env": variable, "saved": True,
+                  **cloudera.model_token_status(connection_id, external_id)}
+        if manager.process_alive():
+            result.update(apply_cloudera_credential_changes())
+        return result
     except KeyError as exc:
         raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
     except RuntimeError as exc:
@@ -853,6 +907,29 @@ async def model_latency(name: str):
     return {"model": name, "latency_ms": latency_ms}
 
 
+def read_model_day_logs(name: str, selected, limit: int) -> list[dict]:
+    """Incluye filas antiguas guardadas con el identificador del proveedor."""
+
+    model_names = [name]
+    try:
+        settings = json.loads(
+            (ROOT / "runtime" / "dashboard_settings.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        settings = {}
+    provider_model = (settings.get("provider_models") or {}).get(name)
+    if provider_model and provider_model != name:
+        model_names.append(str(provider_model))
+    rows = []
+    for model_name in model_names:
+        rows.extend(read_day_logs(ROOT / "runtime", model_name, selected, limit))
+    rows.sort(
+        key=lambda item: item.get("started_at") or item.get("created_at") or "",
+        reverse=True,
+    )
+    return rows[:limit]
+
+
 @app.get("/api/models/{name}/logs")
 def logs(name: str, day: Optional[str] = None, limit: int = Query(500, ge=1, le=5000)):
     """Consulta eventos estructurados con un límite defensivo de filas."""
@@ -860,7 +937,7 @@ def logs(name: str, day: Optional[str] = None, limit: int = Query(500, ge=1, le=
         selected = parse_day(day)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    rows = read_day_logs(ROOT / "runtime", name, selected, limit)
+    rows = read_model_day_logs(name, selected, limit)
     return {"day": selected.isoformat(), "rows": rows, "kpis": log_kpis(rows)}
 
 
@@ -879,7 +956,7 @@ def export_logs(name: str, day: Optional[str] = None):
         selected = parse_day(day)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    rows = read_day_logs(ROOT / "runtime", name, selected, 50_000)
+    rows = read_model_day_logs(name, selected, 50_000)
     content = build_logs_xlsx(name, selected.isoformat(), rows, log_kpis(rows))
     filename = re.sub(r"[^A-Za-z0-9_.-]", "_", f"logs-{name}-{selected.isoformat()}.xlsx")
     return Response(content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -915,17 +992,13 @@ def clear_process_log(day: Optional[str] = None):
 if __name__ == "__main__":
     import uvicorn
 
-    # CDSW_APP_PORT puede estar ocupado por el editor del proyecto. El panel
-    # conserva su autenticación propia y usa el puerto público legado, mientras
-    # LiteLLM permanece en CDSW_READONLY_PORT para los clientes de inferencia.
-    web_port = environment_port("CDSW_PUBLIC_PORT", 8080)
-    if web_port == manager.port:
-        raise RuntimeError("CDSW_PUBLIC_PORT y CDSW_READONLY_PORT deben usar puertos distintos")
-    # Cloudera exige un servicio HTTP sobre loopback y termina TLS en su proxy.
-    # En local no existe ese proxy, de modo que Uvicorn sirve HTTPS directamente.
-    cloudera_proxy = bool(os.environ.get("CDSW_DOMAIN", "").strip())
-    tls: dict[str, str] = {}
-    if not cloudera_proxy:
-        certificate, private_key = ensure_self_signed_certificate(ROOT / "runtime")
-        tls = {"ssl_certfile": str(certificate), "ssl_keyfile": str(private_key)}
-    uvicorn.run("app:app", host="127.0.0.1", port=web_port, reload=False, **tls)
+    internal_ports = {PUBLIC_GATEWAY_PORT, INTERNAL_DASHBOARD_PORT, manager.port}
+    if len(internal_ports) != 3:
+        raise RuntimeError(
+            "IA_GATEWAY_PORT, IA_GATEWAY_DASHBOARD_PORT e IA_GATEWAY_LITELLM_PORT "
+            "deben usar puertos distintos"
+        )
+    # Uvicorn queda oculto. El proxy de borde es el único listener publicado y separa
+    # /v1 (LiteLLM) del panel y su /api administrativa.
+    # Pasar el objeto evita que Uvicorn vuelva a importar app.py y repita el bootstrap.
+    uvicorn.run(app, host="127.0.0.1", port=INTERNAL_DASHBOARD_PORT, reload=False)
