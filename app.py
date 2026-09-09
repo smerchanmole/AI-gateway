@@ -42,14 +42,31 @@ def install_runtime_requirements(python: Path) -> None:
     if not REQUIREMENTS_FILE.is_file():
         raise RuntimeError(f"No se encuentra el fichero de dependencias: {REQUIREMENTS_FILE}")
     pip_environment = os.environ.copy()
-    # Algunas imágenes CML exportan PIP_USER=1 para proteger su Python base.
-    # Dentro de nuestro venv esa opción es inválida; la anulamos sin eliminar
-    # PIP_INDEX_URL/PIP_PROXY, que pueden apuntar al repositorio corporativo.
+    # Algunas imágenes CML exportan rutas, constraints y PIP_USER=1 para
+    # proteger/cohesionar su Python base. Dentro de nuestro venv provocarían
+    # que pip viera MLflow como instalado o intentara respetar sus versiones.
+    # Conservamos las variables de índice/proxy que dan acceso al repositorio.
+    for inherited_name in (
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONUSERBASE",
+        "PIP_CONSTRAINT",
+        "PIP_BUILD_CONSTRAINT",
+        "PIP_PREFIX",
+        "PIP_TARGET",
+    ):
+        pip_environment.pop(inherited_name, None)
     pip_environment["PIP_USER"] = "0"
+    pip_environment["PYTHONNOUSERSITE"] = "1"
+    pip_environment["VIRTUAL_ENV"] = str(VENV_DIR)
+    pip_environment["PATH"] = (
+        str(python.parent) + os.pathsep + pip_environment.get("PATH", "")
+    )
     try:
         subprocess.run(
             [
                 str(python),
+                "-I",
                 "-m",
                 "pip",
                 "install",

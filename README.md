@@ -231,6 +231,10 @@ y proxy de `pip` necesarias para repositorios corporativos. Antes de relanzar,
 se eliminan `PYTHONPATH` y `PYTHONHOME` heredados y se activa
 `PYTHONNOUSERSITE=1`, impidiendo que módulos de `/usr/local` o `~/.local`
 se adelanten a los instalados dentro de `.venv`.
+La misma separación se aplica durante la instalación: `pip` se ejecuta con el
+modo aislado de Python (`-I`) y sin los constraints, prefijos o destinos que
+Cloudera aplica a su MLflow. De este modo `mlflow-cml-plugin` y su requisito
+`typing-extensions==4.10.0` no participan en la resolución privada de LiteLLM.
 Si Cloudera evalúa `app.py` como una celda y no define `__file__`, el bootstrap
 usa el directorio de trabajo del proyecto para localizar `requirements.txt`.
 

@@ -31,7 +31,8 @@ canónica y explica arquitectura, seguridad, YAML, Ollama, Cloudera y capacidad.
    antes de cargar FastAPI. Así no modifica ni entra en conflicto con MLflow y
    los paquetes del runtime de Cloudera. Un fallo cancela el arranque y muestra
    la causa en el log de sesión. La instalación fuerza --no-user para neutralizar
-   el PIP_USER=1 que algunas imágenes Cloudera aplican al Python compartido.
+   el PIP_USER=1 que algunas imágenes Cloudera aplican al Python compartido y
+   usa Python -I para no heredar MLflow, PYTHONPATH ni constraints globales.
    Si el runtime lo evalúa como celda y no existe __file__, usa como alternativa
    el directorio de trabajo actual del proyecto.
 
