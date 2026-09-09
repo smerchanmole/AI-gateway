@@ -72,6 +72,55 @@ def test_quick_test_explains_when_model_is_pending_restart(monkeypatch, client):
     assert "Aplicar cambios pendientes" in response.json()["detail"]
 
 
+def test_quick_test_propagates_external_ip_to_litellm(monkeypatch, client):
+    calls = []
+
+    class Response:
+        is_error = False
+        def json(self): return {"choices": [{"message": {"content": "OK"}}]}
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setattr(dashboard.manager, "models", lambda: [{
+        "name": "modelo", "enabled": True, "mode": "chat",
+    }])
+    monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
+    monkeypatch.setattr(dashboard.manager, "active_model_names", lambda: ["modelo"])
+    monkeypatch.setattr(dashboard.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    response = client.post(
+        "/api/models/modelo/test",
+        json={"prompt": "hola"},
+        headers={"X-Envoy-External-Address": "198.51.100.27"},
+    )
+
+    assert response.status_code == 200
+    assert calls[0][1]["headers"]["X-IA-Gateway-Client-IP"] == "198.51.100.27"
+
+
+def test_manual_token_renewal_records_controlled_error(monkeypatch, client):
+    recorded = []
+
+    class Catalog:
+        def renew_token(self, connection_id, force=False):
+            raise RuntimeError("CDP CLI no respondió en 60 segundos")
+
+        def record_renewal_error(self, connection_id, message):
+            recorded.append((connection_id, message))
+
+    monkeypatch.setattr(dashboard, "cloudera", Catalog())
+
+    response = client.post("/api/cloudera/connections/cdp-1/renew-token", json={"force": True})
+
+    assert response.status_code == 422
+    assert recorded == [("cdp-1", "CDP CLI no respondió en 60 segundos")]
+
+
 def test_gateway_auth_headers_ignore_legacy_general_key(monkeypatch):
     monkeypatch.setenv("LITELLM_MASTER_KEY", "general-test-key")
 
@@ -127,6 +176,29 @@ def test_dashboard_disables_cache_and_uses_test_tabs(client):
     assert 'id="yaml-editor"' in response.text
     assert 'id="model-form"' in response.text
     assert 'id="persistence"' in response.text
+    assert 'id="download-yaml-backup"' in response.text
+    assert 'id="yaml-import-file"' in response.text
+    assert 'id="import-yaml-backup"' in response.text
+
+
+def test_config_backup_downloads_exact_yaml_as_attachment(client):
+    response = client.get("/api/config/backup")
+
+    assert response.status_code == 200
+    assert response.text == dashboard.manager.config_text()
+    assert response.headers["content-type"].startswith("application/yaml")
+    assert "attachment" in response.headers["content-disposition"]
+    assert response.headers["content-disposition"].endswith('.yaml"')
+
+
+def test_yaml_import_uses_validation_size_limit_and_transactional_endpoint():
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "async function importYamlBackup()" in javascript
+    assert "file.size > 1_000_000" in javascript
+    assert 'api("/api/config/validate"' in javascript
+    assert 'api("/api/config", {method: "PUT"' in javascript
+    assert "await askRestart()" in javascript
 
 
 def test_dashboard_explains_sqlite_dynamic_token_mode():

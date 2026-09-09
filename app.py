@@ -333,6 +333,16 @@ def gateway_auth_headers() -> dict[str, str]:
     return {}
 
 
+def client_origin_ip(request: Request) -> str:
+    """Recupera la IP fijada por el proxy de borde para llamadas internas."""
+
+    for name in ("x-ia-gateway-client-ip", "x-envoy-external-address", "x-forwarded-for", "x-real-ip"):
+        value = request.headers.get(name, "").split(",", 1)[0].strip()
+        if value:
+            return value
+    return request.client.host if request.client else ""
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Supervisa el proxy, la renovación de tokens, el panel y LiteLLM."""
@@ -630,6 +640,21 @@ def get_config():
     return {"content": manager.config_text(), "dashboard_settings": manager.dashboard_settings()}
 
 
+@app.get("/api/config/backup")
+def download_config_backup():
+    """Descarga una copia exacta del YAML sin expandir variables ni secretos."""
+
+    filename = time.strftime("ia-gateway-config-%Y%m%d-%H%M%S.yaml")
+    return Response(
+        manager.config_text(),
+        media_type="application/yaml; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @app.get("/api/cloudera/connections")
 def cloudera_connections():
     """Lista conexiones saneadas: muestra presencia/caducidad, nunca secretos."""
@@ -685,6 +710,7 @@ def renew_cloudera_token(connection_id: str, request: ClouderaTokenRenewal):
     except KeyError as exc:
         raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
     except RuntimeError as exc:
+        cloudera.record_renewal_error(connection_id, str(exc))
         raise HTTPException(422, str(exc)) from exc
 
 
@@ -839,7 +865,7 @@ def set_model_state(name: str, state: ModelState):
 
 
 @app.post("/api/models/{name}/test")
-async def test_model(name: str, test: TestCall):
+async def test_model(name: str, test: TestCall, request: Request):
     """Ejecuta una prueba extremo a extremo por el mismo gateway que usa producción."""
     prompt = test.prompt.strip()
     if not prompt:
@@ -870,10 +896,13 @@ async def test_model(name: str, test: TestCall):
     )
     try:
         async with httpx.AsyncClient(timeout=120) as client:
+            internal_headers = gateway_auth_headers()
+            if origin_ip := client_origin_ip(request):
+                internal_headers["X-IA-Gateway-Client-IP"] = origin_ip
             response = await client.post(
                 f"http://{manager.host}:{manager.port}/v1/{endpoint}",
                 json=payload,
-                headers=gateway_auth_headers(),
+                headers=internal_headers,
             )
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc

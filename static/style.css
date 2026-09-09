@@ -450,6 +450,13 @@ dialog::backdrop { background: rgba(3,8,18,.72); backdrop-filter: blur(3px); }
 .inline-status.success { color: var(--green); }
 .inline-status.error { color: var(--red); }
 .config-note { margin: 12px 2px 0; color: var(--navy-on-orange); font-size: 12px; font-weight: 700; }
+.backup-panel { margin-top: 28px; }
+.backup-panel .panel-heading p { max-width: 720px; margin: 5px 0 0; color: #a9bfd3; font-size: 11px; }
+.backup-actions { display: grid; grid-template-columns: auto minmax(260px, 1fr) auto; align-items: end; gap: 12px; }
+.backup-file { display: grid; gap: 6px; color: #d8e5f3; font-size: 11px; font-weight: 750; }
+.backup-file input { padding: 7px; font-size: 11px; }
+.backup-file input::file-selector-button { margin-right: 10px; padding: 7px 10px; border: 0; border-radius: 7px; color: #dbeafe; background: var(--ink-800); cursor: pointer; }
+.backup-hint { margin: 12px 0 7px; color: #91a8bd; font-size: 10px; }
 
 /* 5. Observabilidad: pestañas, KPIs, histograma horario y tabla auditable. */
 .logs-section { margin-top: 18px; }
@@ -535,6 +542,8 @@ pre { margin: 0; max-height: 380px; overflow: auto; color: #d8e2ee; white-space:
   .cloudera-renewal-fields { grid-template-columns: 1fr 1fr; }
   .cloudera-connection, .cloudera-model { grid-template-columns: 1fr 1fr; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .backup-actions { grid-template-columns: 1fr; align-items: stretch; }
+  .backup-actions .download-button { justify-content: center; }
 }
 
 @media (max-width: 640px) {

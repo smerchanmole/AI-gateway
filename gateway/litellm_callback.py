@@ -67,13 +67,15 @@ def _metadata(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _origin_ip(kwargs: dict[str, Any]) -> str | None:
-    """Respeta proxies tomando la primera IP de `X-Forwarded-For`."""
+    """Prefiere la IP preservada por nuestro proxy al salto local de LiteLLM."""
     metadata = _metadata(kwargs)
-    value = metadata.get("requester_ip_address") or metadata.get("client_ip")
-    if value:
-        return str(value).split(",", 1)[0].strip()
-    headers = metadata.get("headers") or {}
-    value = headers.get("x-forwarded-for") or headers.get("x-real-ip")
+    raw_headers = metadata.get("headers") or {}
+    headers = {str(key).lower(): value for key, value in raw_headers.items()}
+    value = (headers.get("x-ia-gateway-client-ip") or
+             headers.get("x-envoy-external-address") or
+             headers.get("x-forwarded-for") or
+             headers.get("x-real-ip") or
+             metadata.get("requester_ip_address") or metadata.get("client_ip"))
     return str(value).split(",", 1)[0].strip() if value else None
 
 
@@ -158,14 +160,39 @@ def _provider_api_key(alias: str) -> str | None:
         return None
 
 
-def _classify_with_ollama(settings: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, str]:
-    """Consulta llama-guard directamente; cualquier fallo se convierte en aviso."""
-    body = json.dumps({"model": settings["provider_model"], "messages": messages, "stream": False}).encode()
-    request = urllib.request.Request(f"{str(settings['api_base']).rstrip('/')}/api/chat", data=body,
-                                     headers={"Content-Type": "application/json"})
+def _classify_with_guardrail(settings: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, str]:
+    """Clasifica mediante un guardrail Ollama u OpenAI-compatible.
+
+    El adaptador llama directamente al endpoint para evitar recursión a través
+    del propio proxy. Las credenciales Cloudera se leen de SQLite en cada
+    petición, igual que para el modelo principal.
+    """
+
+    protocol = str(settings.get("protocol") or "ollama")
+    api_base = str(settings["api_base"]).rstrip("/")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    provider_model = str(settings["provider_model"])
+    if protocol == "openai":
+        endpoint = api_base if api_base.endswith("/chat/completions") else f"{api_base}/chat/completions"
+        token = _provider_api_key(str(settings.get("model") or ""))
+        if not token and settings.get("api_key_env"):
+            token = os.environ.get(str(settings["api_key_env"]))
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        provider_model = provider_model.removeprefix("openai/")
+    else:
+        endpoint = f"{api_base}/api/chat"
+        provider_model = provider_model.removeprefix("ollama/")
+    body = json.dumps({"model": provider_model, "messages": messages, "stream": False}).encode()
+    request = urllib.request.Request(endpoint, data=body, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=float(settings.get("timeout", 8))) as response:
-            content = str(json.load(response).get("message", {}).get("content", "")).strip()
+            payload = json.load(response)
+        if protocol == "openai":
+            choices = payload.get("choices") or []
+            content = str((choices[0].get("message") or {}).get("content", "") if choices else "").strip()
+        else:
+            content = str(payload.get("message", {}).get("content", "")).strip()
         first = content.lower().splitlines()[0] if content else ""
         return {"status": "warning" if first.startswith("unsafe") else "safe",
                 "reason": content or "Sin explicación del guardrail"}
@@ -201,7 +228,7 @@ class DashboardLogger(CustomLogger):
                 data["model"] = provider_model
             return data
         guardrail_started = datetime.now().astimezone()
-        verdict = await asyncio.to_thread(_classify_with_ollama, settings, messages)
+        verdict = await asyncio.to_thread(_classify_with_guardrail, settings, messages)
         guardrail_ended = datetime.now().astimezone()
         insert_log(_log_path(guardrail_started), str(settings.get("model")),
                    "error" if verdict["status"] == "unavailable" else "success",

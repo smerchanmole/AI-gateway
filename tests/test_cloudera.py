@@ -1,8 +1,10 @@
 import json
 import base64
 import io
+import subprocess
 import urllib.error
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from gateway.cloudera import ClouderaCatalog
 
@@ -227,4 +229,61 @@ def test_missing_token_is_generated_by_the_automatic_renewal_flow(tmp_path, monk
     assert result["renewed"] is True
     assert result["generated"] is True
     assert catalog.connections()[0]["has_token"] is True
+
+
+def test_cloud_renewal_repairs_markdown_url_and_calls_cdp_cli(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    executable = tmp_path / ".venv" / "bin" / "cdp"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    catalog = ClouderaCatalog(runtime)
+    old = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 60)
+    new = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+    connection = catalog.save_connection(
+        "CDP", "inference", "https://ml.example", old, "cloud", 5, "", "",
+        "access-id", "private-key",
+        "[https://iamapi.us-west-1.cdp.cloudera.com](https://iamapi.us-west-1.cdp.cloudera.com/)",
+        "DE",
+    )
+    captured = {}
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        captured["timeout"] = kwargs["timeout"]
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"token": new}), stderr="")
+
+    monkeypatch.setattr("gateway.cloudera.subprocess.run", run)
+    result = catalog.renew_token(connection["id"], force=True)
+
+    assert result["renewed"] is True
+    assert captured["command"][2] == "https://iamapi.us-west-1.cdp.cloudera.com"
+    assert captured["timeout"] == 60
+    assert catalog.connections()[0]["renewal_url"] == "https://iamapi.us-west-1.cdp.cloudera.com"
+
+
+def test_cloud_renewal_timeout_becomes_controlled_runtime_error(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    executable = tmp_path / ".venv" / "bin" / "cdp"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    catalog = ClouderaCatalog(runtime)
+    connection = catalog.save_connection(
+        "CDP", "inference", "https://ml.example", "opaque-token", "cloud", 5, "", "",
+        "access-id", "private-key", "https://iamapi.us-west-1.cdp.cloudera.com", "DE",
+    )
+
+    def timeout(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr("gateway.cloudera.subprocess.run", timeout)
+
+    try:
+        catalog.renew_token(connection["id"], force=True)
+    except RuntimeError as exc:
+        assert "salida HTTPS" in str(exc)
+        assert "iamapi.us-west-1.cdp.cloudera.com" in str(exc)
+    else:
+        raise AssertionError("El timeout del CDP CLI debe convertirse en un error controlado")
+
+
 """Pruebas aisladas del CRUD, descubrimiento, autenticación y renovación CDP."""

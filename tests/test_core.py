@@ -12,7 +12,7 @@ import io
 
 from gateway.excel_export import build_logs_xlsx
 from gateway.log_store import daily_log_path, insert_log, log_kpis, read_day_logs, read_logs
-from gateway.litellm_callback import DashboardLogger
+from gateway.litellm_callback import DashboardLogger, _classify_with_guardrail, _origin_ip
 
 
 def make_manager(tmp_path: Path) -> GatewayManager:
@@ -111,6 +111,45 @@ def test_cloudera_callback_logs_with_public_alias_after_provider_rewrite(tmp_pat
     }
     asyncio.run(callback.async_log_success_event(kwargs, {"usage": {}}, now, now))
     assert len(read_day_logs(runtime, "nemotron-publico", now.date())) == 1
+
+
+def test_origin_ip_prefers_edge_header_over_litellm_loopback():
+    kwargs = {"litellm_params": {"metadata": {
+        "requester_ip_address": "127.0.0.6",
+        "headers": {"X-IA-Gateway-Client-IP": "198.51.100.27"},
+    }}}
+
+    assert _origin_ip(kwargs) == "198.51.100.27"
+
+
+def test_openai_guardrail_uses_chat_completions_and_dynamic_token(monkeypatch):
+    captured = {}
+
+    class Response(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    def open_guardrail(request, timeout=8):
+        captured["url"] = request.full_url
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["payload"] = __import__("json").loads(request.data)
+        return Response(b'{"choices":[{"message":{"content":"unsafe\\nS7"}}]}')
+
+    monkeypatch.setattr("gateway.litellm_callback._provider_api_key", lambda alias: "fresh-cdp-token")
+    monkeypatch.setattr("gateway.litellm_callback.urllib.request.urlopen", open_guardrail)
+
+    verdict = _classify_with_guardrail({
+        "model": "llama-guard-3",
+        "protocol": "openai",
+        "provider_model": "openai/meta-llama/Llama-Guard-3-8B",
+        "api_base": "https://ml.example/openai/v1",
+        "timeout": 8,
+    }, [{"role": "user", "content": "dame un DNI"}])
+
+    assert verdict == {"status": "warning", "reason": "unsafe\nS7"}
+    assert captured["url"] == "https://ml.example/openai/v1/chat/completions"
+    assert captured["authorization"] == "Bearer fresh-cdp-token"
+    assert captured["payload"]["model"] == "meta-llama/Llama-Guard-3-8B"
 
 
 def test_process_log_adds_timestamp_and_can_be_cleared(tmp_path, monkeypatch):

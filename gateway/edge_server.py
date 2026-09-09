@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import ssl
 
 from aiohttp import ClientConnectionError, ClientSession, ClientTimeout, TCPConnector, web
@@ -19,6 +20,43 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+
+
+def _client_ip(request: web.Request) -> str:
+    """Conserva la IP anunciada por el ingress sin quedarse con el loopback.
+
+    ``X-Envoy-External-Address`` es preferente en Cloudera/Istio. Como respaldo
+    recorremos ``X-Forwarded-For`` de izquierda a derecha y descartamos sólo
+    saltos loopback; las redes privadas siguen siendo válidas en instalaciones
+    on-premise.
+    """
+
+    candidates: list[str] = []
+    envoy = request.headers.get("X-Envoy-External-Address", "").strip()
+    if envoy:
+        candidates.append(envoy)
+    candidates.extend(
+        part.strip()
+        for part in request.headers.get("X-Forwarded-For", "").split(",")
+        if part.strip()
+    )
+    real = request.headers.get("X-Real-IP", "").strip()
+    if real:
+        candidates.append(real)
+    if request.remote:
+        candidates.append(request.remote)
+
+    valid: list[tuple[str, ipaddress.IPv4Address | ipaddress.IPv6Address]] = []
+    for candidate in candidates:
+        value = candidate.strip().strip("[]")
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        valid.append((value, address))
+        if not address.is_loopback:
+            return value
+    return valid[0][0] if valid else ""
 
 
 def upstream_port(path: str, dashboard_port: int, litellm_port: int) -> int:
@@ -41,6 +79,11 @@ def forwarded_headers(
     peer = request.remote or ""
     previous = request.headers.get("X-Forwarded-For", "").strip()
     headers["X-Forwarded-For"] = ", ".join(item for item in (previous, peer) if item)
+    # Siempre sobrescribimos nuestra cabecera interna: el cliente no puede
+    # escoger el valor que consumirá el logger situado detrás de este proxy.
+    client_ip = _client_ip(request)
+    if client_ip:
+        headers["X-IA-Gateway-Client-IP"] = client_ip
     headers["X-Forwarded-Proto"] = request.headers.get("X-Forwarded-Proto", request.scheme)
     headers["Host"] = request.host
     return headers

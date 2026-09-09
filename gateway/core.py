@@ -551,8 +551,16 @@ class GatewayManager:
         guardrail_entry = next((item for item in config.get("model_list", []) if item.get("model_name") == guardrail_name), None)
         if guardrail["enabled"] and guardrail_entry:
             params = guardrail_entry.get("litellm_params") or {}
-            guardrail["provider_model"] = str(params.get("model", "")).removeprefix("ollama/")
+            configured_model = str(params.get("model", ""))
+            guardrail["protocol"] = "ollama" if configured_model.startswith("ollama/") else "openai"
+            guardrail["provider_model"] = (
+                configured_model.removeprefix("ollama/")
+                if guardrail["protocol"] == "ollama" else configured_model
+            )
             guardrail["api_base"] = params.get("api_base", "http://localhost:11434")
+            api_key = str(params.get("api_key") or "")
+            if api_key.startswith("os.environ/"):
+                guardrail["api_key_env"] = api_key.removeprefix("os.environ/")
         self.dashboard_settings_file.write_text(
             json.dumps({
                 "guardrail": guardrail,

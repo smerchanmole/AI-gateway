@@ -44,3 +44,20 @@ def test_proxy_removes_sdk_authorization_when_litellm_auth_is_disabled():
 
     assert "Authorization" not in headers
     assert headers["Accept"] == "application/json"
+
+
+def test_proxy_preserves_envoy_external_ip_in_internal_header():
+    request = SimpleNamespace(
+        headers=CIMultiDict({
+            "X-Envoy-External-Address": "198.51.100.27",
+            "X-Forwarded-For": "198.51.100.27, 10.0.0.8",
+        }),
+        remote="127.0.0.6",
+        scheme="https",
+        host="gateway.example",
+    )
+
+    headers = forwarded_headers(request, forward_authorization=False)
+
+    assert headers["X-IA-Gateway-Client-IP"] == "198.51.100.27"
+    assert headers["X-Forwarded-For"].endswith("127.0.0.6")

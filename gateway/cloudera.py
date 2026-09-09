@@ -29,6 +29,22 @@ class ClouderaCatalog:
 
     SECRET_FIELDS = {"token", "workload_password", "cdp_private_key"}
 
+    @staticmethod
+    def _normalize_renewal_url(value: str) -> str:
+        """Acepta una URL normal o un enlace Markdown copiado de documentación."""
+
+        candidate = str(value or "").strip()
+        markdown = re.fullmatch(r"\[[^\]]+\]\((https?://[^)]+)\)", candidate)
+        if markdown:
+            candidate = markdown.group(1).strip()
+        candidate = candidate.strip("<>").rstrip("/")
+        if not candidate:
+            return ""
+        parsed = urllib.parse.urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise RuntimeError("La URL de renovación debe ser una URL HTTP o HTTPS válida")
+        return candidate
+
     def __init__(self, runtime_dir: Path) -> None:
         """Ubica el almacén SQLite privado y migra el JSON legado si existe."""
 
@@ -167,7 +183,7 @@ class ClouderaCatalog:
                  "workload_password": workload_password or previous.get("workload_password", ""),
                  "cdp_access_key_id": cdp_access_key_id.strip() or previous.get("cdp_access_key_id", ""),
                  "cdp_private_key": cdp_private_key.strip() or previous.get("cdp_private_key", ""),
-                 "renewal_url": renewal_url.strip() or previous.get("renewal_url", ""),
+                 "renewal_url": self._normalize_renewal_url(renewal_url) or previous.get("renewal_url", ""),
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE")}
         data["connections"] = [item for item in data.get("connections", []) if item.get("id") != connection_id] + [entry]
         self._write(data)
@@ -214,7 +230,7 @@ class ClouderaCatalog:
                  "workload_password": workload_password or previous.get("workload_password", ""),
                  "cdp_access_key_id": cdp_access_key_id.strip() or previous.get("cdp_access_key_id", ""),
                  "cdp_private_key": cdp_private_key.strip() or previous.get("cdp_private_key", ""),
-                 "renewal_url": renewal_url.strip() or previous.get("renewal_url", ""),
+                 "renewal_url": self._normalize_renewal_url(renewal_url) or previous.get("renewal_url", ""),
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE")}
         data["connections"] = [item for item in data.get("connections", []) if item.get("id") not in {connection_id, new_id}] + [entry]
         migrated = {}
@@ -278,9 +294,14 @@ class ClouderaCatalog:
             if remaining > 600:
                 return {"renewed": False, "message": "El token todavía no está próximo a caducar", **metadata}
 
-        renewal_url = connection.get("renewal_url", "").rstrip("/")
+        renewal_url = self._normalize_renewal_url(connection.get("renewal_url", ""))
         if not renewal_url:
             raise RuntimeError("Configura la URL de renovación de esta conexión")
+        # Repara también registros creados por versiones anteriores que
+        # guardaron literalmente un enlace Markdown en lugar de su destino.
+        if renewal_url != connection.get("renewal_url"):
+            connection["renewal_url"] = renewal_url
+            self._write(data)
         operation_message = ("Generando el CDP token inicial…" if token_missing else
                              "Token caducado o próximo a caducar, generando de nuevo…")
         connection.update({"renewal_state": "renewing",
@@ -297,9 +318,19 @@ class ClouderaCatalog:
                 raise RuntimeError("No está instalado CDP CLI. Ejecuta de nuevo la instalación de requirements.txt")
             env = os.environ.copy()
             env.update({"CDP_ACCESS_KEY_ID": access_key, "CDP_PRIVATE_KEY": private_key})
-            completed = subprocess.run([str(executable), "--endpoint-url", renewal_url, "iam",
-                "generate-workload-auth-token", "--workload-name", connection.get("workload_name") or "DE"],
-                capture_output=True, text=True, timeout=30, env=env)
+            try:
+                timeout = max(10, min(300, int(os.environ.get("CDP_RENEWAL_TIMEOUT_SECONDS", "60"))))
+            except ValueError:
+                timeout = 60
+            try:
+                completed = subprocess.run([str(executable), "--endpoint-url", renewal_url, "iam",
+                    "generate-workload-auth-token", "--workload-name", connection.get("workload_name") or "DE"],
+                    capture_output=True, text=True, timeout=timeout, env=env)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"CDP CLI no respondió en {timeout} segundos. Comprueba que la WebApp tenga "
+                    f"salida HTTPS hacia {urllib.parse.urlparse(renewal_url).hostname}"
+                ) from exc
             if completed.returncode:
                 raise RuntimeError(f"CDP CLI no pudo renovar el token: {completed.stderr.strip()[-500:]}")
             try: payload = json.loads(completed.stdout)

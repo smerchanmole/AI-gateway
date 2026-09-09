@@ -734,6 +734,34 @@ async function saveYaml() {
   }
 }
 
+async function importYamlBackup() {
+  /** Restaura sólo tras validar; el servidor conserva rollback y política de reinicio. */
+  const input = $("#yaml-import-file");
+  const button = $("#import-yaml-backup");
+  const file = input.files?.[0];
+  if (!file) { setInlineStatus("#yaml-import-status", "Selecciona primero un fichero .yaml o .yml.", "error"); return; }
+  if (!/\.ya?ml$/i.test(file.name)) { setInlineStatus("#yaml-import-status", "El backup debe tener extensión .yaml o .yml.", "error"); return; }
+  if (!file.size) { setInlineStatus("#yaml-import-status", "El fichero seleccionado está vacío.", "error"); return; }
+  if (file.size > 1_000_000) { setInlineStatus("#yaml-import-status", "El backup supera el máximo permitido de 1 MB.", "error"); return; }
+  button.disabled = true;
+  setInlineStatus("#yaml-import-status", `Validando ${file.name}…`);
+  try {
+    const content = await file.text();
+    if (content.includes("\u0000")) throw new Error("El fichero no es un YAML de texto válido.");
+    const validation = await api("/api/config/validate", {method: "POST", body: JSON.stringify({content})});
+    const restart = await askRestart();
+    if (restart === null) { setInlineStatus("#yaml-import-status", "Importación cancelada; config.yaml no ha cambiado."); return; }
+    const result = await api("/api/config", {method: "PUT", body: JSON.stringify({content, restart})});
+    const message = await refreshAfterConfigChange(result);
+    input.value = "";
+    setInlineStatus("#yaml-import-status", `Backup importado: ${validation.model_count} modelos. ${message}`, "success");
+  } catch (exception) {
+    setInlineStatus("#yaml-import-status", `No se pudo importar: ${exception.message}`, "error");
+  } finally {
+    button.disabled = !input.files?.length;
+  }
+}
+
 async function validateYaml() {
   setInlineStatus("#yaml-status", "Validando…");
   try {
@@ -1048,6 +1076,12 @@ $("#test-button").onclick = runTest;
 $("#model-form").onsubmit = addConfiguredModel;
 $("#save-yaml").onclick = saveYaml;
 $("#validate-yaml").onclick = () => validateYaml().catch(() => {});
+$("#yaml-import-file").onchange = () => {
+  const file = $("#yaml-import-file").files?.[0];
+  $("#import-yaml-backup").disabled = !file;
+  setInlineStatus("#yaml-import-status", file ? `Seleccionado: ${file.name}` : "");
+};
+$("#import-yaml-backup").onclick = importYamlBackup;
 $("#guardrail-enabled").onchange = () => { renderGuardrailPolicy(); updateGuardrail(); };
 $("#guardrail-model").onchange = () => { $("#guardrail-enabled").checked = Boolean($("#guardrail-model").value); renderGuardrailPolicy(); updateGuardrail(); };
 $("#guardrail-policy").onchange = () => { renderGuardrailPolicy(); if ($("#guardrail-enabled").checked) updateGuardrail(); };
