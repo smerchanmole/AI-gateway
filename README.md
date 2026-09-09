@@ -226,8 +226,10 @@ recomendable en local para preparar el entorno con antelación.
 
 El bootstrap elimina cualquier `PIP_USER` heredado y deja que `pip` aplique su
 comportamiento normal dentro del entorno privado; no utiliza `--user` ni
-`--no-user`. Se conservan las variables de índice y proxy necesarias para
-repositorios corporativos. Antes de relanzar,
+`--no-user`. También establece temporalmente `PIP_CONFIG_FILE` al dispositivo
+nulo para impedir que un `pip.conf` de Cloudera vuelva a imponer `user = true`.
+La configuración de la plataforma no se modifica. Se conservan las variables
+de índice y proxy necesarias para repositorios corporativos. Antes de relanzar,
 se eliminan `PYTHONPATH` y `PYTHONHOME` heredados y se activa
 `PYTHONNOUSERSITE=1`, impidiendo que módulos de `/usr/local` o `~/.local`
 se adelanten a los instalados dentro de `.venv`.
@@ -239,7 +241,9 @@ Si Cloudera evalúa `app.py` como una celda y no define `__file__`, el bootstrap
 usa el directorio de trabajo del proyecto para localizar `requirements.txt` y
 mantiene el engine como proceso padre. Esto evita que un `exec` cierre el kernel
 y permite ver en directo cada fase, toda la salida de `pip`, el resultado de
-`pip check` y posteriormente los logs del servidor.
+`pip check` y posteriormente los logs del servidor. Cada línea lleva el prefijo
+`[pip install]` o `[pip check]`; si algo falla, las últimas 30 líneas se repiten
+dentro de la excepción para que Cloudera no oculte la causa al cerrar el engine.
 
 ### Secretos
 

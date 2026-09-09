@@ -21,10 +21,12 @@ def test_dependency_bootstrap_runs_before_external_imports():
     assert 'runtime_environment["PYTHONNOUSERSITE"] = "1"' in source
     assert '"PIP_CONSTRAINT",' in source
     assert '"PIP_USER",' in source
+    assert 'pip_environment["PIP_CONFIG_FILE"] = os.devnull' in source
     assert '"-I",' in source
     assert 'completed = subprocess.run(' in source
     assert 'Modo de ejecución:' in source
     assert '"pip", "check"' in source
+    assert "last_lines = last_lines[-30:]" in source
 
 
 @pytest.fixture

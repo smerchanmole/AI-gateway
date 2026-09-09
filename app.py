@@ -37,6 +37,39 @@ def bootstrap_log(message: str) -> None:
     print(f"[IA Gateway · bootstrap] {message}", flush=True)
 
 
+def run_visible_command(
+    command: list[str], *, cwd: Path, environment: dict[str, str], label: str
+) -> None:
+    """Ejecuta un comando mostrando su salida y conservando contexto al fallar."""
+    bootstrap_log(f"Ejecutando {label}: {' '.join(command)}")
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"No se pudo iniciar {label}: {exc}") from exc
+
+    last_lines: list[str] = []
+    if process.stdout is not None:
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            print(f"[{label}] {line}", flush=True)
+            last_lines.append(line)
+            last_lines = last_lines[-30:]
+    return_code = process.wait()
+    if return_code:
+        detail = "\n".join(last_lines) or "El comando no produjo ninguna salida"
+        raise RuntimeError(
+            f"{label} terminó con código {return_code}. Últimas líneas:\n{detail}"
+        )
+
+
 def install_runtime_requirements(python: Path) -> None:
     """Instala el contrato de dependencias con el intérprete privado indicado.
 
@@ -62,6 +95,10 @@ def install_runtime_requirements(python: Path) -> None:
         "PIP_USER",
     ):
         pip_environment.pop(inherited_name, None)
+    # Un pip.conf del runtime está imponiendo `user = true` aunque el proyecto
+    # no lo solicite. /dev/null (o NUL en Windows) desactiva esos ficheros sólo
+    # para este hijo y deja intacta la configuración del sistema Cloudera.
+    pip_environment["PIP_CONFIG_FILE"] = os.devnull
     pip_environment["PYTHONNOUSERSITE"] = "1"
     pip_environment["VIRTUAL_ENV"] = str(VENV_DIR)
     pip_environment["PATH"] = (
@@ -70,7 +107,7 @@ def install_runtime_requirements(python: Path) -> None:
     bootstrap_log(f"Instalando dependencias con: {python}")
     bootstrap_log(f"Fichero de dependencias: {REQUIREMENTS_FILE}")
     try:
-        subprocess.run(
+        run_visible_command(
             [
                 str(python),
                 "-I",
@@ -83,22 +120,20 @@ def install_runtime_requirements(python: Path) -> None:
                 str(REQUIREMENTS_FILE),
             ],
             cwd=BOOTSTRAP_ROOT,
-            env=pip_environment,
-            check=True,
+            environment=pip_environment,
+            label="pip install",
         )
         bootstrap_log("Validando coherencia de dependencias con pip check")
-        subprocess.run(
+        run_visible_command(
             [str(python), "-I", "-m", "pip", "check"],
             cwd=BOOTSTRAP_ROOT,
-            env=pip_environment,
-            check=True,
+            environment=pip_environment,
+            label="pip check",
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        return_code = getattr(exc, "returncode", "no disponible")
-        bootstrap_log(f"ERROR: la preparación de dependencias terminó con código {return_code}")
+    except RuntimeError as exc:
+        bootstrap_log(f"ERROR: {exc}")
         raise RuntimeError(
-            f"No se pudieron instalar las dependencias de {REQUIREMENTS_FILE} "
-            f"(código de salida: {return_code})"
+            f"No se pudieron preparar las dependencias de {REQUIREMENTS_FILE}. {exc}"
         ) from exc
 
 

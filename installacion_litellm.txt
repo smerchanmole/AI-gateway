@@ -33,7 +33,9 @@ canónica y explica arquitectura, seguridad, YAML, Ollama, Cloudera y capacidad.
    la causa en el log de sesión. La instalación elimina cualquier PIP_USER
    heredado, no utiliza --user ni --no-user, y usa Python -I para no heredar
    MLflow, PYTHONPATH ni constraints globales. En modo celda mantiene el engine
-   como padre para que el visor de Cloudera conserve todos los mensajes.
+   como padre para que el visor de Cloudera conserve todos los mensajes. También
+   ignora el pip.conf externo que pueda imponer "user = true" y muestra toda la
+   salida de pip con las últimas 30 líneas incluidas en cualquier error.
    Si el runtime lo evalúa como celda y no existe __file__, usa como alternativa
    el directorio de trabajo actual del proyecto.
 
