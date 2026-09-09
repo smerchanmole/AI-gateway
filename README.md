@@ -894,7 +894,7 @@ Funciones destacadas:
 |---|---|
 | `bootstrap_private_environment` | Crea `.venv` y relanza la app para aislarla del Python de Cloudera. |
 | `install_runtime_requirements` | Ejecuta `pip` dentro del Python privado y detiene el arranque si falla. |
-| `gateway_auth_headers` | Añade la master key sólo si se configuró expresamente. |
+| `gateway_auth_headers` | Mantiene desactivada la autenticación interna de LiteLLM. |
 | `_model_entry` | Convierte formulario seguro a entrada YAML. |
 | `test_model` | Decide chat/embedding y llama al upstream LiteLLM `14000`. |
 | `model_latency` | Sonda remota pequeña para el semáforo. |

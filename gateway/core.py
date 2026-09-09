@@ -103,6 +103,12 @@ class GatewayManager:
         model_list = data.get("model_list")
         if not isinstance(model_list, list):
             raise RuntimeError("El YAML debe contener una lista 'model_list'")
+        general_settings = data.get("general_settings") or {}
+        if isinstance(general_settings, dict) and general_settings.get("database_url"):
+            raise RuntimeError(
+                "'general_settings.database_url' no está soportado: "
+                "IA Gateway usa únicamente SQLite local"
+            )
         names: list[str] = []
         for position, entry in enumerate(model_list, start=1):
             if not isinstance(entry, dict):
@@ -486,7 +492,9 @@ class GatewayManager:
         visit(self._source())
         from gateway.cloudera import ClouderaCatalog
         local_credentials = ClouderaCatalog(self.runtime_dir).environment()
-        optional = {"LITELLM_MASTER_KEY"}
+        # Son opciones heredadas de LiteLLM que IA Gateway desactiva: la única
+        # persistencia admitida es el SQLite local gestionado por la aplicación.
+        optional = {"LITELLM_MASTER_KEY", "DATABASE_URL"}
         return sorted(
             name for name in referenced
             if name not in optional and not os.environ.get(name) and not local_credentials.get(name)
@@ -528,11 +536,11 @@ class GatewayManager:
         settings["callbacks"] = list(dict.fromkeys([*current_callbacks, callback]))
         config["litellm_settings"] = settings
         general_settings = dict(config.get("general_settings") or {})
-        if (
-            general_settings.get("master_key") == "os.environ/LITELLM_MASTER_KEY"
-            and not os.environ.get("LITELLM_MASTER_KEY", "").strip()
-        ):
-            general_settings.pop("master_key", None)
+        # La autenticación de entrada pertenece a la WebApp Cloudera y la
+        # persistencia a nuestro SQLite. Eliminamos opciones heredadas para que
+        # ni una master key ni una BBDD externa puedan activarse accidentalmente.
+        general_settings.pop("master_key", None)
+        general_settings.pop("database_url", None)
         if general_settings:
             config["general_settings"] = general_settings
         else:
@@ -561,19 +569,17 @@ class GatewayManager:
     def _process_environment(self) -> dict[str, str]:
         """Construye el entorno de LiteLLM respetando la política del YAML.
 
-        LiteLLM interpreta ``LITELLM_MASTER_KEY`` aunque no aparezca en su
-        configuración y también puede volver a cargarla directamente desde
-        `.env`. Por eso la pasamos vacía —en vez de omitirla— cuando el usuario
-        no declara una ``master_key`` en `general_settings`: `python-dotenv` no
-        sobrescribe variables ya presentes y las claves de proveedores siguen
-        disponibles con normalidad.
+        Una cadena vacía no desactiva la autenticación en LiteLLM: se interpreta
+        como una master key válida y obliga a enviar ``Authorization``. Quitamos
+        la variable y usamos el modo de producción para impedir que el CLI vuelva
+        a cargarla desde `.env`; las claves de proveedores se heredan normalmente.
         """
         env = os.environ.copy()
         from gateway.cloudera import ClouderaCatalog
         env.update(ClouderaCatalog(self.runtime_dir).environment())
-        general_settings = self._source().get("general_settings") or {}
-        if not general_settings.get("master_key") or not os.environ.get("LITELLM_MASTER_KEY", "").strip():
-            env["LITELLM_MASTER_KEY"] = ""
+        env.pop("LITELLM_MASTER_KEY", None)
+        env.pop("DATABASE_URL", None)
+        env["LITELLM_MODE"] = "PRODUCTION"
         env["PYTHONPATH"] = str(self.root) + os.pathsep + env.get("PYTHONPATH", "")
         env["IA_GATEWAY_ROOT"] = str(self.root)
         return env
@@ -669,8 +675,32 @@ class GatewayManager:
             "host": self.host,
             "port": self.port,
             "restart_pending": self.restart_pending_file.exists(),
+            "persistence": self.persistence_status(),
             **self._metrics(pid),
         }
+
+    def persistence_status(self) -> dict[str, Any]:
+        """Publica el único modo soportado: SQLite local y tokens dinámicos."""
+
+        dynamic_tokens = self.sync_cloudera_credentials()
+        return {
+            "credential_store": "SQLite",
+            "token_updates_dynamic": dynamic_tokens,
+            "token_restart_required": not dynamic_tokens,
+        }
+
+    def active_model_names(self) -> list[str]:
+        """Lee los alias cargados, diferenciándolos de cambios YAML pendientes."""
+
+        try:
+            config = yaml.safe_load(self.active_config.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return []
+        return [
+            str(item.get("model_name"))
+            for item in config.get("model_list", [])
+            if isinstance(item, dict) and item.get("model_name")
+        ]
 
     def start(self) -> dict[str, Any]:
         """Arranca el CLI del `.venv` y espera activamente a que abra el puerto."""

@@ -22,6 +22,7 @@ let csrfToken = "";
 let dashboardAuthenticated = false;
 const clouderaProbeTimers = new Map();
 const clouderaChecksInProgress = new Set();
+let clouderaRefreshInProgress = false;
 
 /* -------------------------------------------------------------------------
  * 1. Infraestructura de interfaz
@@ -60,12 +61,14 @@ async function api(url, options = {}) {
     credentials: "same-origin",
   });
   if (!response.ok) {
-    let detail;
+    // El cuerpo de una Response es un stream y sólo puede consumirse una vez.
+    // Leemos texto primero y, si procede, interpretamos esa misma copia como JSON.
+    const rawBody = await response.text();
+    let detail = rawBody || `HTTP ${response.status}`;
     try {
-      detail = (await response.json()).detail;
-    } catch {
-      detail = await response.text();
-    }
+      const payload = JSON.parse(rawBody);
+      detail = payload.detail ?? payload.message ?? payload.error ?? payload;
+    } catch { /* La respuesta era texto plano; conservamos rawBody. */ }
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return response.headers.get("content-type")?.includes("json")
@@ -94,10 +97,29 @@ function setInlineStatus(selector, message, kind = "") {
  * memoria y se reconstruyen al consultar de nuevo el catálogo.
  */
 
-async function loadClouderaConnections() {
-  clouderaConnections = await api("/api/cloudera/connections");
+function clouderaCredentialSnapshot(connections) {
+  /** Compara sólo estado de credenciales; evita repintados periódicos inútiles. */
+  return JSON.stringify(connections.map((item) => ({
+    id: item.id,
+    has_token: item.has_token,
+    token_expires_at: item.token_expires_at,
+    token_renewed_at: item.token_renewed_at,
+    renewal_state: item.renewal_state,
+    renewal_message: item.renewal_message,
+  })));
+}
+
+async function loadClouderaConnections({onlyIfChanged = false} = {}) {
+  const previous = clouderaConnections;
+  const updated = await api("/api/cloudera/connections");
+  if (onlyIfChanged && clouderaCredentialSnapshot(previous) === clouderaCredentialSnapshot(updated)) return false;
+  const previousById = new Map(previous.map((item) => [item.id, item]));
+  const renewed = updated.find((item) => (
+    item.token_renewed_at && item.token_renewed_at !== previousById.get(item.id)?.token_renewed_at
+  ));
+  clouderaConnections = updated;
   $("#cloudera-connections").innerHTML = clouderaConnections.length ? clouderaConnections.map((item) => `
-    <article class="cloudera-connection" data-connection="${item.id}"><div><b>${escapeHtml(item.name)}</b><small>${item.kind === "inference" ? "AI Inference" : "Workbench API v2"} · ${item.platform === "onpremise" ? "On-premise" : "Cloud"}</small><small>Prueba automática cada ${escapeHtml(item.probe_interval_minutes || 5)} min</small></div><div class="connection-url">${escapeHtml(item.url)}</div><span class="credential-state ${item.token_expired ? "expired" : item.has_token ? "ready" : "missing"}">${item.renewal_state === "renewing" ? "Token caducado, generando de nuevo…" : item.token_expired ? "JWT caducado" : item.has_token ? "Credencial guardada" : "Falta credencial"}${item.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(item.token_expires_at))}</small>` : ""}<small>${item.renewal_url ? "Renovación configurada" : "Renovación sin configurar"}</small></span><div class="row-actions"><button class="secondary discover-cloudera" data-id="${item.id}" ${item.token_expired ? "disabled" : ""}>Buscar modelos</button><button class="secondary check-all-cloudera" data-id="${item.id}" ${item.token_expired ? "disabled" : ""}>Probar todos</button><button class="secondary renew-cloudera" data-id="${item.id}">Renovar token</button><button class="secondary edit-cloudera" data-id="${item.id}">Editar</button><button class="danger delete-cloudera" data-id="${item.id}">Borrar</button></div><div class="connection-health-summary" data-health-summary="${item.id}">Sin comprobaciones de modelos</div><p class="connection-progress ${item.renewal_state === "error" || item.token_expired ? "error" : ""}" data-progress="${item.id}" role="status">${escapeHtml(item.renewal_message || (item.token_expired ? "Token caducado, generando de nuevo…" : "Lista para consultar"))}</p><section class="connection-models" data-connection-models="${item.id}"><p class="empty compact">Pulsa «Buscar modelos» para ver los modelos de esta conexión.</p></section></article>`).join("") : '<p class="empty compact">No hay conexiones Cloudera configuradas. Añade una arriba para comenzar.</p>';
+    <article class="cloudera-connection" data-connection="${item.id}"><div><b>${escapeHtml(item.name)}</b><small>${item.kind === "inference" ? "AI Inference" : "Workbench API v2"} · ${item.platform === "onpremise" ? "On-premise" : "Cloud"}</small><small>Prueba automática cada ${escapeHtml(item.probe_interval_minutes || 5)} min</small></div><div class="connection-url">${escapeHtml(item.url)}</div><span class="credential-state ${item.token_expired ? "expired" : item.has_token ? "ready" : "missing"}">${item.renewal_state === "renewing" ? (item.has_token ? "Renovando token…" : "Generando token inicial…") : item.token_expired ? "JWT caducado" : item.has_token ? "Credencial guardada" : item.renewal_ready ? "Token pendiente de generar" : "Falta credencial"}${item.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(item.token_expires_at))}</small>` : ""}<small>${item.renewal_ready ? "Generación automática configurada" : "Generación automática sin completar"}</small></span><div class="row-actions"><button class="secondary discover-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Buscar modelos</button><button class="secondary check-all-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Probar todos</button><button class="secondary renew-cloudera" data-id="${item.id}">${item.has_token ? "Renovar token" : "Generar token"}</button><button class="secondary edit-cloudera" data-id="${item.id}">Editar</button><button class="danger delete-cloudera" data-id="${item.id}">Borrar</button></div><div class="connection-health-summary" data-health-summary="${item.id}">Sin comprobaciones de modelos</div><p class="connection-progress ${item.renewal_state === "error" || item.token_expired ? "error" : ""}" data-progress="${item.id}" role="status">${escapeHtml(item.renewal_message || (item.token_expired ? "Token caducado, generando de nuevo…" : item.has_token ? "Lista para consultar" : "Completa los datos de generación o introduce un token"))}</p><section class="connection-models" data-connection-models="${item.id}"><p class="empty compact">Pulsa «Buscar modelos» para ver los modelos de esta conexión.</p></section></article>`).join("") : '<p class="empty compact">No hay conexiones Cloudera configuradas. Añade una arriba para comenzar.</p>';
   document.querySelectorAll(".discover-cloudera").forEach((button) => button.onclick = () => discoverCloudera(button));
   document.querySelectorAll(".check-all-cloudera").forEach((button) => button.onclick = () => autoProbeConnection(button.dataset.id, true));
   document.querySelectorAll(".renew-cloudera").forEach((button) => button.onclick = () => renewClouderaToken(button.dataset.id, true));
@@ -106,6 +128,22 @@ async function loadClouderaConnections() {
   if (clouderaModels.length) renderClouderaModels();
   scheduleClouderaChecks();
   updateConnectionHealthSummaries();
+  if (renewed && previousById.has(renewed.id)) {
+    const expiry = renewed.token_expires_at ? ` Nueva caducidad: ${madridTime(renewed.token_expires_at)}.` : "";
+    setInlineStatus("#cloudera-status", `CDP token actualizado automáticamente.${expiry}`, "success");
+  }
+  return true;
+}
+
+async function refreshClouderaConnections() {
+  /** Sincroniza la vista con SQLite sin solapar peticiones ni recargar la SPA. */
+  if (clouderaRefreshInProgress) return;
+  clouderaRefreshInProgress = true;
+  try {
+    await loadClouderaConnections({onlyIfChanged: true});
+  } finally {
+    clouderaRefreshInProgress = false;
+  }
 }
 
 function editClouderaConnection(id) {
@@ -148,7 +186,7 @@ async function saveClouderaConnection(event) {
   const form = event.currentTarget;
   const submitButton = form.querySelector('button[type="submit"]');
   submitButton.disabled = true;
-  setInlineStatus("#cloudera-status", "Guardando conexión…");
+  setInlineStatus("#cloudera-status", "Guardando conexión y obteniendo credencial si es necesaria…");
   try {
     const endpoint = editingClouderaConnectionId ? `/api/cloudera/connections/${editingClouderaConnectionId}` : "/api/cloudera/connections";
     const result = await api(endpoint, {method: editingClouderaConnectionId ? "PUT" : "POST", body: JSON.stringify({
@@ -161,7 +199,12 @@ async function saveClouderaConnection(event) {
     })});
     const action = editingClouderaConnectionId ? "actualizada" : "guardada";
     cancelClouderaEdit();
-    setInlineStatus("#cloudera-status", `Conexión ${action} correctamente. URL efectiva: ${result.url}. Pulsa «Buscar modelos».`, "success");
+    if (result.token_generation_error) {
+      setInlineStatus("#cloudera-status", `Conexión ${action}, pero no se pudo generar el token: ${result.token_generation_error}`, "error");
+    } else {
+      const tokenMessage = result.token_generated ? " CDP token generado automáticamente." : "";
+      setInlineStatus("#cloudera-status", `Conexión ${action} correctamente.${tokenMessage} URL efectiva: ${result.url}. Pulsa «Buscar modelos».`, "success");
+    }
     await loadClouderaConnections();
   } catch (exception) {
     setInlineStatus("#cloudera-status", `No se pudo guardar la conexión: ${exception.message}`, "error");
@@ -288,18 +331,24 @@ async function autoProbeConnection(connectionId, requestedByUser = false) {
 }
 
 async function renewClouderaToken(connectionId, force = false, refreshView = true) {
-  const result = await api(`/api/cloudera/connections/${connectionId}/renew-token`, {
-    method: "POST", body: JSON.stringify({force}),
-  });
   const progress = document.querySelector(`[data-progress="${connectionId}"]`);
-  if (progress && (force || result.renewed)) {
-    progress.textContent = result.renewed
-      ? `Token renovado${result.litellm_restarted ? " · LiteLLM reiniciado" : ""}`
-      : result.message;
-    progress.className = "connection-progress success";
+  try {
+    if (progress) { progress.textContent = "Solicitando credencial a Cloudera…"; progress.className = "connection-progress searching"; }
+    const result = await api(`/api/cloudera/connections/${connectionId}/renew-token`, {
+      method: "POST", body: JSON.stringify({force}),
+    });
+    if (progress && (force || result.renewed)) {
+      progress.textContent = result.renewed
+        ? (result.generated ? "Token inicial generado · LiteLLM continúa activo" : "Token renovado · LiteLLM continúa activo")
+        : result.message;
+      progress.className = "connection-progress success";
+    }
+    if (refreshView && result.renewed) await loadClouderaConnections();
+    return result;
+  } catch (exception) {
+    if (progress) { progress.textContent = `No se pudo obtener el token: ${exception.message}`; progress.className = "connection-progress error"; }
+    return null;
   }
-  if (refreshView && result.renewed) await loadClouderaConnections();
-  return result;
 }
 
 function renderClouderaModels(sortByHealth = true) {
@@ -383,6 +432,11 @@ async function loadStatus() {
   $("#resources").textContent = status.process_alive
     ? `CPU ${status.cpu_percent ?? "—"}% del total (${status.cores} cores) · RAM ${status.memory_gb ?? "—"} GB`
     : "CPU — · RAM —";
+
+  const persistence = status.persistence ?? {};
+  const persistenceElement = $("#persistence");
+  persistenceElement.textContent = `${persistence.credential_store || "SQLite"} · tokens sin reinicio · modelos con reinicio`;
+  persistenceElement.classList.toggle("dynamic", !persistence.token_restart_required);
 
   const button = $("#gateway-button");
   button.disabled = false;
@@ -1007,6 +1061,7 @@ document.querySelectorAll(".primary-tab").forEach((button) => button.onclick = (
   document.querySelectorAll(".page-view").forEach((view) => { view.hidden = view.id !== `view-${button.dataset.view}`; });
   history.replaceState(null, "", `?tab=${button.dataset.view}`);
   if (button.dataset.view === "logs") loadLogDays().then(loadLogs).catch(showError);
+  if (button.dataset.view === "config") refreshClouderaConnections().catch(() => {});
 });
 
 // La inicialización secuencial garantiza que la sonda sólo se lance si el gateway está listo.
@@ -1094,3 +1149,11 @@ window.setInterval(() => {
 window.setInterval(() => {
   if (dashboardAuthenticated && !$("#view-logs").hidden) loadLogs().catch(() => {});
 }, 10000);
+window.setInterval(() => {
+  if (dashboardAuthenticated && !$("#view-config").hidden) refreshClouderaConnections().catch(() => {});
+}, 15000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && dashboardAuthenticated && !$("#view-config").hidden) {
+    refreshClouderaConnections().catch(() => {});
+  }
+});

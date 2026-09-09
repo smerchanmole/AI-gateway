@@ -1,5 +1,7 @@
 from gateway.edge import EdgeProxy, public_gateway_port
-from gateway.edge_server import upstream_port
+from gateway.edge_server import forwarded_headers, upstream_port
+from multidict import CIMultiDict
+from types import SimpleNamespace
 
 
 def test_public_port_prefers_explicit_then_any_cloudera_port(monkeypatch):
@@ -28,3 +30,17 @@ def test_python_proxy_command_uses_same_public_port(tmp_path):
     command = edge._command()
     assert "gateway.edge_server" in command
     assert command[command.index("--port") + 1] == "8090"
+
+
+def test_proxy_removes_sdk_authorization_when_litellm_auth_is_disabled():
+    request = SimpleNamespace(
+        headers=CIMultiDict({"Authorization": "Bearer not-required", "Accept": "application/json"}),
+        remote="127.0.0.1",
+        scheme="https",
+        host="gateway.example",
+    )
+
+    headers = forwarded_headers(request, forward_authorization=False)
+
+    assert "Authorization" not in headers
+    assert headers["Accept"] == "application/json"

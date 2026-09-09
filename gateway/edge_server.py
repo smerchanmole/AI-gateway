@@ -27,11 +27,16 @@ def upstream_port(path: str, dashboard_port: int, litellm_port: int) -> int:
     return litellm_port if path == "/v1" or path.startswith("/v1/") else dashboard_port
 
 
-def forwarded_headers(request: web.Request) -> CIMultiDict[str]:
+def forwarded_headers(
+    request: web.Request, *, forward_authorization: bool = True
+) -> CIMultiDict[str]:
+    blocked = HOP_BY_HOP_HEADERS | {"host", "content-length"}
+    if not forward_authorization:
+        blocked.add("authorization")
     headers = CIMultiDict(
         (name, value)
         for name, value in request.headers.items()
-        if name.lower() not in HOP_BY_HOP_HEADERS | {"host", "content-length"}
+        if name.lower() not in blocked
     )
     peer = request.remote or ""
     previous = request.headers.get("X-Forwarded-For", "").strip()
@@ -50,11 +55,15 @@ async def proxy(request: web.Request) -> web.StreamResponse:
     )
     target = f"http://127.0.0.1:{port}{request.rel_url}"
     body = request.content.iter_chunked(64 * 1024) if request.can_read_body else None
+    headers = forwarded_headers(
+        request,
+        forward_authorization=port != request.app["litellm_port"],
+    )
     try:
         upstream = await session.request(
             request.method,
             target,
-            headers=forwarded_headers(request),
+            headers=headers,
             data=body,
             allow_redirects=False,
         )

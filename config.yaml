@@ -1,6 +1,3 @@
-# Fuente de verdad declarativa. Las aplicaciones llaman a `model_name`; LiteLLM
-# usa `litellm_params` para localizar y autenticar al proveedor. No escribas
-# secretos aquí: referencia variables con `os.environ/NOMBRE`.
 model_list:
 - model_name: topito
   litellm_params:
@@ -61,15 +58,31 @@ model_list:
     drop_params: true
     api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/npant-innovation-llm/v1
     api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+- model_name: devstral-small-2507
+  litellm_params:
+    model: openai/kevinbtalbert/Devstral-Small-2507
+    drop_params: true
+    api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/devstral-small-2507/openai/v1
+    api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+  model_info:
+    dashboard_source: cloudera
+    dashboard_cloudera_kind: inference
+- model_name: qwen25-7b-instruct2
+  litellm_params:
+    model: openai/Qwen/Qwen2.5-7B-Instruct
+    drop_params: true
+    api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/qwen25-7b-instruct/openai/v1
+    api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+  model_info:
+    dashboard_source: cloudera
+    dashboard_cloudera_kind: inference
 dashboard_settings:
-  # Extensión del panel; core.py la retira antes de lanzar LiteLLM.
   guardrail:
     enabled: true
     model: guardian-seguridad
     policy: warn
     timeout: 8
 router_settings:
-  # Fallback técnico: se usa si falla el grupo principal.
   fallbacks:
   - topito:
     - qwen-local

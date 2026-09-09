@@ -236,7 +236,7 @@ import json
 import re
 import secrets
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -289,16 +289,32 @@ def refresh_cloudera_tokens() -> None:
 
 
 def apply_cloudera_credential_changes() -> dict[str, bool]:
-    """Aplica secretos en vivo o reinicia sólo en el modo legado sin DB."""
+    """Confirma cambios en SQLite; el callback los leerá sin reiniciar LiteLLM."""
 
     if not manager.process_alive():
         return {"litellm_credentials_updated": False, "litellm_restarted": False}
-    dynamic = manager.sync_cloudera_credentials()
-    if dynamic:
-        return {"litellm_credentials_updated": True, "litellm_restarted": False}
-    manager.stop()
-    manager.start()
-    return {"litellm_credentials_updated": False, "litellm_restarted": True}
+    manager.sync_cloudera_credentials()
+    return {"litellm_credentials_updated": True, "litellm_restarted": False}
+
+
+def generate_initial_cloudera_token(connection: dict[str, Any]) -> dict[str, Any]:
+    """Obtiene la credencial inicial al guardar una renovación ya configurada."""
+
+    if connection.get("has_token") or not connection.get("renewal_ready"):
+        return connection
+    try:
+        generated = cloudera.renew_token(str(connection["id"]), force=True)
+    except RuntimeError as exc:
+        cloudera.record_renewal_error(str(connection["id"]), str(exc))
+        return {**connection, "token_generated": False, "token_generation_error": str(exc)}
+    refreshed = next(
+        (item for item in cloudera.connections() if item.get("id") == connection.get("id")),
+        connection,
+    )
+    result = {**refreshed, **generated, "token_generated": True}
+    if manager.process_alive():
+        result.update(apply_cloudera_credential_changes())
+    return result
 
 
 async def cloudera_token_supervisor() -> None:
@@ -313,9 +329,8 @@ async def cloudera_token_supervisor() -> None:
 
 
 def gateway_auth_headers() -> dict[str, str]:
-    """Usa la master key sólo cuando el despliegue la configura explícitamente."""
-    master_key = os.environ.get("LITELLM_MASTER_KEY", "").strip()
-    return {"Authorization": f"Bearer {master_key}"} if master_key else {}
+    """LiteLLM se ejecuta sin autenticación interna en esta aplicación."""
+    return {}
 
 
 @asynccontextmanager
@@ -631,7 +646,8 @@ def save_cloudera_connection(connection: ClouderaConnection):
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
             connection.renewal_url, connection.workload_name)
-        if manager.process_alive() and connection.token.strip():
+        result = generate_initial_cloudera_token(result)
+        if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
         return result
     except RuntimeError as exc:
@@ -647,7 +663,8 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
             connection.renewal_url, connection.workload_name)
-        if manager.process_alive() and connection.token.strip():
+        result = generate_initial_cloudera_token(result)
+        if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
         return result
     except KeyError as exc:
@@ -658,7 +675,7 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
 
 @app.post("/api/cloudera/connections/{connection_id}/renew-token")
 def renew_cloudera_token(connection_id: str, request: ClouderaTokenRenewal):
-    """Renueva un CDP token y actualiza la credencial activa sin reinicio."""
+    """Genera o renueva un CDP token y lo aplica sin reiniciar LiteLLM."""
 
     try:
         result = cloudera.renew_token(connection_id, force=request.force)
@@ -836,6 +853,12 @@ async def test_model(name: str, test: TestCall):
         raise HTTPException(409, f"El modelo {name} está desactivado")
     if not manager.is_running():
         raise HTTPException(409, "Arranca LiteLLM antes de realizar la prueba")
+    if name not in manager.active_model_names():
+        raise HTTPException(
+            409,
+            f"El modelo {name} está guardado pero pendiente de aplicar. "
+            "Pulsa «Aplicar cambios pendientes» para reiniciar LiteLLM y cargarlo.",
+        )
 
     # Un embedding no es un chat: elegir el endpoint según la capacidad evita
     # pruebas engañosas y permite mantener una única interfaz en el navegador.

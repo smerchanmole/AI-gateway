@@ -149,7 +149,7 @@ h2 {
   font-weight: 700;
 }
 
-code, pre, .provider, .resources, .model-resources, .request-meta {
+code, pre, .provider, .resources, .persistence, .model-resources, .request-meta {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
@@ -181,6 +181,8 @@ code, pre, .provider, .resources, .model-resources, .request-meta {
 .status.unhealthy { color: var(--red); }
 .status.unhealthy i { background: var(--red); box-shadow: 0 0 0 5px rgba(251, 113, 133, 0.15); }
 .resources { color: #c8d8e9; font-size: 11px; }
+.persistence { color: #91a8bd; font-size: 10px; text-align: right; }
+.persistence.dynamic { color: #a7f3d0; }
 .account-actions { display: flex; gap: 10px; }
 .account-actions button { padding: 0; color: #91a8bd; background: transparent; font-size: 9px; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
 .account-actions button:hover { color: white; transform: none; }

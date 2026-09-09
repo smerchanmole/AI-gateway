@@ -119,9 +119,20 @@ class ClouderaCatalog:
                  **{k: v for k, v in item.items() if k not in self.SECRET_FIELDS}} |
                 {"has_token": bool(item.get("token")),
                  "has_workload_password": bool(item.get("workload_password")),
-                 "has_cdp_private_key": bool(item.get("cdp_private_key"))} |
+                 "has_cdp_private_key": bool(item.get("cdp_private_key")),
+                 "renewal_ready": self._renewal_ready(item)} |
                 (self._token_metadata(item.get("token", "")) if item.get("token") else {})
                 for item in self._read().get("connections", [])]
+
+    @staticmethod
+    def _renewal_ready(connection: dict[str, Any]) -> bool:
+        """Indica si hay datos suficientes para generar o renovar el token."""
+
+        if not str(connection.get("renewal_url") or "").strip():
+            return False
+        if connection.get("platform", "cloud") == "cloud":
+            return bool(connection.get("cdp_access_key_id") and connection.get("cdp_private_key"))
+        return bool(connection.get("workload_user") and connection.get("workload_password"))
 
     def save_connection(self, name: str, kind: str, url: str, token: str = "", platform: str = "cloud",
                         probe_interval_minutes: int = 5, workload_user: str = "", workload_password: str = "",
@@ -250,13 +261,17 @@ class ClouderaCatalog:
                     "token_expires_at": None, "token_expired": False}
 
     def renew_token(self, connection_id: str, force: bool = False) -> dict[str, Any]:
-        """Solicita un token nuevo y sustituye atómicamente el de la conexión."""
+        """Genera o renueva un token y sustituye atómicamente la credencial."""
         data = self._read()
         connection = next((item for item in data.get("connections", []) if item.get("id") == connection_id), None)
         if not connection: raise KeyError(connection_id)
+        token_missing = not str(connection.get("token") or "").strip()
         metadata = self._token_metadata(connection.get("token", ""))
         expires_at = metadata.get("token_expires_at")
-        if not expires_at and not force:
+        if token_missing and not force and not self._renewal_ready(connection):
+            return {"renewed": False, "generated": False,
+                    "message": "Falta el CDP token o completar los datos de generación", **metadata}
+        if not token_missing and not expires_at and not force:
             return {"renewed": False, "message": "La credencial no declara caducidad", **metadata}
         if expires_at and not force:
             remaining = datetime.fromisoformat(expires_at).timestamp() - datetime.now(timezone.utc).timestamp()
@@ -266,11 +281,13 @@ class ClouderaCatalog:
         renewal_url = connection.get("renewal_url", "").rstrip("/")
         if not renewal_url:
             raise RuntimeError("Configura la URL de renovación de esta conexión")
+        operation_message = ("Generando el CDP token inicial…" if token_missing else
+                             "Token caducado o próximo a caducar, generando de nuevo…")
         connection.update({"renewal_state": "renewing",
-                           "renewal_message": "Token caducado o próximo a caducar, generando de nuevo…",
+                           "renewal_message": operation_message,
                            "renewal_last_attempt": datetime.now(timezone.utc).isoformat()})
         self._write(data)
-        if connection.get("platform") == "cloud":
+        if connection.get("platform", "cloud") == "cloud":
             access_key = connection.get("cdp_access_key_id", "")
             private_key = connection.get("cdp_private_key", "")
             if not access_key or not private_key:
@@ -308,15 +325,34 @@ class ClouderaCatalog:
         connection["token"] = token
         connection["token_renewed_at"] = datetime.now(timezone.utc).isoformat()
         connection["renewal_state"] = "ok"
-        connection["renewal_message"] = "Token renovado correctamente"
+        connection["renewal_message"] = ("Token inicial generado correctamente" if token_missing else
+                                         "Token renovado correctamente")
         if declared_expiry: connection["token_expire_at"] = declared_expiry
         self._write(data)
         fresh = self._token_metadata(token)
-        return {"renewed": True, "message": "Token renovado y guardado", **fresh,
+        return {"renewed": True, "generated": token_missing,
+                "message": ("Token generado y guardado" if token_missing else "Token renovado y guardado"), **fresh,
                 "declared_expire_at": declared_expiry}
 
+    def record_renewal_error(self, connection_id: str, message: str) -> None:
+        """Persiste un fallo de generación/renovación para hacerlo visible en UI."""
+
+        with self._renewal_lock:
+            data = self._read()
+            connection = next(
+                (item for item in data.get("connections", []) if item.get("id") == connection_id),
+                None,
+            )
+            if connection:
+                connection.update({
+                    "renewal_state": "error",
+                    "renewal_message": message,
+                    "renewal_next_retry": "Dentro de 1 minuto",
+                })
+                self._write(data)
+
     def renew_due_tokens(self) -> list[dict[str, Any]]:
-        """Renueva credenciales vencidas o con menos de diez minutos de vida."""
+        """Genera tokens ausentes y renueva los próximos a caducar."""
         results = []
         with self._renewal_lock:
             for connection in list(self._read().get("connections", [])):
@@ -325,12 +361,7 @@ class ClouderaCatalog:
                     if result.get("renewed"):
                         results.append({"connection_id": connection["id"], **result})
                 except RuntimeError as exc:
-                    data = self._read()
-                    current = next((item for item in data.get("connections", []) if item.get("id") == connection.get("id")), None)
-                    if current:
-                        current.update({"renewal_state": "error", "renewal_message": str(exc),
-                                        "renewal_next_retry": "Dentro de 1 minuto"})
-                        self._write(data)
+                    self.record_renewal_error(str(connection.get("id")), str(exc))
                     results.append({"connection_id": connection.get("id"), "renewed": False, "error": str(exc)})
         return results
 

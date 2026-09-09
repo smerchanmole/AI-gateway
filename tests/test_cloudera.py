@@ -197,4 +197,34 @@ def test_onpremise_token_renewal_replaces_connection_token(tmp_path, monkeypatch
     result = catalog.renew_token(connection["id"])
     assert result["renewed"] is True
     assert catalog._connection_record(connection["id"])["token"] == new
+    visible = catalog.connections()[0]
+    assert visible["token_renewed_at"]
+    assert visible["token_expires_at"] == result["token_expires_at"]
+
+
+def test_missing_token_is_generated_by_the_automatic_renewal_flow(tmp_path, monkeypatch):
+    catalog = ClouderaCatalog(tmp_path)
+    generated = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+    connection = catalog.save_connection(
+        "Private", "inference", "https://ml.private", "",
+        platform="onpremise", workload_user="worker", workload_password="secret",
+        renewal_url="https://cde.private/gateway/authtkn/knoxtoken/api/v1/token",
+    )
+
+    class Response(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    monkeypatch.setattr(
+        "gateway.cloudera.urllib.request.urlopen",
+        lambda _request, timeout=20: Response(json.dumps({"access_token": generated}).encode()),
+    )
+
+    result = catalog.renew_token(connection["id"], force=False)
+
+    assert connection["has_token"] is False
+    assert connection["renewal_ready"] is True
+    assert result["renewed"] is True
+    assert result["generated"] is True
+    assert catalog.connections()[0]["has_token"] is True
 """Pruebas aisladas del CRUD, descubrimiento, autenticación y renovación CDP."""

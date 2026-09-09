@@ -58,12 +58,24 @@ def test_quick_test_rejects_empty_prompt(client):
     assert response.status_code == 422
 
 
-def test_gateway_auth_headers_use_general_key(monkeypatch):
+def test_quick_test_explains_when_model_is_pending_restart(monkeypatch, client):
+    monkeypatch.setattr(dashboard.manager, "models", lambda: [{
+        "name": "nuevo", "enabled": True, "mode": "chat",
+    }])
+    monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
+    monkeypatch.setattr(dashboard.manager, "active_model_names", lambda: [])
+
+    response = client.post("/api/models/nuevo/test", json={"prompt": "hola"})
+
+    assert response.status_code == 409
+    assert "pendiente de aplicar" in response.json()["detail"]
+    assert "Aplicar cambios pendientes" in response.json()["detail"]
+
+
+def test_gateway_auth_headers_ignore_legacy_general_key(monkeypatch):
     monkeypatch.setenv("LITELLM_MASTER_KEY", "general-test-key")
 
-    assert dashboard.gateway_auth_headers() == {
-        "Authorization": "Bearer general-test-key"
-    }
+    assert dashboard.gateway_auth_headers() == {}
 
 
 def test_gateway_auth_headers_allow_disabled_master_key(monkeypatch):
@@ -85,6 +97,27 @@ def test_dynamic_cloudera_credentials_do_not_restart_litellm(monkeypatch):
     assert calls == []
 
 
+def test_initial_cloudera_token_is_generated_when_renewal_is_ready(monkeypatch):
+    connection = {"id": "connection-1", "has_token": False, "renewal_ready": True}
+
+    class Catalog:
+        def renew_token(self, connection_id, force=False):
+            assert connection_id == "connection-1"
+            assert force is True
+            return {"renewed": True, "generated": True, "message": "Token generado"}
+
+        def connections(self):
+            return [{"id": "connection-1", "has_token": True, "renewal_ready": True}]
+
+    monkeypatch.setattr(dashboard, "cloudera", Catalog())
+    monkeypatch.setattr(dashboard.manager, "process_alive", lambda: False)
+
+    result = dashboard.generate_initial_cloudera_token(connection)
+
+    assert result["has_token"] is True
+    assert result["token_generated"] is True
+
+
 def test_dashboard_disables_cache_and_uses_test_tabs(client):
     response = client.get("/")
     assert response.headers["cache-control"].startswith("no-store")
@@ -93,6 +126,28 @@ def test_dashboard_disables_cache_and_uses_test_tabs(client):
     assert "Configuración YAML" in response.text
     assert 'id="yaml-editor"' in response.text
     assert 'id="model-form"' in response.text
+    assert 'id="persistence"' in response.text
+
+
+def test_dashboard_explains_sqlite_dynamic_token_mode():
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    html = (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert 'persistence.credential_store || "SQLite"' in javascript
+    assert "tokens sin reinicio · modelos con reinicio" in javascript
+    assert "LiteLLM con BBDD" not in javascript
+    assert "LiteLLM sin BBDD" not in javascript
+    assert "Añadir, editar o eliminar modelos requiere reiniciar LiteLLM" in html
+    assert "Los cambios de credenciales Cloudera se aplican sin reinicio" in html
+
+
+def test_browser_reads_an_error_response_body_only_once():
+    """Una respuesta no JSON no debe provocar 'body stream already read'."""
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "const rawBody = await response.text();" in javascript
+    assert "JSON.parse(rawBody)" in javascript
+    assert "(await response.json()).detail" not in javascript
 
 
 def test_dashboard_exposes_architecture_infographic(client):
@@ -122,7 +177,7 @@ def test_model_metrics_use_vertical_rows_and_accessible_statuses():
     assert ".metric-row + .metric-row" in stylesheet
 
 
-def test_remote_latency_probe_uses_gateway_auth(monkeypatch, client):
+def test_remote_latency_probe_works_without_gateway_auth(monkeypatch, client):
     calls = []
 
     class Response:
@@ -151,7 +206,7 @@ def test_remote_latency_probe_uses_gateway_auth(monkeypatch, client):
     assert response.status_code == 200
     assert response.json()["latency_ms"] >= 0
     assert len(calls) == 1
-    assert calls[0][1]["headers"] == {"Authorization": "Bearer general-test-key"}
+    assert calls[0][1]["headers"] == {}
     assert calls[0][1]["json"]["model"] == "topito"
 
 
@@ -200,6 +255,18 @@ def test_cloudera_models_show_independent_deployment_token_and_probe_states():
     assert "Usará el CDP token general" in javascript
     assert "Respuesta sin probar" in javascript
     assert "Responde correctamente" in javascript
+
+
+def test_cloudera_token_status_refreshes_without_page_reload():
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    refresh_function = javascript.split("async function refreshClouderaConnections()", 1)[1].split("\n}\n", 1)[0]
+
+    assert "clouderaCredentialSnapshot" in javascript
+    assert "refreshClouderaConnections" in javascript
+    assert "CDP token actualizado automáticamente" in javascript
+    assert "token_renewed_at" in javascript
+    assert "document.addEventListener(\"visibilitychange\"" in javascript
+    assert "location.reload()" not in refresh_function
 
 
 def test_api_requires_login_and_rejects_csrf(tmp_path, monkeypatch):

@@ -186,21 +186,38 @@ def test_reports_missing_referenced_environment_variable(tmp_path, monkeypatch):
     assert manager.missing_environment_variables() == ["TEST_OPENAI_KEY"]
 
 
-def test_process_environment_blanks_implicit_master_key(tmp_path, monkeypatch):
+def test_validation_rejects_external_litellm_database(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.config_text())
+    config["general_settings"] = {"database_url": "os.environ/DATABASE_URL"}
+
+    try:
+        manager.validate_config_text(yaml.safe_dump(config))
+    except RuntimeError as exc:
+        assert "únicamente SQLite local" in str(exc)
+    else:
+        raise AssertionError("Una BBDD externa de LiteLLM no debe estar permitida")
+
+
+def test_process_environment_removes_implicit_master_key(tmp_path, monkeypatch):
     manager = make_manager(tmp_path)
     monkeypatch.setenv("LITELLM_MASTER_KEY", "must-not-reach-proxy")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://must-not-reach-proxy")
 
-    assert manager._process_environment()["LITELLM_MASTER_KEY"] == ""
+    environment = manager._process_environment()
+    assert "LITELLM_MASTER_KEY" not in environment
+    assert "DATABASE_URL" not in environment
+    assert environment["LITELLM_MODE"] == "PRODUCTION"
 
 
-def test_process_environment_keeps_explicit_master_key(tmp_path, monkeypatch):
+def test_process_environment_removes_explicit_legacy_master_key(tmp_path, monkeypatch):
     manager = make_manager(tmp_path)
     config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
     config["general_settings"] = {"master_key": "os.environ/LITELLM_MASTER_KEY"}
     manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
     monkeypatch.setenv("LITELLM_MASTER_KEY", "explicit-key")
 
-    assert manager._process_environment()["LITELLM_MASTER_KEY"] == "explicit-key"
+    assert "LITELLM_MASTER_KEY" not in manager._process_environment()
 
 
 def test_missing_master_key_is_optional_and_removed_from_active_config(tmp_path, monkeypatch):
@@ -293,12 +310,15 @@ def test_dashboard_settings_are_not_forwarded_to_litellm(tmp_path):
     assert settings["guardrail"]["provider_model"] == "dos"
 
 
-def test_sqlite_mode_maps_dynamic_cloudera_credentials(tmp_path):
+def test_sqlite_mode_maps_dynamic_credentials_and_removes_external_database(tmp_path):
     manager = make_manager(tmp_path)
     config = yaml.safe_load(manager.config_text())
     config["model_list"][0]["litellm_params"] = {
         "model": "openai/modelo-cloudera",
         "api_key": "os.environ/CLOUDERA_ABC_CDP_TOKEN",
+    }
+    config["general_settings"] = {
+        "database_url": "postgresql://usuario:secreto@db.example/litellm"
     }
     manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
     manager._write_active_config()
@@ -314,6 +334,26 @@ def test_sqlite_mode_maps_dynamic_cloudera_credentials(tmp_path):
 def test_cloudera_credential_sync_is_dynamic_without_external_database(tmp_path):
     manager = make_manager(tmp_path)
     assert manager.sync_cloudera_credentials() is True
+
+    persistence = manager.persistence_status()
+    assert persistence == {
+        "credential_store": "SQLite",
+        "token_updates_dynamic": True,
+        "token_restart_required": False,
+    }
+
+
+def test_active_models_come_from_runtime_config_not_pending_yaml(tmp_path):
+    manager = make_manager(tmp_path)
+    manager._write_active_config()
+    config = yaml.safe_load(manager.config_text())
+    config["model_list"].append({
+        "model_name": "pendiente",
+        "litellm_params": {"model": "ollama/pendiente"},
+    })
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    assert manager.active_model_names() == ["uno", "dos"]
 
 
 def test_guardrail_without_selected_model_is_disabled(tmp_path):
