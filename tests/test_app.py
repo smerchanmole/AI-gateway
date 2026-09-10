@@ -225,14 +225,29 @@ def test_browser_reads_an_error_response_body_only_once():
 def test_dashboard_exposes_architecture_infographic(client):
     """La portada no debe apuntar a una imagen que el servidor no publique."""
     dashboard_response = client.get("/")
-    image_response = client.get("/static/ia-gateway-arquitectura.png")
+    image_response = client.get("/static/ia-gateway-architecture.svg")
 
-    assert "ia-gateway-arquitectura.png" in dashboard_response.text
+    assert "ia-gateway-architecture.svg" in dashboard_response.text
     assert image_response.status_code == 200
-    assert image_response.headers["content-type"] == "image/png"
+    assert image_response.headers["content-type"] == "image/svg+xml"
     assert dashboard_response.text.index('class="logs-section"') < dashboard_response.text.index(
         'class="architecture-hero"'
     )
+
+
+def test_dashboard_offers_persistent_spanish_english_and_italian_localization(client):
+    dashboard_response = client.get("/")
+    javascript_response = client.get("/static/i18n.js")
+
+    assert dashboard_response.text.count('class="language-select"') == 2
+    assert '<option value="es">ES</option>' in dashboard_response.text
+    assert '<option value="en">EN</option>' in dashboard_response.text
+    assert '<option value="it">IT</option>' in dashboard_response.text
+    assert dashboard_response.text.count('id="password-dialog"') == 1
+    assert javascript_response.status_code == 200
+    assert 'localStorage.getItem("ia-gateway-language")' in javascript_response.text
+    assert 'document.documentElement.lang = language' in javascript_response.text
+    assert 'new MutationObserver' in javascript_response.text
 
 
 def test_model_metrics_use_vertical_rows_and_accessible_statuses():

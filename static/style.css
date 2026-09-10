@@ -40,6 +40,7 @@
   padding: 24px;
 }
 .auth-card {
+  position: relative;
   display: grid;
   width: min(440px, 100%);
   gap: 14px;
@@ -54,6 +55,39 @@
 .auth-card label, #password-form label { display: grid; gap: 6px; color: #d8e5f3; font-size: 11px; font-weight: 750; }
 .auth-card small { color: #91a8bd; }
 .auth-card button { margin-top: 4px; }
+
+.language-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.language-picker select {
+  width: auto;
+  min-width: 58px;
+  padding: 5px 24px 5px 8px;
+  border-color: var(--line-strong);
+  border-radius: 8px;
+  background-color: var(--ink-950);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.auth-card .language-picker {
+  display: inline-flex;
+  justify-self: end;
+}
+
+.auth-language {
+  justify-self: end;
+  margin-bottom: -4px;
+}
 
 /* 1. Lienzo y cabecera: identidad visual, fondo y ancho de lectura. */
 
@@ -183,7 +217,7 @@ code, pre, .provider, .resources, .persistence, .model-resources, .request-meta 
 .resources { color: #c8d8e9; font-size: 11px; }
 .persistence { color: #91a8bd; font-size: 10px; text-align: right; }
 .persistence.dynamic { color: #a7f3d0; }
-.account-actions { display: flex; gap: 10px; }
+.account-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .account-actions button { padding: 0; color: #91a8bd; background: transparent; font-size: 9px; font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
 .account-actions button:hover { color: white; transform: none; }
 

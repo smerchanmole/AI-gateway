@@ -1,1131 +1,414 @@
 # IA Gateway
 
-> Un panel local para convertir LiteLLM en un gateway de IA gobernable: catálogo
-> de modelos, pruebas, configuración YAML, guardrails, Cloudera, métricas y logs.
+IA Gateway is a lightweight control plane for [LiteLLM](https://docs.litellm.ai/). It exposes one OpenAI-compatible public endpoint while providing a browser dashboard for model discovery, configuration, guardrails, health checks, tests, metrics, and request logs.
 
-![Panel de modelos de IA Gateway](docs/assets/dashboard-modelos.jpg)
+The same Python application runs locally and as a Cloudera AI Workbench application. It does not require Docker, Nginx, PostgreSQL, or an external database.
 
-IA Gateway coloca una capa de operación sencilla delante de
-[LiteLLM](https://docs.litellm.ai/). Mantiene una API compatible con OpenAI para
-las aplicaciones, pero permite administrar desde el navegador modelos OpenAI,
-Ollama y Cloudera AI Inference/Workbench.
+![IA Gateway single-port architecture](static/ia-gateway-architecture.svg)
 
-La idea central es separar responsabilidades. Los números siguientes son los
-valores locales por defecto; en Cloudera se leen automáticamente de las
-variables proporcionadas por el Workbench:
+## What it provides
 
-- un proxy de borde publica una única entrada **HTTPS** en el puerto `8090`;
-- usa un proceso `aiohttp` streaming separado del panel administrativo;
-- `/v1/*` va directamente a LiteLLM y el resto al panel de administración;
-- `config.yaml` es la fuente de verdad versionable;
-- los secretos y artefactos de ejecución permanecen fuera de Git;
-- cada petición deja una traza diaria consultable y exportable.
+- One published port for both the dashboard and the OpenAI-compatible API.
+- A Python streaming proxy based on `aiohttp`; no Nginx dependency.
+- LiteLLM lifecycle management from the dashboard.
+- Guided model CRUD plus an advanced `config.yaml` editor.
+- YAML validation, download backup, and validated import/restore.
+- OpenAI-compatible, Ollama, Cloudera AI Inference, and Cloudera AI Workbench models.
+- Optional pre-request guardrail using any configured chat model supported by LiteLLM.
+- Cloudera model discovery, endpoint probing, and token generation/renewal.
+- SQLite-only persistence for Cloudera credentials, dynamic tokens, and structured request logs.
+- Daily KPIs, hourly activity, origin/provider IPs, TTFT, duration, tokens, and Excel export.
+- Spanish, English, and Italian dashboard languages, persisted per browser.
+- Built-in administrator login with forced password change on first access.
 
-## Índice
-
-1. [Qué ofrece](#1-qué-ofrece)
-2. [Arquitectura](#2-arquitectura)
-3. [Recorrido de una llamada](#3-recorrido-de-una-llamada)
-4. [Instalación](#4-instalación)
-5. [Arranque y parada](#5-arranque-y-parada)
-6. [Cómo llamar a los modelos](#6-cómo-llamar-a-los-modelos)
-7. [Configuración YAML](#7-configuración-yaml)
-8. [Ollama](#8-ollama)
-9. [OpenAI y proveedores compatibles](#9-openai-y-proveedores-compatibles)
-10. [Cloudera](#10-cloudera)
-11. [Guardrail general](#11-guardrail-general)
-12. [Logs, KPIs y Excel](#12-logs-kpis-y-excel)
-13. [Dimensionamiento para 100 peticiones concurrentes](#13-dimensionamiento-para-100-peticiones-concurrentes)
-14. [Mapa pedagógico del código](#14-mapa-pedagógico-del-código)
-15. [API del panel](#15-api-del-panel)
-16. [Seguridad](#16-seguridad)
-17. [Pruebas y actualización](#17-pruebas-y-actualización)
-18. [Diagnóstico](#18-diagnóstico)
-
-## 1. Qué ofrece
-
-- Arranque y parada de LiteLLM desde la web.
-- Estado real basado en PID **y** disponibilidad del puerto.
-- Detección de procesos ajenos en la entrada o en el upstream LiteLLM (`14000`).
-- CPU total y memoria RAM del árbol de procesos, actualizadas cada tres segundos.
-- CRUD de modelos sin editar YAML manualmente.
-- Editor avanzado con validación previa y reinicio transaccional.
-- Activación/desactivación temporal sin destruir la configuración fuente.
-- Fallback entre aliases.
-- Prueba rápida por pestaña para chat y embeddings.
-- Métricas de Ollama y sonda de latencia para proveedores remotos.
-- Integración opcional con Cloudera AI Inference y AI Workbench.
-- Renovación automática del CDP token.
-- Guardrail previo permisivo o restrictivo.
-- Logs técnicos de LiteLLM con timestamp Europe/Madrid.
-- Logs estructurados por modelo y día, KPIs, gráfica horaria y Excel.
-
-## 2. Arquitectura
+## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph CLIENTES["Consumidores"]
-        WEB["Navegador"]
-        APP["Aplicación / agente / SDK OpenAI"]
-    end
-
-    EDGE["Proxy de borde · entrada única :8090"]
-
-    subgraph PANEL["Panel interno · 127.0.0.1:18080"]
-        API["FastAPI · app.py"]
-        UI["HTML + CSS + JavaScript"]
-        CORE["GatewayManager"]
-        CDP["ClouderaCatalog"]
-    end
-
-    subgraph PROXY["LiteLLM interno · 127.0.0.1:14000"]
-        LLM["LiteLLM Proxy"]
-        CALLBACK["Callback de guardrail y observabilidad"]
-    end
-
-    subgraph DATOS["Estado local"]
-        YAML["config.yaml"]
-        ENV[".env"]
-        RUN["runtime/active_config.yaml"]
-        SQLITE[("SQLite diario")]
-        LOG["Log técnico diario"]
-    end
-
-    subgraph PROVEEDORES["Modelos"]
-        OPENAI["OpenAI"]
-        OLLAMA["Ollama :11434"]
-        CLOUDERA["Cloudera AI"]
-    end
-
-    WEB --> EDGE --> UI --> API
-    APP -->|"OpenAI API"| EDGE --> LLM
-    API --> CORE --> LLM
-    YAML --> CORE --> RUN --> LLM
-    ENV --> CORE
-    API --> CDP
-    LLM --> CALLBACK --> SQLITE
-    LLM --> LOG
-    LLM --> OPENAI
-    LLM --> OLLAMA
-    LLM --> CLOUDERA
+    C["Browser / application / agent"] -->|"HTTPS · one published port"| E["Python edge proxy"]
+    E -->|"/ and /api/*"| D["FastAPI dashboard<br/>127.0.0.1:18080"]
+    E -->|"/v1/* · streaming"| L["LiteLLM Proxy<br/>127.0.0.1:14000"]
+    D --> Y["config.yaml"]
+    D --> S[("SQLite")]
+    L --> S
+    L --> P["Cloudera · OpenAI · Ollama · other providers"]
 ```
 
-### Los tres planos
+The public listener routes by path:
 
-| Plano | Puerto/almacén | Responsabilidad |
+| Public path | Internal target | Purpose |
 |---|---|---|
-| Entrada única | `https://servidor:8090` | El proxy `aiohttp` separa el tráfico por ruta y transmite en streaming. |
-| Administración | `127.0.0.1:18080` | UI autenticada, CRUD, pruebas, salud y logs. |
-| Inferencia | `127.0.0.1:14000` | LiteLLM OpenAI-compatible; el proxy publica `/v1/*`. |
-| Proveedores | remoto o `:11434` | Ejecución real del modelo. |
+| `/`, `/static/*`, `/api/*` | FastAPI on `127.0.0.1:18080` | Dashboard, authentication, configuration, discovery, and logs |
+| `/v1/*` | LiteLLM on `127.0.0.1:14000` | OpenAI-compatible inference, including streaming |
 
-Los puertos efectivos se resuelven al arrancar:
+Only the edge port is published. The dashboard and LiteLLM ports remain on loopback and are not exposed externally.
 
-| Proceso | Variable | Fallback local | Binding |
-|---|---|---:|---|
-| Proxy de borde | primer puerto CDSW disponible / `IA_GATEWAY_PORT` | `8090` | `127.0.0.1` |
-| Panel FastAPI | `IA_GATEWAY_DASHBOARD_PORT` | `18080` | `127.0.0.1` |
-| LiteLLM OpenAI-compatible | `IA_GATEWAY_LITELLM_PORT` | `14000` | `127.0.0.1` |
+### Port selection
 
-Esto permite ejecutar la misma imagen en local y como aplicación de Cloudera AI.
-En local, el proxy de borde sirve HTTPS con el certificado autofirmado. Cuando existe
-`CDSW_DOMAIN` (señal inequívoca de ejecución dentro de Cloudera), sirve HTTP sobre
-loopback porque el proxy de Cloudera termina TLS y publica la URL HTTPS externa.
-La contraseña nunca atraviesa la red del usuario en claro en ninguno de los dos modos.
+| Process | Environment variable | Local default |
+|---|---|---:|
+| Public Python edge proxy | `IA_GATEWAY_PORT`; otherwise the first defined value of `CDSW_READONLY_PORT`, `CDSW_APP_PORT`, or `CDSW_PUBLIC_PORT` | `8090` |
+| Internal FastAPI dashboard | `IA_GATEWAY_DASHBOARD_PORT` | `18080` |
+| Internal LiteLLM Proxy | `IA_GATEWAY_LITELLM_PORT` | `14000` |
 
-Si una variable está vacía se usa el fallback;
-si contiene un valor no numérico, fuera de `1–65535`, o los puertos coinciden,
-el arranque se detiene con un mensaje explícito.
+In Cloudera, the platform terminates TLS and forwards traffic to its assigned application port. Locally, IA Gateway creates a self-signed development certificate and serves HTTPS on `8090` by default.
 
-El panel no sustituye a LiteLLM. Lo administra. Una aplicación de negocio no
-debe llamar a `/api`; debe usar `/v1` sobre la misma entrada `8090`.
+### Persistence and restart rules
 
-### Configuración fuente y configuración activa
+| Data | Storage | Restart needed? |
+|---|---|---|
+| Model topology, aliases, fallbacks, and guardrail selection | `config.yaml` | Yes, LiteLLM must reload its routing table |
+| Cloudera connections and secrets | `runtime/cloudera.sqlite3` | No |
+| Renewed CDP tokens and model-specific tokens | `runtime/cloudera.sqlite3` | No; the LiteLLM callback reads the current value dynamically |
+| Structured request logs | SQLite files under `runtime/` | No |
+| Effective LiteLLM configuration | `runtime/active_config.yaml` | Generated automatically; do not edit |
 
-```mermaid
-flowchart TD
-    A["Usuario edita config.yaml o formulario"] --> B["Validación sintáctica y semántica"]
-    B --> C["config.yaml · fuente de verdad"]
-    C --> D["Filtrar modelos desactivados"]
-    D --> E["Retirar dashboard_settings"]
-    E --> F["Añadir callback local"]
-    F --> G["runtime/active_config.yaml"]
-    G --> H["LiteLLM"]
-```
+SQLite is part of the Python standard library. There is no database server to install or operate.
 
-No edites `runtime/active_config.yaml`: se vuelve a generar en cada arranque.
+## Cloudera AI installation
 
-## 3. Recorrido de una llamada
+### 1. Download the project from GitHub
 
-```mermaid
-sequenceDiagram
-    participant C as Cliente
-    participant N as Proxy de borde :8090
-    participant L as LiteLLM :14000
-    participant G as Guardrail
-    participant P as Proveedor
-    participant D as SQLite
-
-    C->>N: POST /v1/chat/completions
-    N->>L: Streaming directo
-    L->>G: Mensajes y alias
-    G-->>L: safe / warning / unavailable
-    alt política restrictiva y riesgo
-        L-->>N: Error; llamada bloqueada
-        N-->>C: Error OpenAI-compatible
-        L->>D: Guarda bloqueo y motivo
-    else permitida
-        L->>P: Modelo real + credencial del proveedor
-        P-->>L: Respuesta / streaming
-        L->>D: Entrada, salida, IPs, TTFT, duración, tokens
-        L-->>N: Respuesta OpenAI-compatible
-        N-->>C: Streaming sin buffering
-    end
-```
-
-La entrada queda protegida por el control de acceso de la WebApp de Cloudera.
-LiteLLM no exige master key. Para salir al proveedor usa `OPENAI_API_KEY`, CDP
-token, token específico de modelo o ninguna clave para un Ollama local.
-
-## 4. Instalación
-
-### Requisitos
-
-- macOS o Linux.
-- Python 3.11 o 3.12 recomendado.
-- Git.
-- Ollama opcional si habrá inferencia local.
-- Acceso a Internet para OpenAI o Cloudera Cloud.
-
-Python 3.11+ evita incompatibilidades de sintaxis presentes en integraciones
-opcionales recientes de LiteLLM cuando se ejecutan sobre Python 3.9.
-
-### Clonar y crear un entorno propio
+From a Cloudera project terminal:
 
 ```bash
-git clone <URL-DEL-REPOSITORIO> ia-gateway
-cd ia-gateway
+git clone https://github.com/smerchanmole/AI-gateway.git
+cd AI-gateway
+```
 
+If the project is already cloned and `config.yaml` contains local dashboard changes, preserve it before pulling:
+
+```bash
+git stash push -m "local IA Gateway config" -- config.yaml
+git pull origin main
+git stash pop
+```
+
+Alternatively, download a YAML backup from **Configuration → Export or restore config.yaml**, pull the repository, and import the backup afterward.
+
+### 2. Create the Cloudera application
+
+Create a Cloudera AI Workbench application with:
+
+- **Launcher:** `app.py`
+- **Platform authentication:** disabled, if clients must call `/v1/*` directly without a Cloudera browser session
+- **Runtime:** Python 3.11 or newer
+- **Port:** let Cloudera inject the assigned `CDSW_*_PORT`
+
+`app.py` creates a private `.venv`, installs `requirements.txt`, validates it with `pip check`, and starts the application. The first launch therefore takes longer and requires access to the configured Python package index.
+
+Disabling Cloudera platform authentication exposes the application URL to the network policy applied to that workspace. The dashboard still has its own administrator login. The `/v1/*` inference API currently does not require the dashboard password or a LiteLLM master key, so protect the URL with the appropriate Cloudera/network access policy before production use.
+
+### 3. Sign in and change the initial password
+
+Open the application URL and use:
+
+```text
+username: admin
+password: admin
+```
+
+The dashboard forces a password change before allowing access. Use at least 12 characters with uppercase, lowercase, a number, and a symbol.
+
+### 4. Register at least one Cloudera connection
+
+Open **Configuration → Cloudera**. Two different URLs are involved:
+
+1. **Base URL** is the origin that hosts Model Endpoints and the discovery API. You may paste a full endpoint URL; IA Gateway keeps only the scheme and domain.
+2. **Renewal URL** is the IAM or Knox endpoint used to generate/renew the CDP workload token.
+
+#### Cloudera Cloud example
+
+| Field | Example |
+|---|---|
+| Service | `Cloudera AI Inference` |
+| Deployment | `Cloud` |
+| Full model endpoint URL | `https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/my-model/v1` |
+| Base URL entered in the form | `https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site` |
+| Discovery API used by IA Gateway | `https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/api/v1alpha1/listEndpoints` |
+| Renewal URL | `https://iamapi.us-west-1.altus.cloudera.com` |
+| Workload name | for example `DE` |
+| Credentials | `CDP_ACCESS_KEY_ID` and `CDP_PRIVATE_KEY` from a CDP machine user/API access key |
+
+Do not use `https://console.cdp.cloudera.com` as the Base URL. The historic `altus.cloudera.com` IAM hostname is intentional; `iamapi.us-west-1.cdp.cloudera.com` does not resolve.
+
+The Cloudera application runtime must have outbound DNS and HTTPS access to both the Model Endpoint domain and the IAM hostname. A DNS failure cannot be fixed by application code; the workspace egress policy must allow it.
+
+#### Cloudera on-premises example
+
+Exact hostnames and gateway paths depend on the installation. Use values supplied by the platform administrator, for example:
+
+| Field | Example |
+|---|---|
+| Service | `Cloudera AI Inference` or `Cloudera AI Workbench` |
+| Deployment | `On-premise` |
+| Full model endpoint URL | `https://ml.company.example/namespaces/serving-default/endpoints/my-model/openai/v1` |
+| Base URL entered in the form | `https://ml.company.example` |
+| Discovery API used by IA Gateway | `https://ml.company.example/api/v1alpha1/listEndpoints` for AI Inference |
+| Renewal URL | `https://cdp.company.example/gateway/cdp-proxy-api/knox-token-management/token` |
+| Credentials | `WORKLOAD-USER` and `WORKLOAD-PASS` |
+
+The on-premises renewal URL must be the complete Knox token endpoint and end in `/token`. Replace every example hostname and path with the values published by your Cloudera administrator.
+
+You can either paste an existing CDP token/API v2 key or leave the token blank when complete renewal credentials are provided. IA Gateway then requests the initial token and subsequently renews it in the background. Secret values are stored in SQLite with file mode `0600` and are never returned to the browser.
+
+### 5. Discover and add models
+
+1. Save the Cloudera connection.
+2. Select **Discover models**.
+3. Review deployment state, credential state, endpoint URL, and protocol compatibility.
+4. Use **Test access** to validate the endpoint and credential.
+5. Select **Prepare draft** on each required model.
+6. Review the LiteLLM name, API base, and credential reference.
+7. Select **Add model** and apply the pending LiteLLM restart.
+
+A newly added model requires a LiteLLM restart because LiteLLM must rebuild its router. Token generation and renewal do not require a restart.
+
+### 6. Configure an optional guardrail
+
+In **Configuration → Optional pre-request guardrail**:
+
+1. Choose any configured chat model that can classify the conversation. It may be hosted by Ollama, Cloudera, OpenAI, or another OpenAI-compatible provider.
+2. Enable **Apply before chat models**.
+3. Choose a policy:
+   - **Permissive:** record a warning and continue to the requested model.
+   - **Restricted:** block the request when the guardrail marks it unsafe.
+
+The guardrail model must return a classification that IA Gateway can interpret. Llama Guard models are a natural fit, but the transport is provider-independent.
+
+## Local installation
+
+Requirements:
+
+- Python 3.11 or newer
+- Internet or an internal Python package mirror on first launch
+- Optional: Ollama, if local Ollama models are configured
+
+```bash
+git clone https://github.com/smerchanmole/AI-gateway.git
+cd AI-gateway
+python3 app.py
+```
+
+The bootstrap creates `.venv` and installs dependencies automatically. Then open:
+
+```text
+https://127.0.0.1:8090
+```
+
+The certificate is self-signed for local development, so the browser or `curl` needs an explicit exception. You may also prepare the environment manually:
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Para desarrollo:
-
-```bash
-python -m pip install -r requirements-dev.txt
-```
-
-`app.py` prepara además el entorno al comienzo de cada arranque y antes de
-importar cualquier dependencia externa. Si Cloudera lo ejecuta con su Python
-administrado, crea automáticamente `.venv`, instala allí `requirements.txt` y
-se relanza con `.venv/bin/python`. Esto evita mezclar LiteLLM con las versiones
-de `protobuf`, `typing_extensions`, MLflow y otros paquetes incluidos por la
-plataforma. Si Cloudera evalúa el fichero como una celda sin `__file__`, se toma
-como raíz el directorio de trabajo. Cualquier fallo de `venv` o `pip` cancela el
-arranque con un mensaje explícito. La instalación manual sigue siendo
-recomendable en local para preparar el entorno con antelación.
-
-El bootstrap elimina cualquier `PIP_USER` heredado y deja que `pip` aplique su
-comportamiento normal dentro del entorno privado; no utiliza `--user` ni
-`--no-user`. También establece temporalmente `PIP_CONFIG_FILE` al dispositivo
-nulo para impedir que un `pip.conf` de Cloudera vuelva a imponer `user = true`.
-La configuración de la plataforma no se modifica. Se conservan las variables
-de índice y proxy necesarias para repositorios corporativos. Antes de relanzar,
-se eliminan `PYTHONPATH` y `PYTHONHOME` heredados y se activa
-`PYTHONNOUSERSITE=1`, impidiendo que módulos de `/usr/local` o `~/.local`
-se adelanten a los instalados dentro de `.venv`.
-La misma separación se aplica durante la instalación: `pip` se ejecuta con el
-modo aislado de Python (`-I`) y sin los constraints, prefijos o destinos que
-Cloudera aplica a su MLflow. De este modo `mlflow-cml-plugin` y su requisito
-`typing-extensions==4.10.0` no participan en la resolución privada de LiteLLM.
-Si Cloudera evalúa `app.py` como una celda y no define `__file__`, el bootstrap
-usa el directorio de trabajo del proyecto para localizar `requirements.txt` y
-mantiene el engine como proceso padre. Esto evita que un `exec` cierre el kernel
-y permite ver en directo cada fase, toda la salida de `pip`, el resultado de
-`pip check` y posteriormente los logs del servidor. Cada línea lleva el prefijo
-`[pip install]` o `[pip check]`; si algo falla, las últimas 30 líneas se repiten
-dentro de la excepción para que Cloudera no oculte la causa al cerrar el engine.
-
-### Secretos
-
-```bash
-cp .env.example .env
-```
-
-Contenido cuando se usan modelos OpenAI:
-
-```dotenv
-OPENAI_API_KEY=sk-tu-clave-openai
-```
-
-Para fijar explícitamente los puertos:
-
-```dotenv
-IA_GATEWAY_PORT=8090
-IA_GATEWAY_LITELLM_PORT=14000
-IA_GATEWAY_DASHBOARD_PORT=18080
-```
-
-Las conexiones y credenciales Cloudera se guardan automáticamente en SQLite,
-sin variables ni servicios de base de datos adicionales. Las variables reales
-del entorno de Cloudera tienen prioridad sobre el fallback público.
-
-Una clave local aleatoria se puede generar así:
-
-```bash
-openssl rand -hex 32
-```
-
-`.env` está ignorado por Git. `.env.example` sólo contiene nombres y ejemplos.
-
-## 5. Arranque y parada
-
-El directorio `./runtime` conserva SQLite, los logs y el estado del panel. No
-hace falta Docker ni ninguna base externa. El proxy streaming `aiohttp` se
-instala automáticamente desde `requirements.txt`.
-
-```bash
-./start.sh
-```
-
-Equivalente manual:
-
-```bash
-source .venv/bin/activate
+pip install -r requirements.txt
 python app.py
 ```
 
-Después:
+Optional `.env` example:
 
-1. Abre <https://127.0.0.1:8090>.
-2. Acepta una sola vez el aviso del certificado autofirmado local.
-3. Entra con el usuario fijo `admin` y la contraseña inicial `admin`.
-4. El panel obliga a cambiarla por una contraseña robusta antes de permitir operaciones.
-5. Pulsa **Arrancar** y espera `Activo · 127.0.0.1:14000 · PID ...`.
-
-En el primer arranque **local** se generan `runtime/tls/ia-gateway.crt` y su clave privada
-con permisos `0600`. El proxy escucha en el puerto único, `8090` en local; la cookie
-de sesión sólo viaja cifrada. En Cloudera no
-se genera un certificado interno: su proxy ofrece el HTTPS público. Para evitar el aviso del navegador en una
-instalación corporativa, importa el certificado en los equipos administradores
-o sustitúyelo por uno emitido por vuestra CA interna.
-
-El botón **Detener** termina el grupo de procesos. Al cerrar FastAPI de forma
-ordenada, el `lifespan` también intenta detener el proxy hijo.
-
-Si aparece **Conflicto · puerto 14000 ocupado por otro proceso**, existe otra
-instancia que la app no controla. Detén esa instancia antes de arrancar otra;
-no confundas un proxy antiguo con un error de los modelos nuevos.
-
-## 6. Cómo llamar a los modelos
-
-### URL correcta
-
-Para una aplicación que corre en el mismo equipo:
-
-```text
-Base URL: https://127.0.0.1:${IA_GATEWAY_PORT:-8090}/v1
-API key:  no requerida
-Model:    alias declarado en model_name
+```dotenv
+OPENAI_API_KEY=sk-your-key
+IA_GATEWAY_PORT=8090
+IA_GATEWAY_DASHBOARD_PORT=18080
+IA_GATEWAY_LITELLM_PORT=14000
+CDP_RENEWAL_TIMEOUT_SECONDS=60
 ```
 
-Ejemplos de alias: `topito`, `qwen-local`, `embedding-local` o
-`goes-nemotron-3-super-120b`.
+The three ports must be distinct. Only `IA_GATEWAY_PORT` is externally accessible.
 
-> El panel y LiteLLM escuchan sólo en `127.0.0.1`. El proxy de borde es la única
-> entrada tanto en Cloudera como en local.
-> El proxy `aiohttp` transmite en streaming desde un proceso separado y no hace
-> pasar las inferencias por el FastAPI administrativo.
+## Calling the API
 
-Dentro de Cloudera, las URLs publicadas siguen normalmente este patrón:
+### List models
 
-```text
-Panel:    https://<URL-ASIGNADA-POR-CLOUDERA>/
-LiteLLM:  https://<URL-ASIGNADA-POR-CLOUDERA>/v1
-```
-
-En una Analytical Application, el panel usa el subdominio elegido para la
-aplicación. La URL exterior la proporciona Cloudera; no se construye con
-`127.0.0.1` ni con el número de puerto interno.
-
-### Python con el SDK de OpenAI
-
-Instala el cliente si tu proyecto consumidor todavía no lo tiene:
-
-```bash
-python -m pip install openai
-```
-
-```python
-import os
-import httpx
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="https://127.0.0.1:8090/v1",
-    # El SDK exige un valor, aunque el gateway no valida una master key.
-    api_key="not-required",
-    # Sólo para el certificado autofirmado de desarrollo local.
-    http_client=httpx.Client(verify=False),
-)
-
-response = client.chat.completions.create(
-    model="topito",  # alias de config.yaml
-    messages=[
-        {"role": "system", "content": "Eres un especialista en SQL."},
-        {"role": "user", "content": "Escribe una consulta SELECT 1."},
-    ],
-)
-
-print(response.choices[0].message.content)
-```
-
-Para llamar a un Ollama o Cloudera configurado cambia únicamente `model`:
-
-```python
-response = client.chat.completions.create(
-    model="goes-nemotron-3-super-120b",
-    messages=[{"role": "user", "content": "¿Qué es la IA generativa?"}],
-)
-```
-
-### Python con `httpx`
-
-```python
-import httpx
-
-response = httpx.post(
-    "https://127.0.0.1:8090/v1/chat/completions",
-    json={
-        "model": "qwen-local",
-        "messages": [{"role": "user", "content": "Hola"}],
-    },
-    timeout=120,
-    verify=False,  # sólo desarrollo local con certificado autofirmado
-)
-response.raise_for_status()
-print(response.json()["choices"][0]["message"]["content"])
-```
-
-### `curl`
-
-```bash
-curl -k https://127.0.0.1:8090/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "topito",
-    "messages": [{"role": "user", "content": "Devuelve SELECT 1"}]
-  }'
-```
-
-### Embeddings
-
-```python
-embedding = client.embeddings.create(
-    model="embedding-local",
-    input="Texto que quiero convertir en vector",
-)
-vector = embedding.data[0].embedding
-print(len(vector), vector[:5])
-```
-
-Endpoint HTTP equivalente:
-
-```text
-POST https://127.0.0.1:8090/v1/embeddings
-```
-
-### Streaming
-
-```python
-stream = client.chat.completions.create(
-    model="topito",
-    messages=[{"role": "user", "content": "Explica una CTE de SQL."}],
-    stream=True,
-)
-for chunk in stream:
-    text = chunk.choices[0].delta.content
-    if text:
-        print(text, end="", flush=True)
-```
-
-### Descubrir aliases disponibles
+Local:
 
 ```bash
 curl -k https://127.0.0.1:8090/v1/models
 ```
 
-La [documentación de LiteLLM](https://docs.litellm.ai/) explica el contrato
-OpenAI-compatible, routing, fallbacks y proveedores adicionales.
+Cloudera:
 
-## 7. Configuración YAML
+```bash
+curl https://your-app.your-workspace.cloudera.site/v1/models
+```
 
-### Anatomía de un modelo
+### Chat completion
+
+```bash
+curl -k https://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "your-model-alias",
+    "messages": [{"role": "user", "content": "Hello, how are you?"}],
+    "stream": false
+  }'
+```
+
+For Cloudera, replace the local URL and remove `-k`:
+
+```bash
+curl https://your-app.your-workspace.cloudera.site/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"your-model-alias","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### Streaming
+
+```bash
+curl -k -N https://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "your-model-alias",
+    "messages": [{"role": "user", "content": "Explain SQLite briefly."}],
+    "stream": true
+  }'
+```
+
+### Multimodal requests
+
+Multimodal payloads pass through the same `/v1/chat/completions` route. They work when LiteLLM supports the provider/model combination and the target model accepts images:
+
+```bash
+curl -k https://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "your-vision-alias",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+      ]
+    }]
+  }'
+```
+
+The public proxy accepts streaming request bodies and responses and allows payloads up to 100 MiB. Base64 images increase request size significantly; hosted URLs are usually more efficient.
+
+## Model configuration
+
+`config.yaml` is the versionable source of truth. A minimal example is:
 
 ```yaml
 model_list:
-  - model_name: alias-que-usa-la-aplicacion
+  - model_name: my-model
     litellm_params:
-      model: proveedor/modelo-real
-      api_base: https://endpoint-opcional/v1
-      api_key: os.environ/NOMBRE_DE_LA_VARIABLE
-      timeout: 120
+      model: openai/provider/model-id
+      api_base: https://provider.example/v1
+      api_key: os.environ/PROVIDER_API_KEY
       drop_params: true
-```
 
-| Campo | Significado |
-|---|---|
-| `model_name` | Contrato estable para tus aplicaciones. |
-| `litellm_params.model` | Proveedor y modelo/deployment real. |
-| `api_base` | Base del proveedor OpenAI-compatible u Ollama. |
-| `api_key` | Referencia a una variable; nunca el secreto en claro. |
-| `drop_params` | Descarta parámetros que el proveedor no soporta. |
-| `timeout` | Tiempo máximo de proveedor. |
-| `reasoning_effort` | Esfuerzo de razonamiento, si el modelo lo acepta. |
-| `keep_alive` | Permanencia del modelo Ollama en memoria. |
-
-### Fallback
-
-```yaml
-router_settings:
-  fallbacks:
-    - topito:
-        - qwen-local
-```
-
-Si `topito` falla técnicamente, LiteLLM intenta `qwen-local`. Un fallback no es
-un balanceador de calidad y no se activa porque el guardrail marque riesgo.
-
-### Configuración guiada y avanzada
-
-![CRUD y editor de configuración](docs/assets/dashboard-configuracion.jpg)
-
-La pestaña **Configuración** permite:
-
-- crear, leer, modificar y borrar modelos;
-- mantener parámetros avanzados desconocidos por el formulario;
-- renombrar referencias en fallbacks y guardrail;
-- guardar con reinicio inmediato o dejar el cambio pendiente;
-- validar el YAML completo antes de sustituir el fichero.
-
-La escritura es atómica: primero se crea un temporal y después se reemplaza el
-original. Si el reinicio falla, se restaura la configuración previa.
-
-## 8. Ollama
-
-### Preparación
-
-```bash
-ollama pull qwen3.5:9b
-ollama pull bge-m3:latest
-ollama pull llama-guard3
-```
-
-Ejemplo:
-
-```yaml
-- model_name: qwen-local
-  litellm_params:
-    model: ollama/qwen3.5:9b
-    api_base: http://localhost:11434
-    keep_alive: -1
-    drop_params: true
-```
-
-`keep_alive: -1` evita descargar el modelo entre peticiones, reduciendo latencia
-a costa de mantener RAM/VRAM ocupada. La
-[FAQ oficial de Ollama](https://docs.ollama.com/faq) documenta también:
-
-- `OLLAMA_NUM_PARALLEL`: paralelismo por modelo; valor predeterminado 1.
-- `OLLAMA_MAX_LOADED_MODELS`: modelos simultáneamente residentes.
-- `OLLAMA_MAX_QUEUE`: cola antes de responder 503; valor predeterminado 512.
-- `OLLAMA_CONTEXT_LENGTH`: contexto y, por tanto, consumo de memoria.
-
-Ollama advierte que la memoria crece con
-`OLLAMA_NUM_PARALLEL × OLLAMA_CONTEXT_LENGTH`. El peso del modelo no basta para
-dimensionar: el KV cache, contexto, cuantización y GPU cambian mucho el consumo.
-Consulta además su guía de [longitud de contexto](https://docs.ollama.com/context-length).
-
-El panel muestra estado cargado, memoria del modelo, memoria libre del host y
-CPU compartida. Las tarjetas usan verde, amarillo y rojo, pero siempre incluyen
-el valor textual para no depender únicamente del color.
-
-## 9. OpenAI y proveedores compatibles
-
-```yaml
-- model_name: topito
-  litellm_params:
-    model: openai/gpt-5.6-sol
-    api_key: os.environ/OPENAI_API_KEY
-    reasoning_effort: high
-    drop_params: true
-```
-
-El panel no puede conocer CPU, RAM ni cuota restante de un proveedor SaaS si su
-API no lo publica. Para esos modelos usa una sonda pequeña de latencia y colorea
-su estado. Una sonda correcta no garantiza cuota suficiente para cualquier
-volumen: revisa límites, facturación y rate limits en el proveedor.
-
-## 10. Cloudera
-
-### Qué integra
-
-- Cloudera AI Inference mediante `listEndpoints` y `describeEndpoint`.
-- Cloudera AI Workbench mediante proyectos, modelos y deployments API v2.
-- Endpoints OpenAI-compatible y detección explícita de Open Inference.
-- Token general por conexión o token/JWT específico por modelo.
-- Prueba real de inferencia mínima usando URL, tarea y modelo publicados.
-- Renovación automática de CDP token diez minutos antes de caducar.
-
-### Flujo de incorporación
-
-```mermaid
-flowchart TD
-    A["Guardar conexión Cloudera"] --> B["Buscar modelos"]
-    B --> C["Normalizar endpoint, tarea y estado"]
-    C --> D["Probar credencial y contrato"]
-    D --> E["Preparar borrador LiteLLM"]
-    E --> F["Revisar alias, model y api_base"]
-    F --> G["Añadir a config.yaml"]
-    G --> H["Reiniciar LiteLLM"]
-```
-
-Para AI Inference pega sólo el dominio de un endpoint. Si copias la URL completa,
-el backend extrae automáticamente esquema y dominio para consultar las APIs de
-catálogo.
-
-El `api_base` final sí conserva la ruta publicada por Cloudera hasta `/v1`:
-
-```yaml
-- model_name: nemotron-negocio
-  litellm_params:
-    model: openai/nvidia/modelo-interno
-    api_base: https://ml-ejemplo.cloudera.site/namespaces/serving-default/endpoints/endpoint/v1
-    api_key: os.environ/CLOUDERA_<CONEXION>_CDP_TOKEN
-    drop_params: true
-```
-
-La aplicación traduce el alias público al identificador estricto esperado por
-Cloudera justo antes de contactar con el proveedor.
-
-### Credenciales y renovación
-
-Prioridad de credenciales:
-
-1. JWT/API key específica del endpoint.
-2. CDP token general de la conexión.
-
-En Public Cloud, la renovación utiliza `CDP_ACCESS_KEY_ID` y `CDP_PRIVATE_KEY`
-para firmar `generateWorkloadAuthToken` mediante CDP CLI. En on-premise puede
-usar `WORKLOAD-USER` y `WORKLOAD-PASS` contra la ruta Knox configurada.
-
-Cada minuto el supervisor comprueba caducidad. Cuando quedan diez minutos:
-
-1. marca “token próximo a caducar, generando de nuevo”;
-2. solicita un token nuevo;
-3. guarda la credencial en `runtime/cloudera.sqlite3`;
-4. reintenta al minuto si falla;
-5. el callback lee el token vigente antes de la siguiente petición, sin detener
-   LiteLLM ni interrumpir llamadas en curso.
-
-El YAML fuente contiene sólo `os.environ/...`. El catálogo administrativo usa
-`runtime/cloudera.sqlite3`, con permisos `0600`, y el callback resuelve desde ahí
-la credencial asociada al alias. La primera ejecución importa automáticamente el
-antiguo `runtime/cloudera-connections.json` si existe. `runtime` debe residir en
-almacenamiento persistente y cifrado en producción.
-
-Cloudera AI Inference soporta autoscaling por RPS o concurrencia por réplica,
-incluido scale-to-zero. Véanse los conceptos de
-[autoscaling de endpoints](https://docs.cloudera.com/machine-learning/cloud/ai-inference/topics/ml-caii-caii-concepts.html)
-y la guía de [sensibilidad del autoscaling](https://docs.cloudera.com/machine-learning/cloud/ai-inference/topics/ml-caii-tuning-auto-scale-sensitivity-use-api.html).
-
-## 11. Guardrail general
-
-El guardrail es **opcional**. Si se elige “Sin guardrail · llamada directa”, las
-peticiones van al modelo de destino sin clasificación previa. Sólo cuando se
-selecciona un modelo guardrail se ejecuta **antes** de los demás modelos de chat.
-El modelo de seguridad suele ser un `llama-guard` local en Ollama para evitar coste
-externo y recursión.
-
-```yaml
 dashboard_settings:
   guardrail:
-    enabled: true
-    model: guardian-seguridad
+    enabled: false
+    model: ""
     policy: warn
     timeout: 8
+
+router_settings: {}
 ```
 
-`dashboard_settings` pertenece a IA Gateway. `GatewayManager` la retira del
-YAML activo antes de arrancar LiteLLM y genera un JSON runtime para el callback.
+Never put a secret value directly in `config.yaml`. Use an environment reference such as `os.environ/OPENAI_API_KEY`, or use the Cloudera credential form so the value is stored in SQLite.
 
-### Política permisiva: `warn`
+The advanced editor validates YAML structure, duplicate aliases, fallbacks, guardrail references, and environment references before saving. Export/import is available at the bottom of the Configuration page. Imports are validated before atomically replacing the configuration.
 
-- Clasifica cada entrada.
-- Si es segura, continúa normalmente.
-- Si parece peligrosa, añade advertencia y motivo, pero continúa.
-- Si el guardrail no responde, registra “no disponible” y continúa.
-- Reduce la frustración por falsos positivos.
+## Authentication and security boundaries
 
-Úsala al comenzar, en entornos de análisis y cuando una respuesta del modelo
-principal pueda seguir siendo útil bajo revisión humana.
+The dashboard uses an independent session cookie, CSRF protection for mutations, Argon2id password hashing, rate-limited login, and a forced first-password change.
 
-### Política restrictiva: `block`
+The public edge deliberately separates credentials:
 
-- Clasifica antes de usar el modelo principal.
-- Bloquea contenido marcado como inseguro.
-- También bloquea si el guardrail no pudo evaluar la petición.
-- Evita consumir el modelo principal en una entrada rechazada.
+- Requests sent to the dashboard keep the browser session and dashboard authorization headers.
+- Requests sent to LiteLLM do not receive the dashboard `Authorization` header.
+- Cloudera secret values are never sent back to the browser.
+- Credential and log SQLite files, generated TLS material, PIDs, and active configuration live under ignored `runtime/` paths.
 
-Úsala cuando el riesgo de dejar pasar contenido sea mayor que el coste de un
-falso positivo. Asegura disponibilidad y capacidad del modelo guardrail: pasa a
-formar parte del camino crítico.
+The dashboard login is not currently an API key for `/v1/*`. If the Cloudera application is created without platform authentication, any client that can reach the application URL can call enabled models. Use workspace ingress controls now, and add gateway API-key/access-control enforcement before exposing it to an untrusted network.
 
-### Por qué el guardrail tiene sus propios logs
+## Logs and client IPs
 
-El callback consulta Ollama directamente para no volver a entrar en LiteLLM y
-crear una recursión infinita. Registra dos hechos relacionados:
+Each model has structured daily logs containing request/response summaries, status, origin IP, provider IP, TTFT, total duration, token counts, and guardrail outcome. The dashboard shows KPIs and an hourly histogram and can export the selected day to Excel.
 
-- la evaluación en la pestaña del modelo guardrail;
-- el veredicto dentro de la llamada del modelo principal.
+The edge trusts Cloudera/Istio forwarding metadata at the application boundary, preferring `X-Envoy-External-Address`, then the first non-loopback value in `X-Forwarded-For`, then `X-Real-IP`. If Cloudera removes the external address before the application, the only observable address will be the platform sidecar (`127.0.0.x`); application code cannot reconstruct information the ingress did not forward.
 
-Esto permite medir cuántas evaluaciones se hicieron y qué peticiones recibieron
-advertencia o bloqueo.
+## Operations
 
-## 12. Logs, KPIs y Excel
+### Update an existing Cloudera checkout
 
-![KPIs y gráfica horaria de logs](docs/assets/dashboard-logs.jpg)
+If there are no local changes:
 
-### Dos familias de logs
-
-| Log | Formato | Contenido |
-|---|---|---|
-| LiteLLM | `runtime/logs/litellm-AAAA-MM-DD.log` | stdout/stderr técnico con timestamp Madrid. |
-| Modelo | `runtime/logs/AAAA-MM-DD.sqlite3` | Peticiones estructuradas por alias. |
-
-La pestaña LiteLLM permite elegir día, actualizar y **Limpiar**. Limpiar sólo
-vacía el fichero técnico seleccionado; no borra auditoría de modelos.
-
-Cada evento estructurado conserva, cuando el proveedor lo entrega:
-
-- fecha y hora Europe/Madrid;
-- alias;
-- estado correcto/error;
-- IP origen y destino resuelto;
-- pregunta/entrada y respuesta/salida;
-- TTFT o tiempo hasta inicio de respuesta;
-- duración total;
-- tokens de entrada, salida y total;
-- veredicto y motivo del guardrail.
-
-Antes de persistir, claves comunes como `authorization`, `api_key`, `token` y
-`secret` se sustituyen por `[OCULTO]`. Aun así, prompts y respuestas pueden
-contener datos personales o de negocio: aplica retención y acceso adecuados.
-
-### KPIs diarios
-
-- peticiones;
-- tasa de éxito y errores;
-- latencia media y P95;
-- TTFT medio;
-- alertas del guardrail;
-- tokens;
-- peticiones por cada una de las 24 horas.
-
-**Descargar Excel** crea una hoja con KPIs, filtros, cabecera congelada y detalle.
-El fichero se genera en memoria y no necesita Excel instalado en el servidor.
-
-## 13. Dimensionamiento para 100 peticiones concurrentes
-
-### Primero: qué significa “concurrente”
-
-No es lo mismo:
-
-- aceptar 100 conexiones y mantener 96 en cola;
-- inferir realmente 100 respuestas al mismo tiempo;
-- recibir 100 solicitudes en un segundo;
-- sostener 100 solicitudes durante varios minutos;
-- responder 100 prompts cortos o 100 contextos de 64k tokens.
-
-Por eso no existe una cifra universal de CPU/RAM. El dimensionamiento necesita:
-
-- modelo y cuantización;
-- longitud de prompt y salida;
-- streaming;
-- latencia objetivo (P95/P99);
-- tokens por segundo requeridos;
-- proveedor remoto o local;
-- tasa de llegada y duración del pico.
-
-### Gateway con modelos remotos
-
-Cuando OpenAI o Cloudera hacen la inferencia, IA Gateway trabaja sobre todo con
-red, serialización, autenticación y logs. Punto de partida para una prueba:
-
-| Componente | Base de laboratorio | Producción inicial orientativa |
-|---|---:|---:|
-| IA Gateway + LiteLLM | 2 vCPU, 4 GiB RAM | 4 vCPU, 8 GiB RAM |
-| Disco | SSD, 5 GiB libres | SSD y política de retención |
-| Red | estable | baja latencia hacia proveedores |
-
-Estas cifras son una **hipótesis de carga**, no una garantía. La versión actual
-es una aplicación local de una sola instancia y SQLite. Antes de prometer 100
-concurrentes hay que ejecutar una prueba con prompts representativos y observar
-errores, P95, CPU, memoria, descriptores y crecimiento de logs.
-
-Para alta disponibilidad real hacen falta, además, reverse proxy, TLS, varias
-réplicas del gateway, estado/logging compartido y coordinación de procesos.
-
-### Cloudera AI Inference
-
-Cloudera permite autoscaling por concurrencia por réplica. Una primera hipótesis
-para 100 solicitudes simultáneas podría ser:
-
-```text
-objetivo = 25 concurrentes por réplica
-réplicas teóricas = ceil(100 / 25) = 4
-máximo sugerido para absorber margen = 5
-mínimo cálido/HA sugerido = 2
+```bash
+git pull origin main
 ```
 
-El valor 25 es sólo un punto inicial que debe validarse con el modelo concreto.
-La propia documentación de Cloudera muestra configuraciones por concurrencia y
-advierte que el cluster debe disponer de nodos/GPU suficientes. Consulta
-[configuración y sizing](https://docs.cloudera.com/machine-learning/cloud/setup-cloudera-ai-inference/topics/ml-caii-caii-configuration-sizing.html).
+If `config.yaml` has local changes:
 
-Evita `min_replicas: 0` si el primer usuario no puede asumir cold start. Reserva
-capacidad adicional para rolling updates: durante una actualización pueden
-coexistir réplicas viejas y nuevas.
-
-### Ollama local
-
-Con valores predeterminados, Ollama procesa una petición paralela por modelo y
-puede encolar hasta 512. Por tanto, 100 peticiones pueden ser **aceptadas**, pero
-no necesariamente ejecutadas a la vez; su latencia de cola crecerá.
-
-No configures `OLLAMA_NUM_PARALLEL=100` a ciegas. Cada incremento multiplica el
-contexto efectivo y el KV cache. En una sola estación de trabajo suele ser más
-sensato empezar con 2 o 4, medir VRAM/TTFT/tokens por segundo y escalar mediante
-réplicas/nodos si el SLO exige paralelismo real.
-
-Una estimación conceptual es:
-
-```text
-memoria ≈ pesos cuantizados del modelo
-        + KV cache(contexto × solicitudes paralelas)
-        + buffers del motor
-        + margen del sistema
+```bash
+git stash push -m "local IA Gateway config" -- config.yaml
+git pull origin main
+git stash pop
 ```
 
-Para 100 generaciones simultáneas de un LLM grande normalmente se necesita un
-servicio de inferencia distribuido con varias GPU, no sólo más RAM para LiteLLM.
+Resolve any reported conflict before restarting the application. Downloading a YAML backup first is recommended.
 
-### Plan de prueba recomendado
+### Run tests
 
-1. Define P95 máximo y tasa de error aceptable.
-2. Crea prompts P50/P95 realistas y límites de salida.
-3. Calienta modelos antes de medir.
-4. Ejecuta escalones: 1, 5, 10, 25, 50 y 100 concurrentes.
-5. Mantén cada escalón el tiempo suficiente para estabilizar autoscaling.
-6. Mide gateway y proveedor por separado.
-7. Revisa 429/503, colas, TTFT, duración, tokens/s y saturación GPU.
-8. Repite con guardrail activado: duplica el número lógico de inferencias.
-9. Añade 20–30% de margen sólo después de obtener resultados.
-
-## 14. Mapa pedagógico del código
-
-### Árbol del repositorio
-
-```text
-ia-gateway/
-├── app.py
-├── config.yaml
-├── .env.example
-├── requirements.txt
-├── requirements-dev.txt
-├── start.sh
-├── installacion_litellm.txt
-├── gateway/
-│   ├── __init__.py
-│   ├── core.py
-│   ├── cloudera.py
-│   ├── litellm_callback.py
-│   ├── log_store.py
-│   └── excel_export.py
-├── static/
-│   ├── index.html
-│   ├── app.js
-│   ├── style.css
-│   └── ia-gateway-arquitectura.png
-├── docs/assets/
-│   ├── dashboard-modelos.png
-│   ├── dashboard-configuracion.png
-│   ├── dashboard-logs.png
-│   └── ia-gateway-arquitectura.png
-├── tests/
-│   ├── test_app.py
-│   ├── test_core.py
-│   ├── test_edge.py
-│   └── test_cloudera.py
-└── runtime/                 # generado, privado y fuera de Git
+```bash
+source .venv/bin/activate
+pytest -q
 ```
 
-### `app.py`: adaptador HTTP
+### Useful runtime files
 
-Es la composición principal:
-
-- crea y activa mediante relanzamiento un `.venv` privado, e instala allí
-  `requirements.txt` antes de cargar módulos externos;
-- carga `.env`;
-- crea `GatewayManager` y `ClouderaCatalog`;
-- define modelos Pydantic para validar entradas;
-- publica endpoints FastAPI;
-- sirve la SPA;
-- ejecuta cada minuto el supervisor de tokens;
-- inicia y detiene el proxy de borde `aiohttp` junto al panel;
-- detiene LiteLLM al cerrar el panel.
-
-Funciones destacadas:
-
-| Función | Papel |
+| Path | Purpose |
 |---|---|
-| `bootstrap_private_environment` | Crea `.venv` y relanza la app para aislarla del Python de Cloudera. |
-| `install_runtime_requirements` | Ejecuta `pip` dentro del Python privado y detiene el arranque si falla. |
-| `gateway_auth_headers` | Mantiene desactivada la autenticación interna de LiteLLM. |
-| `_model_entry` | Convierte formulario seguro a entrada YAML. |
-| `test_model` | Decide chat/embedding y llama al upstream LiteLLM `14000`. |
-| `model_latency` | Sonda remota pequeña para el semáforo. |
-| `refresh_cloudera_tokens` | Renueva secretos y actualiza LiteLLM sin reinicio. |
+| `config.yaml` | Model source configuration |
+| `.env` | Local environment secrets; ignored by Git |
+| `runtime/cloudera.sqlite3` | Cloudera connections, credentials, and token state |
+| `runtime/active_config.yaml` | Generated LiteLLM configuration |
+| `runtime/edge/edge.log` | Python edge process log |
+| `runtime/` request databases/logs | Structured and technical logs |
 
-Los endpoints deben ser finos: validan/transforman HTTP y delegan reglas.
+### Common failures
 
-### `gateway/core.py`: dominio operativo
+**`No connected db.`**
 
-`GatewayManager` es el dueño del ciclo de vida y configuración:
+Do not configure LiteLLM features that require its PostgreSQL control-plane database. IA Gateway intentionally uses SQLite through its own callbacks and does not enable the LiteLLM virtual-key database.
 
-- valida alias, listas y referencias;
-- implementa CRUD y fallbacks;
-- filtra modelos temporalmente desactivados;
-- genera `active_config.yaml`;
-- construye el entorno del hijo;
-- arranca/detiene el grupo de procesos;
-- distingue PID, puerto listo y conflicto;
-- calcula CPU/RAM y recursos Ollama;
-- rota y lee el log técnico.
+**`Invalid model name ... Call /v1/models`**
 
-La actualización transaccional conserva el fichero anterior y lo restaura si
-la nueva configuración no consigue arrancar.
+The YAML changed but LiteLLM has not reloaded its router. Apply the pending changes or restart LiteLLM, then check `/v1/models`.
 
-### `gateway/cloudera.py`: frontera Cloudera
+**`Authentication Error, No api key passed in`**
 
-`ClouderaCatalog` encapsula:
+The provider credential is missing. Configure its environment variable or save a Cloudera/model token in the dashboard. A LiteLLM master key is not required by this deployment.
 
-- almacén local con permisos `0600`;
-- CRUD de conexiones;
-- saneado de respuestas para nunca devolver secretos;
-- lectura informativa de caducidad JWT;
-- renovación Cloud y on-premise;
-- prioridad de credenciales;
-- descubrimiento de dos familias API;
-- normalización de modelos;
-- pruebas mínimas de chat, completions, embeddings o readiness.
+**CDP IAM hostname does not resolve**
 
-Decodificar `exp` de un JWT **no verifica su firma**; sólo permite presentar su
-fecha declarada. La validación auténtica ocurre cuando Cloudera acepta la llamada.
+For CDP Public Cloud in `us-west-1`, use `https://iamapi.us-west-1.altus.cloudera.com`. If that valid hostname also fails, request outbound DNS/HTTPS access from the Cloudera workspace administrator.
 
-### `gateway/litellm_callback.py`: camino transversal
+**Ports are reported as identical**
 
-LiteLLM carga `dashboard_logger`, una instancia de `DashboardLogger`:
+Set only the public Cloudera application port or `IA_GATEWAY_PORT`. Keep the internal defaults `18080` and `14000`, or assign three distinct values.
 
-- `async_pre_call_hook` ejecuta el guardrail y adapta el modelo Cloudera;
-- `async_log_success_event` persiste respuestas correctas;
-- `async_log_failure_event` persiste errores con el mismo esquema;
-- auxiliares extraen alias, IP, TTFT y metadatos tolerando proveedores distintos.
+## Source map
 
-Un callback de observabilidad nunca debería derribar una inferencia por un fallo
-de logging. Por eso sus auxiliares degradan a valores desconocidos.
+| File | Responsibility |
+|---|---|
+| `app.py` | Dependency bootstrap, FastAPI endpoints, authentication middleware, and process lifespan |
+| `gateway/edge_server.py` | Single-port streaming HTTP proxy and trusted client-IP normalization |
+| `gateway/edge.py` | Edge process and public-port lifecycle |
+| `gateway/core.py` | LiteLLM process, YAML operations, runtime configuration, and model state |
+| `gateway/cloudera.py` | SQLite credentials, Cloudera discovery/probing, and token renewal |
+| `gateway/litellm_callback.py` | Dynamic credentials, guardrail execution, and structured observability |
+| `gateway/log_store.py` | Daily log persistence and KPI aggregation |
+| `gateway/auth.py` | Administrator credentials and sessions |
+| `static/index.html` | Dashboard structure |
+| `static/app.js` | Dashboard behaviour and API integration |
+| `static/i18n.js` | Spanish, English, and Italian interface localization |
+| `static/style.css` | Responsive visual system |
 
-### `gateway/log_store.py`: persistencia
+## License and production note
 
-- `safe_value` recorre objetos, limita profundidad y redacta secretos.
-- `connect` crea SQLite, activa WAL y aplica migraciones idempotentes.
-- `insert_log` usa una transacción corta.
-- `read_day_logs` combina formato diario y base histórica anterior.
-- `log_kpis` calcula indicadores sin mezclar presentación HTML.
-
-SQLite WAL permite lectores mientras se escribe, adecuado para una instancia
-pequeña. No equivale a una plataforma distribuida de observabilidad.
-
-### `gateway/excel_export.py`: OOXML
-
-Genera directamente las piezas XML de un XLSX y las empaqueta en ZIP. Evita una
-dependencia ofimática pesada y produce siempre el mismo formato.
-
-### `static/index.html`: estructura
-
-Define tres vistas accesibles, formularios, diálogos y contenedores vacíos. No
-contiene secretos ni datos de negocio; JavaScript hidrata todo desde `/api`.
-
-### `static/app.js`: estado del navegador
-
-Está dividido conceptualmente en:
-
-1. cliente HTTP y escape XSS;
-2. catálogo/sondas Cloudera;
-3. estado y métricas de modelos;
-4. CRUD y YAML;
-5. prueba rápida;
-6. logs, KPIs y Excel;
-7. inicialización y temporizadores.
-
-No usa framework para que el flujo `fetch → estado → DOM` sea visible al alumno.
-
-### `static/style.css`: sistema visual
-
-Variables CSS definen naranja, azul noche, estados y espaciado. Media queries
-adaptan tarjetas y formularios; color y texto comunican conjuntamente el estado.
-
-### `config.yaml`, `.env` y `runtime`
-
-- `config.yaml`: comportamiento declarativo versionable.
-- `.env`: secretos generales no versionados.
-- `runtime/state.json`: aliases temporalmente apagados.
-- `runtime/cloudera.sqlite3`: conexiones y secretos Cloudera.
-- `runtime/dashboard_settings.json`: puente panel→callback.
-- `runtime/active_config.yaml`: configuración efectiva.
-- `runtime/litellm.pid`: proceso administrado.
-- `runtime/logs/`: observabilidad diaria.
-
-### Pruebas
-
-- `test_app.py`: contrato HTTP, autenticación y elementos UI esenciales.
-- `test_core.py`: YAML, proceso, métricas, logs, Excel y CRUD.
-- `test_cloudera.py`: secretos, normalización, descubrimiento, pruebas y tokens.
-
-Los tests usan directorios temporales y dobles HTTP; no deben consumir cuota real.
-
-## 15. API del panel
-
-Swagger autenticado: <https://127.0.0.1:8090/api/docs>
-
-| Método | Ruta | Uso |
-|---|---|---|
-| `GET/POST` | `/api/auth/status`, `/api/auth/login` | Estado e inicio de sesión. |
-| `POST` | `/api/auth/change-password`, `/api/auth/logout` | Rotación y cierre de sesión. |
-| `GET` | `/api/status` | Proceso, puerto, PID, conflicto, CPU y RAM. |
-| `POST` | `/api/gateway/start` | Genera runtime y arranca LiteLLM. |
-| `POST` | `/api/gateway/stop` | Detiene LiteLLM. |
-| `GET` | `/api/models` | Inventario saneado. |
-| `PUT` | `/api/models/{name}/state` | Activación temporal. |
-| `POST` | `/api/models/{name}/test` | Prueba rápida. |
-| `GET` | `/api/model-resources` | Métricas por modelo. |
-| `GET/PUT` | `/api/config` | Leer o sustituir YAML. |
-| `POST` | `/api/config/validate` | Validar sin guardar. |
-| `POST/PUT/DELETE` | `/api/config/models...` | CRUD guiado. |
-| `PUT` | `/api/config/guardrail` | Política transversal. |
-| `GET/POST/PUT/DELETE` | `/api/cloudera/connections...` | CRUD y catálogo CDP. |
-| `POST` | `/api/cloudera/connections/{id}/probe-model` | Prueba endpoint. |
-| `GET` | `/api/models/{name}/logs` | Datos y KPIs diarios. |
-| `GET` | `/api/models/{name}/logs.xlsx` | Exportación Excel. |
-| `GET/DELETE` | `/api/process-log` | Leer o limpiar log técnico. |
-
-## 16. Seguridad
-
-- El único usuario es `admin`; la contraseña inicial `admin` debe cambiarse en el primer acceso.
-- La contraseña se almacena como hash **Argon2id** con sal aleatoria, nunca en claro.
-- Las sesiones duran ocho horas: la cookie es opaca, `HttpOnly`, `Secure` y `SameSite=Strict`.
-- Las operaciones de escritura exigen además un token CSRF ligado a la sesión.
-- El token CSRF viaja en cabecera y, como respaldo para proxies Cloudera que
-  filtren cabeceras personalizadas, dentro del cuerpo JSON; nunca en la URL.
-- Tras cinco intentos fallidos desde una IP, el login se bloquea durante 15 minutos.
-- Cambiar la contraseña invalida todas las demás sesiones activas.
-- En local, el panel usa HTTPS autofirmado y cabeceras CSP/HSTS; en Cloudera, el proxy de la plataforma termina TLS y el servicio interno queda limitado a `127.0.0.1`.
-- No expongas `:8090` a Internet sin TLS, firewall y gestión de claves.
-- Rota cualquier token pegado accidentalmente en chat, log o captura.
-- Mantén `.env` y `runtime/` fuera de Git y de copias no cifradas.
-- Restringe permisos del usuario del proceso.
-- Trata prompts/respuestas como información potencialmente sensible.
-- Define retención de SQLite y logs técnicos.
-- Recuerda que `0600` limita acceso local, pero no cifra el contenido.
-- Usa un gestor de secretos para un despliegue compartido/producción.
-- No confundas guardrail de contenido con aislamiento, autorización o DLP.
-
-## 17. Pruebas y actualización
-
-### Ejecutar la suite
-
-```bash
-source .venv/bin/activate
-python -m pytest -q
-```
-
-### Actualizar el repositorio
-
-```bash
-git status
-git pull --ff-only
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m pytest -q
-```
-
-Después reinicia el panel y aplica la configuración desde la cabecera.
-
-Antes de actualizar:
-
-- revisa cambios locales;
-- respalda `.env`, `config.yaml` y `runtime/cloudera.sqlite3` de forma
-  segura;
-- no sobrescribas una configuración operativa con ejemplos.
-
-## 18. Diagnóstico
-
-### “Invalid model name” para modelos recién añadidos
-
-1. Consulta `/v1/models`.
-2. Verifica que el alias aparece.
-3. Comprueba que el proxy posea `:8090` y LiteLLM no tenga conflicto en `:14000`.
-4. Reinicia LiteLLM desde el panel.
-5. Revisa el log técnico con timestamps.
-
-Un `ProxyModelNotFoundError` ocurre dentro del router, antes del proveedor.
-
-### “Authentication failed”
-
-- Entrada `:8090`: revisa la autenticación y permisos de la WebApp Cloudera.
-- OpenAI: revisa `OPENAI_API_KEY` y facturación API.
-- Cloudera: prueba token general/específico, permisos y caducidad.
-- Ollama local: normalmente no necesita API key de proveedor.
-
-### Proceso con PID pero puerto inaccesible
-
-El proceso puede estar vivo mientras su servidor falló. El panel exige ambas
-señales. Consulta el log LiteLLM y comprueba conflictos de puerto.
-
-### Ollama responde lento o devuelve 503
-
-- revisa `ollama ps`;
-- observa RAM/VRAM libre;
-- reduce contexto o paralelismo;
-- aumenta la cola sólo si la latencia resultante es aceptable;
-- precarga y usa `keep_alive` cuando tenga sentido.
-
-### Cloudera escala desde cero
-
-La primera solicitud puede asumir arranque de nodo, descarga de imagen/modelo y
-creación de réplica. Para latencia predecible usa al menos una réplica mínima y
-capacidad de cluster suficiente.
-
----
-
-## Resumen visual
-
-![Infografía de arquitectura de IA Gateway](docs/assets/ia-gateway-arquitectura.png)
-
-IA Gateway es deliberadamente pequeño: una capa de control HTTPS autenticada,
-una API unificada y trazabilidad útil. Para una plataforma empresarial distribuida
-deben añadirse alta disponibilidad, una CA corporativa, almacenamiento compartido,
-retención y pruebas de carga con SLO explícitos.
+Review all dependency and provider licences before redistribution. Before production use, add the required `/v1/*` access-control policy, use managed TLS at the ingress, restrict workspace egress and ingress, back up `config.yaml` and `runtime/cloudera.sqlite3`, and treat prompts/responses in logs as potentially sensitive data.

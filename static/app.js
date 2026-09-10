@@ -40,7 +40,7 @@ const escapeHtml = (value) => String(value ?? "").replace(
 /** Único punto de acceso HTTP: normaliza tanto errores JSON como texto plano. */
 async function api(url, options = {}) {
   const method = (options.method || "GET").toUpperCase();
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  const headers = { "Content-Type": "application/json", "Accept-Language": window.IAGatewayI18n?.language || "es", ...(options.headers || {}) };
   let body = options.body;
   if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
     headers["X-CSRF-Token"] = csrfToken;
@@ -324,7 +324,7 @@ async function autoProbeConnection(connectionId, requestedByUser = false) {
     }
     renderClouderaModels(true);
     updateConnectionHealthSummaries();
-    if (progress) { progress.textContent = `${requestedByUser ? "Prueba manual" : "Prueba automática"} completada · ${new Date().toLocaleTimeString("es-ES")}`; progress.className = "connection-progress success"; }
+    if (progress) { progress.textContent = `${requestedByUser ? "Prueba manual" : "Prueba automática"} completada · ${new Date().toLocaleTimeString(window.IAGatewayI18n?.localeTag() || "es-ES")}`; progress.className = "connection-progress success"; }
   } catch (exception) {
     if (progress) { progress.textContent = `No se pudo completar la comprobación: ${exception.message}`; progress.className = "connection-progress error"; }
   } finally { clouderaChecksInProgress.delete(connectionId); }
@@ -900,7 +900,7 @@ function madridTime(value) {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("es-ES", {
+  return new Intl.DateTimeFormat(window.IAGatewayI18n?.localeTag() || "es-ES", {
     timeZone: "Europe/Madrid",
     dateStyle: "short",
     timeStyle: "medium",
