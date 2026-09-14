@@ -264,6 +264,19 @@ def test_model_metrics_use_vertical_rows_and_accessible_statuses():
     assert ".metric-row + .metric-row" in stylesheet
 
 
+def test_model_cards_offer_accessible_curl_and_python_examples():
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    stylesheet = (dashboard.ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert 'aria-label="Cómo llamar al modelo' in javascript
+    assert "/v1/chat/completions" in javascript
+    assert "/v1/embeddings" in javascript
+    assert "import requests" in javascript
+    assert 'event.key === "Escape"' in javascript
+    assert ".model-help:hover .model-help-popover" in stylesheet
+    assert ".model-help:focus-within .model-help-popover" in stylesheet
+
+
 def test_remote_latency_probe_works_without_gateway_auth(monkeypatch, client):
     calls = []
 

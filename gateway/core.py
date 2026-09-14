@@ -371,7 +371,11 @@ class GatewayManager:
                 cloudera_kind = next((kind for hostname, kind in cloudera_origins if hostname == api_hostname), "")
             is_cloudera = model_info.get("dashboard_source") == "cloudera" or bool(cloudera_kind) or "cloudera.site" in api_hostname or str(params.get("api_key", "")).startswith("os.environ/CLOUDERA_")
             if is_cloudera and not cloudera_kind:
-                cloudera_kind = "workbench" if any(marker in api_base.lower() for marker in ("/model-deployments", "/api/v2")) else "inference"
+                cloudera_kind = "workbench" if (
+                    api_hostname.startswith("modelservice.")
+                    or provider_model.startswith("cloudera_workbench/")
+                    or any(marker in api_base.lower() for marker in ("/model-deployments", "/api/v2"))
+                ) else "inference"
             result.append({
                 "name": name,
                 "provider_model": provider_model,
@@ -515,10 +519,23 @@ class GatewayManager:
         # elegido el deployment correcto.
         provider_models: dict[str, str] = {}
         provider_api_key_env: dict[str, str] = {}
+        has_workbench_models = False
         for item in config["model_list"]:
             params = item.get("litellm_params") or {}
             provider_model = str(params.get("model") or "")
             api_key = str(params.get("api_key") or "")
+            model_info = item.get("model_info") or {}
+            api_hostname = (urlparse(str(params.get("api_base") or "")).hostname or "").lower()
+            is_workbench = (
+                model_info.get("dashboard_cloudera_kind") == "workbench"
+                or api_hostname.startswith("modelservice.")
+            )
+            if is_workbench:
+                has_workbench_models = True
+                # Compatibilidad con borradores antiguos, que se guardaban como
+                # custom/<modelo> antes de existir este adaptador.
+                if provider_model.startswith("custom/"):
+                    params["model"] = f"cloudera_workbench/{provider_model.removeprefix('custom/')}"
             if provider_model.startswith("openai/") and api_key.startswith("os.environ/CLOUDERA_"):
                 public_alias = str(item.get("model_name") or "")
                 if public_alias:
@@ -534,6 +551,19 @@ class GatewayManager:
         # LiteLLM resuelve callbacks Python desde el directorio del config activo.
         callback = "litellm_callback.dashboard_logger"
         settings["callbacks"] = list(dict.fromkeys([*current_callbacks, callback]))
+        if has_workbench_models:
+            custom_providers = settings.get("custom_provider_map", [])
+            if not isinstance(custom_providers, list):
+                custom_providers = []
+            custom_providers = [
+                item for item in custom_providers
+                if not isinstance(item, dict) or item.get("provider") != "cloudera_workbench"
+            ]
+            custom_providers.append({
+                "provider": "cloudera_workbench",
+                "custom_handler": "workbench_provider.workbench_llm",
+            })
+            settings["custom_provider_map"] = custom_providers
         config["litellm_settings"] = settings
         general_settings = dict(config.get("general_settings") or {})
         # La autenticación de entrada pertenece a la WebApp Cloudera y la
@@ -570,6 +600,8 @@ class GatewayManager:
             encoding="utf-8",
         )
         shutil.copy2(Path(__file__).with_name("litellm_callback.py"), self.runtime_dir / "litellm_callback.py")
+        if has_workbench_models:
+            shutil.copy2(Path(__file__).with_name("workbench_provider.py"), self.runtime_dir / "workbench_provider.py")
         self.active_config.write_text(
             yaml.safe_dump(config, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )

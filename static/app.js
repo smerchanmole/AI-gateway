@@ -411,10 +411,17 @@ function prepareClouderaModel(index) {
   const connection = clouderaConnections.find((item) => item.id === model.connection_id);
   preparedClouderaSource = {source: "cloudera", cloudera_kind: connection?.kind || (model.source?.toLowerCase().includes("workbench") ? "workbench" : "inference")};
   $("#config-name").value = model.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  $("#config-model").value = model.protocol === "openai" ? `openai/${model.model_name || model.name}` : `custom/${model.model_name || model.name}`;
+  $("#config-model").value = model.protocol === "openai"
+    ? `openai/${model.model_name || model.name}`
+    : model.protocol === "workbench"
+      ? `cloudera_workbench/${model.model_name || model.name}`
+      : `custom/${model.model_name || model.name}`;
   $("#config-api-base").value = (model.url || "").replace(/\/(chat\/completions|completions|embeddings)\/?$/, "");
   $("#config-api-key").value = model.api_key_env || "";
-  setInlineStatus("#model-form-status", model.protocol === "openai" ? "Borrador Cloudera preparado. Revisa los campos antes de añadirlo." : "Borrador preparado: este protocolo necesita un adaptador LiteLLM personalizado.", model.protocol === "openai" ? "success" : "error");
+  const supported = ["openai", "workbench"].includes(model.protocol);
+  setInlineStatus("#model-form-status", supported
+    ? "Borrador Cloudera preparado. Revisa los campos antes de añadirlo."
+    : "Borrador preparado: este protocolo necesita un adaptador LiteLLM personalizado.", supported ? "success" : "error");
   $("#model-form").scrollIntoView({behavior: "smooth", block: "start"});
 }
 
@@ -451,7 +458,36 @@ async function loadStatus() {
   $("#apply-config-button").hidden = !status.restart_pending;
 }
 
-function modelCard(model) {
+function shellSingleQuote(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+function modelUsageExamples(model, index) {
+  const isEmbedding = model.mode === "embedding";
+  const endpoint = `${window.location.origin}${isEmbedding ? "/v1/embeddings" : "/v1/chat/completions"}`;
+  const payload = isEmbedding
+    ? {model: model.name, input: "Texto que convertir en vector"}
+    : {model: model.name, messages: [{role: "user", content: "Hola"}]};
+  const curl = [
+    `curl -X POST ${shellSingleQuote(endpoint)} \\`,
+    "  -H 'Content-Type: application/json' \\",
+    `  --data ${shellSingleQuote(JSON.stringify(payload))}`,
+  ].join("\n");
+  const resultExpression = isEmbedding
+    ? 'response.json()["data"][0]["embedding"]'
+    : 'response.json()["choices"][0]["message"]["content"]';
+  const python = `import requests\n\nresponse = requests.post(\n    ${JSON.stringify(endpoint)},\n    json=${JSON.stringify(payload, null, 4)},\n    timeout=60,\n)\nresponse.raise_for_status()\nprint(${resultExpression})`;
+  return `<div class="model-help">
+    <button class="model-help-trigger" type="button" aria-label="Cómo llamar al modelo ${escapeHtml(model.name)}" aria-expanded="false" aria-controls="model-help-${index}">?</button>
+    <aside class="model-help-popover" id="model-help-${index}" role="region" aria-label="Ejemplos de uso de ${escapeHtml(model.name)}">
+      <strong>Llamar a ${escapeHtml(model.name)}</strong>
+      <span>cURL</span><pre><code>${escapeHtml(curl)}</code></pre>
+      <span>Python</span><pre><code>${escapeHtml(python)}</code></pre>
+    </aside>
+  </div>`;
+}
+
+function modelCard(model, index) {
   /** Proyecta un modelo seguro del backend a una tarjeta puramente visual. */
   const sourceBadge = model.source === "cloudera"
     ? `<span class="source-badge cloudera">CLOUDERA · ${model.cloudera_kind === "workbench" ? "WORKBENCH" : "AI INFERENCE"}</span>`
@@ -463,7 +499,10 @@ function modelCard(model) {
           <span class="model-kicker">${model.mode === "embedding" ? "VECTOR" : "CHAT"}</span>${sourceBadge}
           <h3>${escapeHtml(model.name)}</h3>
         </div>
-        <span class="badge">${model.enabled ? "ACTIVO" : "INACTIVO"}</span>
+        <div class="model-head-actions">
+          <span class="badge">${model.enabled ? "ACTIVO" : "INACTIVO"}</span>
+          ${modelUsageExamples(model, index)}
+        </div>
       </div>
       <p class="provider">${escapeHtml(model.provider_model)}</p>
       <div class="model-resources" data-resource-name="${escapeHtml(model.name)}">
@@ -485,9 +524,36 @@ async function loadModels() {
   models = await api("/api/models");
   $("#model-count").textContent = `${models.filter((model) => model.enabled).length} activos / ${models.length}`;
   $("#models").innerHTML = models.map(modelCard).join("");
-  $("#models").querySelectorAll("button").forEach((button) => {
+  $("#models").querySelectorAll("button[data-model]").forEach((button) => {
     button.onclick = () => toggleModel(button);
   });
+  $("#models").querySelectorAll(".model-help-trigger").forEach((button) => {
+    button.onclick = (event) => {
+      event.stopPropagation();
+      const help = button.closest(".model-help");
+      const open = !help.hasAttribute("data-open");
+      document.querySelectorAll(".model-help[data-open]").forEach((item) => {
+        item.removeAttribute("data-open");
+        item.querySelector(".model-help-trigger")?.setAttribute("aria-expanded", "false");
+      });
+      if (open) help.setAttribute("data-open", "");
+      button.setAttribute("aria-expanded", String(open));
+    };
+    button.onkeydown = (event) => {
+      if (event.key === "Escape") {
+        button.closest(".model-help").removeAttribute("data-open");
+        button.setAttribute("aria-expanded", "false");
+        button.focus();
+      }
+    };
+  });
+  document.onclick = (event) => {
+    if (event.target.closest?.(".model-help")) return;
+    document.querySelectorAll(".model-help[data-open]").forEach((item) => {
+      item.removeAttribute("data-open");
+      item.querySelector(".model-help-trigger")?.setAttribute("aria-expanded", "false");
+    });
+  };
 
   renderTestTabs();
   renderLogTabs();

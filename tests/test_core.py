@@ -80,6 +80,30 @@ def test_cloudera_alias_maps_to_provider_model_for_callback(tmp_path):
     assert dashboard["provider_models"]["nemotron-publico"] == "openai/nvidia/nemotron-3-super-120b-a12b"
 
 
+def test_workbench_model_loads_custom_provider_and_migrates_old_prefix(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["model_list"][0] = {
+        "model_name": "qwen38",
+        "litellm_params": {
+            "model": "custom/qwen3.8-27b-fp8",
+            "api_base": "https://modelservice.wb.example/model?accessKey=secret",
+        },
+        "model_info": {"dashboard_source": "cloudera", "dashboard_cloudera_kind": "workbench"},
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    manager._write_active_config()
+    active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
+
+    assert active["model_list"][0]["litellm_params"]["model"] == "cloudera_workbench/qwen3.8-27b-fp8"
+    assert active["litellm_settings"]["custom_provider_map"] == [{
+        "provider": "cloudera_workbench",
+        "custom_handler": "workbench_provider.workbench_llm",
+    }]
+    assert (manager.runtime_dir / "workbench_provider.py").exists()
+
+
 def test_cloudera_callback_logs_with_public_alias_after_provider_rewrite(tmp_path, monkeypatch):
     """El modelo estricto enviado a CDP no debe convertirse en la clave del log."""
 
@@ -414,6 +438,20 @@ def test_cloudera_model_origin_metadata_is_exposed(tmp_path):
         "dashboard_source": "cloudera", "dashboard_cloudera_kind": "workbench",
     }
     manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+    model = manager.models()[0]
+    assert model["source"] == "cloudera"
+    assert model["cloudera_kind"] == "workbench"
+
+
+def test_modelservice_hostname_is_identified_as_workbench(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.config_text())
+    config["model_list"][0]["litellm_params"] = {
+        "model": "cloudera_workbench/qwen38",
+        "api_base": "https://modelservice.wb.cloudera.site/model?accessKey=secret",
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
     model = manager.models()[0]
     assert model["source"] == "cloudera"
     assert model["cloudera_kind"] == "workbench"
