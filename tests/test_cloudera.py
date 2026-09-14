@@ -114,12 +114,41 @@ def test_discovers_workbench_deployments(tmp_path, monkeypatch):
     connection = catalog.save_connection("Workbench", "workbench", "https://wb.example", "token")
     def response(url, *_args, **_kwargs):
         if url.endswith("projects?page_size=100"): return {"projects": [{"id": "p1", "name": "Proyecto"}]}
-        if url.endswith("models?page_size=100"): return {"models": [{"id": "m1", "name": "Modelo"}]}
-        return {"deployments": [{"id": "d1", "status": "deployed", "endpoint_url": "https://model.example"}]}
+        if url.endswith("models?page_size=100"): return {"models": [{"id": "m1", "name": "Modelo", "access_key": "model-key"}]}
+        if url.endswith("builds?page_size=100"): return {"builds": [{"id": "b1"}]}
+        return {"deployments": [{"id": "d1", "status": "deployed"}]}
     monkeypatch.setattr(catalog, "_request", response)
     models = catalog.discover(connection["id"])
     assert models[0]["deployment_id"] == "d1"
     assert models[0]["protocol"] == "workbench"
+    assert models[0]["url"] == "https://modelservice.wb.example/model?accessKey=model-key"
+    assert models[0]["credential_source"] == "API key de Workbench"
+
+
+def test_workbench_probe_uses_model_contract_and_allows_modelservice_host(tmp_path, monkeypatch):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection("Workbench", "workbench", "https://wb.example", "api-key")
+
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    def accepted(request, timeout=20):
+        assert request.method == "POST"
+        assert request.full_url == "https://modelservice.wb.example/model?accessKey=model-key"
+        assert request.headers["Authorization"] == "Bearer api-key"
+        payload = json.loads(request.data)
+        assert payload["request"]["messages"][0]["content"] == "Responde solo OK"
+        assert payload["request"]["enable_thinking"] is False
+        return Response()
+
+    monkeypatch.setattr("gateway.cloudera.urllib.request.urlopen", accepted)
+    result = catalog.probe_model(connection["id"], "m1",
+        "https://modelservice.wb.example/model?accessKey=model-key", "workbench")
+
+    assert result["ok"] is True
+    assert result["credential_source"] == "API key de Workbench"
 
 
 def test_model_probe_prefers_specific_token_and_reports_auth_failure(tmp_path, monkeypatch):

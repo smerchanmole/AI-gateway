@@ -269,8 +269,14 @@ class ClouderaCatalog:
         connection = next((item for item in data.get("connections", []) if item.get("id") == connection_id), None)
         if not connection: raise KeyError(connection_id)
         token = specific or connection.get("token", "")
-        if not token: raise RuntimeError("No hay credencial de modelo ni CDP token para realizar la prueba")
-        return token, "Token del modelo" if specific else "CDP token de la conexión", self._token_metadata(token)
+        if not token: raise RuntimeError("No hay credencial disponible para realizar la prueba")
+        if specific:
+            source = "Token del modelo"
+        elif connection.get("kind") == "workbench":
+            source = "API key de Workbench"
+        else:
+            source = "CDP token de la conexión"
+        return token, source, self._token_metadata(token)
 
     def model_token_status(self, connection_id: str, external_id: str) -> dict[str, Any]:
         """Convierte una credencial privada en estado presentable por la UI."""
@@ -413,7 +419,9 @@ class ClouderaCatalog:
         connection = self._connection_record(connection_id)
         if not connection: raise KeyError(connection_id)
         endpoint = urllib.parse.urlparse(url)
-        if endpoint.scheme not in {"http", "https"} or endpoint.hostname != urllib.parse.urlparse(connection["url"]).hostname:
+        connection_host = urllib.parse.urlparse(connection["url"]).hostname
+        allowed_hosts = {connection_host, f"modelservice.{connection_host}" if connection_host else None}
+        if endpoint.scheme not in {"http", "https"} or endpoint.hostname not in allowed_hosts:
             raise RuntimeError("La URL del modelo no pertenece a la conexión Cloudera seleccionada")
         token, source, metadata = self.model_credential(connection_id, external_id)
         if metadata.get("token_expired"):
@@ -439,6 +447,15 @@ class ClouderaCatalog:
                 if not target.endswith("/completions"):
                     target = f"{target}/completions"
                 payload = {"model": model_name or external_id, "prompt": "OK", "max_tokens": 1}
+        elif protocol == "workbench":
+            method = "POST"
+            payload = {"request": {
+                "messages": [{"role": "user", "content": "Responde solo OK"}],
+                "max_tokens": 1,
+                "temperature": 0,
+                "enable_thinking": False,
+                "reasoning_effort": "low",
+            }}
         elif "/v2/models/" in target:
             # En OIP la URL publicada ya acaba en /infer. Una comprobación real
             # requiere conocer el esquema tensorial del modelo, así que usamos
@@ -593,17 +610,34 @@ class ClouderaCatalog:
             return discovered
         projects = self._items(self._request(f"{connection['url']}/api/v2/projects?page_size=100", connection["token"]), "projects", "items")
         discovered = []
+        parsed_base = urllib.parse.urlparse(connection["url"])
+        modelservice_host = (parsed_base.hostname if (parsed_base.hostname or "").startswith("modelservice.")
+                             else f"modelservice.{parsed_base.hostname}")
+        if parsed_base.port:
+            modelservice_host = f"{modelservice_host}:{parsed_base.port}"
         for project in projects[:50]:
             project_id = str(project.get("id") or "")
             if not project_id: continue
             models = self._items(self._request(f"{connection['url']}/api/v2/projects/{project_id}/models?page_size=100", connection["token"]), "models", "items")
             for item in models:
                 external_id = str(item.get("id") or item.get("name"))
+                access_key = str(item.get("access_key") or item.get("accessKey") or "")
+                endpoint_url = (urllib.parse.urlunparse((parsed_base.scheme, modelservice_host, "/model", "",
+                                urllib.parse.urlencode({"accessKey": access_key}), "")) if access_key else "")
+                deployments = []
                 try:
-                    deployment_payload = self._request(
-                        f"{connection['url']}/api/v2/projects/{project_id}/models/{external_id}/deployments?page_size=100",
+                    build_payload = self._request(
+                        f"{connection['url']}/api/v2/projects/{project_id}/models/{external_id}/builds?page_size=100",
                         connection["token"])
-                    deployments = self._items(deployment_payload, "deployments", "items")
+                    builds = self._items(build_payload, "builds", "items")
+                    for build in builds:
+                        build_id = str(build.get("id") or "")
+                        if not build_id:
+                            continue
+                        deployment_payload = self._request(
+                            f"{connection['url']}/api/v2/projects/{project_id}/models/{external_id}/builds/{build_id}/deployments?page_size=100",
+                            connection["token"])
+                        deployments.extend(self._items(deployment_payload, "deployments", "items"))
                 except RuntimeError:
                     deployments = []
                 candidates = deployments or [item.get("latest_deployment") or item]
@@ -611,7 +645,9 @@ class ClouderaCatalog:
                     if not isinstance(deployment, dict): continue
                     discovered.append({"connection_id": connection_id, "source": "Cloudera AI Workbench", "project": project.get("name") or project_id,
                         "external_id": external_id, "deployment_id": deployment.get("id"), "name": item.get("name") or external_id,
-                        "url": deployment.get("endpoint_url") or deployment.get("url") or deployment.get("model_endpoint") or item.get("endpoint_url") or item.get("url") or "",
+                        "url": deployment.get("endpoint_url") or deployment.get("url") or deployment.get("model_endpoint") or item.get("endpoint_url") or item.get("url") or endpoint_url,
+                        "url_source": ("API de Cloudera" if deployment.get("endpoint_url") or deployment.get("url") or deployment.get("model_endpoint") or item.get("endpoint_url") or item.get("url")
+                                       else "access key del modelo Workbench" if endpoint_url else "API de Cloudera"),
                         "state": deployment.get("status") or item.get("status") or "detectado",
                         "protocol": "workbench", "has_model_token": f"{connection_id}:{external_id}" in self._read().get("model_tokens", {}),
                         "api_key_env": (self.environment_name(connection_id, external_id)
