@@ -35,6 +35,8 @@ _FORWARDED_PARAMETERS = {
     "top_k",
     "top_p",
 }
+_DEFAULT_MAX_TOKENS = 128
+_MAX_MAX_TOKENS = 512
 
 
 def _timeout_seconds(value: Any) -> float:
@@ -61,6 +63,11 @@ def _request_body(messages: list, optional_params: dict[str, Any]) -> dict[str, 
             key: value for key, value in extra_body.items()
             if key in _FORWARDED_PARAMETERS
         })
+    max_tokens = request.get("max_tokens", _DEFAULT_MAX_TOKENS)
+    if isinstance(max_tokens, int) and not isinstance(max_tokens, bool):
+        request["max_tokens"] = min(max_tokens, _MAX_MAX_TOKENS)
+    else:
+        request["max_tokens"] = _DEFAULT_MAX_TOKENS
     # Son los valores del ejemplo generado por Workbench y evitan que Qwen
     # active razonamiento largo en una prueba básica del gateway.
     request.setdefault("enable_thinking", False)

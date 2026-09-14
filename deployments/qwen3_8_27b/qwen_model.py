@@ -143,8 +143,8 @@ def predict(args: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("The request must be a JSON object")
 
     messages = _messages(args)
-    thinking = bool(args.get("enable_thinking", True))
-    reasoning_effort = str(args.get("reasoning_effort", "xhigh"))
+    thinking = bool(args.get("enable_thinking", False))
+    reasoning_effort = str(args.get("reasoning_effort", "low"))
     if reasoning_effort not in {"low", "medium", "xhigh"}:
         raise ValueError("'reasoning_effort' must be low, medium, or xhigh")
 
@@ -153,7 +153,10 @@ def predict(args: dict[str, Any]) -> dict[str, Any]:
     default_top_p = 0.95 if thinking else 0.80
     default_presence_penalty = 0.0 if thinking else 1.5
     sampling = SamplingParams(
-        max_tokens=int(_number(args, "max_tokens", 1024, 1, 8192)),
+        # Model Service corta normalmente las peticiones largas antes de que
+        # el motor termine. El límite evita que una generación huérfana retenga
+        # _GENERATION_LOCK y encadene timeouts en las peticiones siguientes.
+        max_tokens=int(_number(args, "max_tokens", 128, 1, 512)),
         temperature=_number(args, "temperature", default_temperature, 0.0, 2.0),
         top_p=_number(args, "top_p", default_top_p, 0.0, 1.0),
         top_k=int(_number(args, "top_k", 20, -1, 1000)),

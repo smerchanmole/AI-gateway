@@ -145,6 +145,12 @@ Cloudera's public model endpoint wraps the function input under `request` and
 its result under `response`; use the exact invocation snippet shown on the
 deployment Overview page because authentication URLs differ by installation.
 
+The deployment defaults to 128 output tokens and accepts at most 512. This is
+deliberate: Model Service commonly enforces a request deadline near 30 seconds,
+while an offline vLLM generation can continue after the client has timed out.
+Keeping the output bounded prevents an abandoned request from retaining the
+single-generation lock and delaying every subsequent call.
+
 ## Operational notes
 
 - Startup can take many minutes on the first download. The replica is not ready

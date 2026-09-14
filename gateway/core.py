@@ -532,6 +532,10 @@ class GatewayManager:
             )
             if is_workbench:
                 has_workbench_models = True
+                # Model Service suele imponer un deadline cercano a 30 s. Una
+                # repetición automática deja varias generaciones vivas en la
+                # misma réplica y puede bloquear las llamadas posteriores.
+                params["num_retries"] = 0
                 # Compatibilidad con borradores antiguos, que se guardaban como
                 # custom/<modelo> antes de existir este adaptador.
                 if provider_model.startswith("custom/"):

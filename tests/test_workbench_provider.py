@@ -4,6 +4,15 @@ import json
 from litellm import ModelResponse
 
 from gateway.workbench_provider import ClouderaWorkbenchLLM
+from gateway.workbench_provider import _request_body
+
+
+def test_workbench_provider_defaults_and_caps_output_tokens():
+    messages = [{"role": "user", "content": "hola"}]
+
+    assert _request_body(messages, {})["request"]["max_tokens"] == 128
+    assert _request_body(messages, {"max_tokens": 4096})["request"]["max_tokens"] == 512
+    assert _request_body(messages, {"extra_body": {"max_tokens": 900}})["request"]["max_tokens"] == 512
 
 
 def test_workbench_provider_wraps_request_and_unwraps_openai_response(monkeypatch):

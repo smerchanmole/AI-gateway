@@ -76,6 +76,15 @@ model_list:
   model_info:
     dashboard_source: cloudera
     dashboard_cloudera_kind: inference
+- model_name: qwen38
+  litellm_params:
+    model: cloudera_workbench/qwen38
+    drop_params: true
+    api_base: https://modelservice.aeadqwen.se-sandb.a465-9q4k.cloudera.site/model?accessKey=mnuihyu4h2o3e9etz1plc17988uzs068
+    api_key: os.environ/CLOUDERA_6D379D6EDAB4_CDP_TOKEN
+  model_info:
+    dashboard_source: cloudera
+    dashboard_cloudera_kind: workbench
 dashboard_settings:
   guardrail:
     enabled: true

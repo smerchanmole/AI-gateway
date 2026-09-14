@@ -97,6 +97,7 @@ def test_workbench_model_loads_custom_provider_and_migrates_old_prefix(tmp_path)
     active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
 
     assert active["model_list"][0]["litellm_params"]["model"] == "cloudera_workbench/qwen3.8-27b-fp8"
+    assert active["model_list"][0]["litellm_params"]["num_retries"] == 0
     assert active["litellm_settings"]["custom_provider_map"] == [{
         "provider": "cloudera_workbench",
         "custom_handler": "workbench_provider.workbench_llm",
