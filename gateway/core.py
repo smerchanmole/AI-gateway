@@ -493,7 +493,15 @@ class GatewayManager:
             elif isinstance(value, str) and value.startswith("os.environ/"):
                 referenced.add(value.removeprefix("os.environ/"))
 
-        visit(self._source())
+        source = self._source()
+        disabled = set(self._state().get("disabled_models", []))
+        # Un proveedor desactivado no participa en la configuración activa y
+        # no debe impedir el arranque por una credencial que nunca se usará.
+        source["model_list"] = [
+            item for item in source.get("model_list", [])
+            if item.get("model_name") not in disabled
+        ]
+        visit(source)
         from gateway.cloudera import ClouderaCatalog
         local_credentials = ClouderaCatalog(self.runtime_dir).environment()
         # Son opciones heredadas de LiteLLM que IA Gateway desactiva: la única

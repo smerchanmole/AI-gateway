@@ -297,6 +297,17 @@ def test_missing_master_key_is_optional_and_removed_from_active_config(tmp_path,
     assert "master_key" not in active.get("general_settings", {})
 
 
+def test_disabled_model_does_not_require_its_provider_api_key(tmp_path, monkeypatch):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.config_text())
+    config["model_list"][0]["litellm_params"]["api_key"] = "os.environ/OPENAI_API_KEY"
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    manager.set_model("uno", False)
+
+    assert "OPENAI_API_KEY" not in manager.missing_environment_variables()
+
+
 def test_local_ollama_reports_host_free_memory(tmp_path, monkeypatch):
     manager = make_manager(tmp_path)
 

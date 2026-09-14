@@ -11,6 +11,7 @@ import asyncio
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -37,6 +38,27 @@ _FORWARDED_PARAMETERS = {
 }
 _DEFAULT_MAX_TOKENS = 128
 _MAX_MAX_TOKENS = 512
+
+
+def _normalize_api_base(value: str) -> str:
+    """Normaliza espacios de copia/pegado sin registrar el accessKey secreto."""
+
+    parsed = urllib.parse.urlsplit(value.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise CustomLLMError(status_code=500, message="api_base de Workbench no es una URL HTTP válida")
+    query = [(key.strip(), item.strip()) for key, item in urllib.parse.parse_qsl(
+        parsed.query, keep_blank_values=True
+    )]
+    access_keys = [item for key, item in query if key == "accessKey"]
+    if not access_keys or not access_keys[0]:
+        raise CustomLLMError(status_code=500, message="La URL de Workbench no contiene un accessKey válido")
+    return urllib.parse.urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urllib.parse.urlencode(query),
+        "",
+    ))
 
 
 def _timeout_seconds(value: Any) -> float:
@@ -119,7 +141,7 @@ class ClouderaWorkbenchLLM(CustomLLM):
         if api_key:
             request_headers.setdefault("Authorization", f"Bearer {api_key}")
         request = urllib.request.Request(
-            api_base,
+            _normalize_api_base(api_base),
             data=json.dumps(_request_body(messages, optional_params)).encode("utf-8"),
             method="POST",
             headers=request_headers,

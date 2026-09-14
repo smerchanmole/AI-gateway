@@ -80,7 +80,7 @@ model_list:
   litellm_params:
     model: cloudera_workbench/qwen38
     drop_params: true
-    api_base: https://modelservice.aeadqwen.se-sandb.a465-9q4k.cloudera.site/model?accessKey=mnuihyu4h2o3e9etz1plc17988uzs068
+    api_base: https://modelservice.aeadqwen.se-sandb.a465-9q4k.cloudera.site/model?accessKey=mk86wjlgz9bjxfyabemasrr8d2ywdnys
     api_key: os.environ/CLOUDERA_6D379D6EDAB4_CDP_TOKEN
   model_info:
     dashboard_source: cloudera

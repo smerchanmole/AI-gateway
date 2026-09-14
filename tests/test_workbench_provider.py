@@ -4,7 +4,7 @@ import json
 from litellm import ModelResponse
 
 from gateway.workbench_provider import ClouderaWorkbenchLLM
-from gateway.workbench_provider import _request_body
+from gateway.workbench_provider import _normalize_api_base, _request_body
 
 
 def test_workbench_provider_defaults_and_caps_output_tokens():
@@ -13,6 +13,14 @@ def test_workbench_provider_defaults_and_caps_output_tokens():
     assert _request_body(messages, {})["request"]["max_tokens"] == 128
     assert _request_body(messages, {"max_tokens": 4096})["request"]["max_tokens"] == 512
     assert _request_body(messages, {"extra_body": {"max_tokens": 900}})["request"]["max_tokens"] == 512
+
+
+def test_workbench_provider_normalizes_pasted_access_key_whitespace():
+    normalized = _normalize_api_base(
+        " https://modelservice.wb.example/model?accessKey= model-key \n"
+    )
+
+    assert normalized == "https://modelservice.wb.example/model?accessKey=model-key"
 
 
 def test_workbench_provider_wraps_request_and_unwraps_openai_response(monkeypatch):
