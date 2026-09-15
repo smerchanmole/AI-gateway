@@ -147,10 +147,12 @@ The form asks for the CDP Base Runtime generation because the supported unattend
 | Discovery API used by IA Gateway | `https://ml.company.example/api/v1alpha1/listEndpoints` for AI Inference |
 | Runtime before 7.3.2 | Complete Basic-enabled Knox token URL, for example `https://service.company.example/gateway/authtkn/knoxtoken/api/v1/token` |
 | Credentials before 7.3.2 | `WORKLOAD-USER` and `WORKLOAD-PASS`; IA Gateway obtains a fresh JWT before expiry |
-| Runtime 7.3.2+ | Prefer a long-lived Knox API key for AI Inference, or paste a current JWT |
-| Knox v2 reference URL | `https://knox.company.example:8443/gateway/homepage/knoxtoken/api/v2/token` |
+| Runtime 7.3.2+ · AI Inference | Use the complete value of a long-lived Knox API key created in Model Endpoint Details, or a current UMS CDP JWT |
+| Runtime 7.3.2+ · Workbench | Use an API key created in Workbench User Settings with API/Application audience |
 
-Do not paste the central CDP console or the interactive page ending in `/token-generation/index.html`. In Runtime 7.3.2+, the `homepage` topology authenticates with an SSO cookie, so IA Gateway deliberately does not claim that it can renew that credential with workload username/password. Ask the platform administrator for a non-interactive Knox topology if automatic rotation is required.
+Do not paste the central CDP console, the interactive page ending in `/token-generation/index.html`, or a generic Knox Gateway JWT whose Target Base URL is `/gateway/cdp-proxy-token`. AI Inference expects a UMS CDP JWT or its specifically configured Knox API key support. In Runtime 7.3.2+, IA Gateway deliberately does not claim that it can renew these credentials with workload username/password.
+
+Knox API keys for AI Inference are not enabled merely by running Runtime 7.3.2. An administrator must add the `cdp-preauth` provider configuration to `conf/cdp-resources.xml` in the Data Lake Knox Gateway Default Group, save it, refresh the stale Knox configurations, and verify that the topology renders without errors in Knox Admin UI. If a UMS JWT works but a generated Knox API key returns HTTP 401, check this server-side prerequisite and ensure the complete generated key—not its identifier—was copied.
 
 Credential lifecycle is always reported explicitly. JWT expiry is read from the `exp` claim. Cloud JWTs and legacy Basic-enabled Knox JWTs are regenerated ten minutes before expiry when all generation fields are present. Opaque Knox and Workbench API keys do not expose an expiry claim, so IA Gateway reports their expiry as unknown and never promises automatic renewal; verify and rotate them according to the policy configured in Cloudera.
 

@@ -416,8 +416,8 @@ def test_cloudera_form_is_contextual_and_explains_urls_and_credential_lifecycle(
     assert 'id="cloudera-cloud-fields"' in html
     assert 'id="cloudera-onprem-modern-fields"' in html
     assert 'id="cloudera-onprem-legacy-fields"' in html
-    assert "URL de endpoints" in html and "URL de Knox Token API v2" in html
-    assert "gateway/homepage/knoxtoken/api/v2/token" in html
+    assert "URL de endpoints" in html and "CDP JWT (UMS)" in html
+    assert "gateway/cdp-proxy-token" in html
     assert "gateway/authtkn/knoxtoken/api/v1/token" in html
     assert "updateClouderaFormContext" in javascript
     assert "Caduca · sustitución manual" in javascript

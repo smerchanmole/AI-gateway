@@ -344,10 +344,15 @@ class ClouderaCatalog:
         previous = next((item for item in data.get("connections", []) if item.get("id") == connection_id), {})
         same_auth_context = (previous.get("platform", platform) == platform and
                              self._onpremise_version(previous) == onpremise_version)
-        effective_renewal_url = self._validate_renewal_url(
-            renewal_url or (previous.get("renewal_url", "") if same_auth_context else ""),
-            platform, onpremise_version,
-        )
+        renewal_candidate = renewal_url or (previous.get("renewal_url", "") if same_auth_context else "")
+        if platform == "onpremise" and onpremise_version == "7.3.2_plus":
+            if renewal_url:
+                self._validate_renewal_url(renewal_url, platform, onpremise_version)
+            effective_renewal_url = ""
+        else:
+            effective_renewal_url = self._validate_renewal_url(
+                renewal_candidate, platform, onpremise_version,
+            )
         entry = {"id": connection_id, "name": name.strip() or parsed.netloc, "kind": kind, "url": normalized,
                  "platform": platform, "probe_interval_minutes": probe_interval_minutes,
                  "onpremise_version": onpremise_version,
@@ -406,10 +411,15 @@ class ClouderaCatalog:
         new_id = self._id(kind, normalized)
         same_auth_context = (previous.get("platform", "cloud") == platform and
                              self._onpremise_version(previous) == onpremise_version)
-        effective_renewal_url = self._validate_renewal_url(
-            renewal_url or (previous.get("renewal_url", "") if same_auth_context else ""),
-            platform, onpremise_version,
-        )
+        renewal_candidate = renewal_url or (previous.get("renewal_url", "") if same_auth_context else "")
+        if platform == "onpremise" and onpremise_version == "7.3.2_plus":
+            if renewal_url:
+                self._validate_renewal_url(renewal_url, platform, onpremise_version)
+            effective_renewal_url = ""
+        else:
+            effective_renewal_url = self._validate_renewal_url(
+                renewal_candidate, platform, onpremise_version,
+            )
         entry = {"id": new_id, "name": name.strip() or parsed.netloc, "kind": kind, "url": normalized,
                  "platform": platform, "probe_interval_minutes": probe_interval_minutes,
                  "onpremise_version": onpremise_version,
@@ -769,7 +779,18 @@ class ClouderaCatalog:
 
         connection = self._connection(connection_id)
         if connection["kind"] == "inference":
-            payload = self._request(f"{connection['url']}/api/v1alpha1/listEndpoints", connection["token"], "POST", {"namespace": "serving-default"})
+            try:
+                payload = self._request(f"{connection['url']}/api/v1alpha1/listEndpoints", connection["token"], "POST", {"namespace": "serving-default"})
+            except RuntimeError as exc:
+                if (connection.get("platform") == "onpremise"
+                        and self._onpremise_version(connection) == "7.3.2_plus"
+                        and "Credencial rechazada" in str(exc)):
+                    raise RuntimeError(
+                        f"{exc}. Si has pegado una Knox API key, comprueba que sea el valor completo y que "
+                        "un administrador haya configurado cdp-preauth en el Knox del Data Lake y refrescado "
+                        "las configuraciones obsoletas de Knox"
+                    ) from exc
+                raise
             endpoints = self._items(payload, "endpoints", "items")
             discovered = []
             for item in endpoints:

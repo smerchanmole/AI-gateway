@@ -6,6 +6,8 @@ import urllib.error
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from gateway.cloudera import ClouderaCatalog
 
 
@@ -114,7 +116,7 @@ def test_onpremise_token_url_rejects_html_and_requires_matching_api_version(tmp_
         renewal_url="https://knox:8443/gateway/homepage/knoxtoken/api/v2/token",
         onpremise_version="7.3.2_plus",
     )
-    assert connection["renewal_url"].endswith("/knoxtoken/api/v2/token")
+    assert connection["renewal_url"] == ""
 
 
 def test_discovers_inference_endpoints(tmp_path, monkeypatch):
@@ -261,6 +263,21 @@ def test_model_probe_prefers_specific_token_and_reports_auth_failure(tmp_path, m
     assert result["ok"] is False
     assert result["http_status"] == 401
     assert result["credential_source"] == "Token del modelo"
+
+
+def test_modern_onprem_discovery_auth_error_mentions_knox_preauth(tmp_path, monkeypatch):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection(
+        "Inference", "inference", "https://ml.example", "opaque-knox-key",
+        platform="onpremise", onpremise_version="7.3.2_plus",
+    )
+
+    def denied(request, timeout=20):
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr("gateway.cloudera.urllib.request.urlopen", denied)
+    with pytest.raises(RuntimeError, match="cdp-preauth"):
+        catalog.discover(connection["id"])
 
 
 def test_openai_probe_uses_exact_cloudera_base_url(tmp_path, monkeypatch):

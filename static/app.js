@@ -113,7 +113,7 @@ function updateClouderaFormContext() {
   });
   $("#cloudera-modern-token-label").textContent = kind === "workbench"
     ? "API key de Workbench"
-    : "Knox API key o JWT";
+    : "Knox API key de AI Inference o CDP JWT (UMS)";
   $("#cloudera-url").placeholder = kind === "workbench"
     ? "https://ml-workbench.example.com"
     : "https://ml-entorno.example.com";
@@ -125,7 +125,7 @@ function clouderaFormCredential() {
     return {token: $("#cloudera-token").value, renewalUrl: $("#cloudera-cloud-renewal-url").value};
   }
   if ($("#cloudera-onpremise-version").value === "7.3.2_plus") {
-    return {token: $("#cloudera-modern-token").value, renewalUrl: $("#cloudera-modern-token-url").value};
+    return {token: $("#cloudera-modern-token").value, renewalUrl: ""};
   }
   return {token: $("#cloudera-legacy-token").value, renewalUrl: $("#cloudera-legacy-renewal-url").value};
 }
@@ -198,7 +198,6 @@ function editClouderaConnection(id) {
   $("#cloudera-workload-user").value = item.workload_user || ""; $("#cloudera-workload-password").value = "";
   $("#cloudera-access-key-id").value = item.cdp_access_key_id || ""; $("#cloudera-private-key").value = "";
   $("#cloudera-cloud-renewal-url").value = item.platform === "cloud" ? item.renewal_url || "" : "";
-  $("#cloudera-modern-token-url").value = item.platform === "onpremise" && item.onpremise_version === "7.3.2_plus" ? item.renewal_url || "" : "";
   $("#cloudera-legacy-renewal-url").value = item.platform === "onpremise" && item.onpremise_version !== "7.3.2_plus" ? item.renewal_url || "" : "";
   $("#cloudera-workload-name").value = item.workload_name || "DE";
   $("#save-cloudera-connection").textContent = "Guardar cambios"; $("#cancel-cloudera-edit").hidden = false;
