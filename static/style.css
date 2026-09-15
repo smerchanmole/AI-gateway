@@ -458,13 +458,17 @@ textarea:focus, select:focus { outline: 2px solid var(--cyan); border-color: tra
 .cloudera-form label > small { color: #91a8bd; font-weight: 500; }
 .label-with-help { display: flex; align-items: center; gap: 6px; }
 .field-help { position: relative; display: inline-block; }
-.field-help summary { display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid rgba(34,211,238,.45); border-radius: 50%; color: var(--cyan); cursor: pointer; font-size: 11px; list-style: none; }
+.field-help summary { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid rgba(34,211,238,.45); border-radius: 50%; color: var(--cyan); cursor: pointer; font-size: 12px; list-style: none; }
 .field-help summary::-webkit-details-marker { display: none; }
-.field-help > span { position: absolute; z-index: 5; left: 24px; top: -8px; width: min(420px, 70vw); padding: 12px; border: 1px solid var(--line-strong); border-radius: 10px; color: #d8e5f3; background: var(--ink-800); box-shadow: 0 12px 28px rgba(0,0,0,.3); font-weight: 500; line-height: 1.45; }
+.field-help summary:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.field-help > span { position: absolute; z-index: 5; left: 34px; top: -8px; width: min(440px, 76vw); padding: 12px; border: 1px solid var(--line-strong); border-radius: 10px; color: #d8e5f3; background: var(--ink-800); box-shadow: 0 12px 28px rgba(0,0,0,.3); font-weight: 500; line-height: 1.45; }
+.field-help code { overflow-wrap: anywhere; color: #a5f3fc; }
 .cloudera-form select { min-height: 42px; padding: 9px; }
 .cloudera-form .wide { grid-column: span 2; }
-.cloudera-renewal-fields { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.cloudera-renewal-fields { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; min-width: 0; margin: 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--line); }
+.cloudera-renewal-fields legend { padding: 0 8px 0 0; color: #e6f4ff; font-size: 11px; font-weight: 800; }
 .cloudera-renewal-fields > p { grid-column: 1 / -1; margin: 0; color: #91a8bd; font-size: 10px; }
+.optional-mark { color: #91a8bd; font-size: 9px; font-weight: 500; }
 .cloudera-connections, .cloudera-models { display: grid; gap: 9px; margin-top: 14px; }
 .cloudera-connection { display: grid; grid-template-columns: 1fr 2fr auto auto; align-items: start; gap: 10px 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; }
 .cloudera-connection b, .cloudera-model b { display: block; color: white; }

@@ -241,6 +241,31 @@ def test_models_detect_embedding_mode(tmp_path):
     assert modes == {"uno": "chat", "embedding-local": "embedding"}
 
 
+def test_models_use_discovered_task_for_embedqa_and_expose_engine(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["model_list"][0] = {
+        "model_name": "embedqa-query",
+        "litellm_params": {
+            "model": "openai/nvidia/llama-3.2-nv-embedqa-1b-v2-query",
+            "api_base": "https://ml.example/v1",
+        },
+        "model_info": {
+            "dashboard_source": "cloudera",
+            "dashboard_cloudera_kind": "inference",
+            "dashboard_serving_engine": "nim",
+            "dashboard_task": "EMBED",
+            "dashboard_embedding_input_type": "query",
+        },
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    model = manager.models()[0]
+    assert model["mode"] == "embedding"
+    assert model["serving_engine"] == "nim"
+    assert model["embedding_input_type"] == "query"
+
+
 def test_reports_missing_referenced_environment_variable(tmp_path, monkeypatch):
     manager = make_manager(tmp_path)
     config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))

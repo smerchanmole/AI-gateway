@@ -30,6 +30,82 @@ class ClouderaCatalog:
     SECRET_FIELDS = {"token", "workload_password", "cdp_private_key"}
 
     @staticmethod
+    def _endpoint_profile(endpoint: dict[str, Any]) -> dict[str, Any]:
+        """Distingue protocolo, motor y contrato sin confundirlos entre sí.
+
+        ``api_standard=openai`` describe el contrato HTTP, no demuestra que el
+        servidor sea vLLM. Damos prioridad a metadatos explícitos y usamos URL
+        y familia de modelo únicamente como fallback auditable.
+        """
+
+        url = str(endpoint.get("url") or "")
+        model_name = str(endpoint.get("model_name") or endpoint.get("modelName") or "")
+        task = str(endpoint.get("task") or "")
+        api_standard = str(endpoint.get("api_standard") or endpoint.get("apiStandard") or "")
+        explicit_fields = (
+            "engine", "runtime", "runtime_name", "runtimeName", "serving_engine",
+            "servingEngine", "inference_server", "inferenceServer", "model_server",
+            "modelServer", "framework", "backend",
+        )
+        explicit = " ".join(str(endpoint.get(field) or "") for field in explicit_fields).lower()
+        runtime_metadata = json.dumps(endpoint.get("runtime_info") or {}, ensure_ascii=False,
+                                      default=str).lower()
+        all_metadata = json.dumps(endpoint, ensure_ascii=False, default=str).lower()
+        lowered_url = url.lower()
+        lowered_model = model_name.lower()
+
+        if "triton" in explicit:
+            engine, source = "triton", "metadata"
+        elif "vllm" in explicit:
+            engine, source = "vllm", "metadata"
+        elif re.search(r"(^|[^a-z])nim([^a-z]|$)", explicit):
+            engine, source = "nim", "metadata"
+        elif re.search(r"(^|[^a-z])nim([^a-z]|$)", runtime_metadata):
+            engine, source = "nim", "metadata"
+        elif "vllm" in runtime_metadata:
+            engine, source = "vllm", "metadata"
+        elif "triton" in runtime_metadata:
+            engine, source = "triton", "metadata"
+        elif "/v2/models/" in lowered_url or "triton" in all_metadata:
+            engine, source = "triton", "url" if "/v2/models/" in lowered_url else "metadata"
+        elif "vllm" in all_metadata:
+            engine, source = "vllm", "metadata"
+        elif re.search(r"(^|[^a-z])nim([^a-z]|$)", all_metadata):
+            engine, source = "nim", "metadata"
+        elif any(marker in lowered_model for marker in ("nv-embedqa", "nv-rerankqa")):
+            engine, source = "nim", "model"
+        elif "openai" in api_standard.lower() or "/v1" in lowered_url:
+            engine, source = "openai-compatible", "protocol"
+        else:
+            engine, source = "unknown", "unknown"
+
+        searchable = f"{task} {model_name} {url}".lower()
+        if "embed" in searchable:
+            task_family = "embedding"
+        elif "rerank" in searchable:
+            task_family = "reranking"
+        elif any(marker in searchable for marker in ("generation", "chat", "completion")):
+            task_family = "generation"
+        else:
+            task_family = "inference"
+
+        canonical_model = re.sub(r"-(query|passage)$", "", model_name, flags=re.IGNORECASE)
+        asymmetric_embedding = (
+            task_family == "embedding"
+            and engine == "nim"
+            and any(marker in canonical_model.lower() for marker in ("embedqa", "retriever"))
+        )
+        return {
+            "serving_engine": engine,
+            "runtime_backend": ("triton" if engine == "nim" and "triton" in all_metadata else engine),
+            "engine_source": source,
+            "task_family": task_family,
+            "canonical_model_name": canonical_model or model_name,
+            "requires_input_type": asymmetric_embedding,
+            "embedding_input_types": ["query", "passage"] if asymmetric_embedding else [],
+        }
+
+    @staticmethod
     def _normalize_renewal_url(value: str) -> str:
         """Acepta una URL normal o un enlace Markdown copiado de documentación."""
 
@@ -50,6 +126,33 @@ class ClouderaCatalog:
             parsed = parsed._replace(netloc="iamapi.us-west-1.altus.cloudera.com")
             candidate = urllib.parse.urlunparse(parsed)
         return candidate
+
+    @classmethod
+    def _validate_renewal_url(cls, value: str, platform: str, onpremise_version: str) -> str:
+        """Evita confundir consolas y páginas HTML con APIs de credenciales."""
+
+        normalized = cls._normalize_renewal_url(value)
+        if not normalized:
+            return ""
+        parsed = urllib.parse.urlparse(normalized)
+        path = parsed.path.rstrip("/").lower()
+        hostname = (parsed.hostname or "").lower()
+        if platform == "cloud":
+            if hostname.startswith(("console.", "console-", "consoles.")):
+                raise RuntimeError("La URL de tokens Cloud debe ser el API IAM, no la consola CDP")
+            return normalized
+        if "token-generation" in path or path.endswith(".html"):
+            raise RuntimeError(
+                "Has pegado la página web Token Generation. Usa la URL del API Knox terminada en /token"
+            )
+        if onpremise_version == "7.3.2_plus":
+            if not path.endswith("/knoxtoken/api/v2/token"):
+                raise RuntimeError(
+                    "Para Runtime 7.3.2+ la URL de referencia debe terminar en /knoxtoken/api/v2/token"
+                )
+        elif not path.endswith("/token"):
+            raise RuntimeError("La URL de tokens Knox debe ser el endpoint completo terminado en /token")
+        return normalized
 
     def __init__(self, runtime_dir: Path) -> None:
         """Ubica el almacén SQLite privado y migra el JSON legado si existe."""
@@ -134,17 +237,68 @@ class ClouderaCatalog:
         except (IndexError, KeyError, ValueError, TypeError, json.JSONDecodeError):
             return {"token_expires_at": None, "token_expired": False}
 
+    @classmethod
+    def _connection_token_metadata(cls, connection: dict[str, Any]) -> dict[str, Any]:
+        """Usa ``exp`` y, si falta, la caducidad declarada por el emisor Cloud."""
+
+        metadata = cls._token_metadata(str(connection.get("token") or ""))
+        if metadata.get("token_expires_at") or not connection.get("token_expire_at"):
+            return metadata
+        declared = connection["token_expire_at"]
+        try:
+            if isinstance(declared, (int, float)) or str(declared).isdigit():
+                timestamp = float(declared)
+                if timestamp > 10_000_000_000:
+                    timestamp /= 1000
+                expiration = datetime.fromtimestamp(timestamp, timezone.utc)
+            else:
+                expiration = datetime.fromisoformat(str(declared).replace("Z", "+00:00"))
+                if expiration.tzinfo is None:
+                    expiration = expiration.replace(tzinfo=timezone.utc)
+            return {"token_expires_at": expiration.astimezone(timezone.utc).isoformat(),
+                    "token_expired": expiration.timestamp() <= datetime.now(timezone.utc).timestamp()}
+        except (OverflowError, OSError, TypeError, ValueError):
+            return metadata
+
     def connections(self) -> list[dict[str, Any]]:
         """Devuelve la vista pública de conexiones con indicadores de secretos."""
 
-        return [{"platform": "cloud", "probe_interval_minutes": 5,
-                 **{k: v for k, v in item.items() if k not in self.SECRET_FIELDS}} |
-                {"has_token": bool(item.get("token")),
-                 "has_workload_password": bool(item.get("workload_password")),
-                 "has_cdp_private_key": bool(item.get("cdp_private_key")),
-                 "renewal_ready": self._renewal_ready(item)} |
-                (self._token_metadata(item.get("token", "")) if item.get("token") else {})
-                for item in self._read().get("connections", [])]
+        result = []
+        for item in self._read().get("connections", []):
+            metadata = self._connection_token_metadata(item) if item.get("token") else {
+                "token_expires_at": None, "token_expired": False,
+            }
+            renewal_ready = self._renewal_ready(item)
+            version = self._onpremise_version(item)
+            if not item.get("token"):
+                lifecycle = "missing"
+            elif metadata.get("token_expires_at") and renewal_ready:
+                lifecycle = "renewable"
+            elif metadata.get("token_expires_at"):
+                lifecycle = "expiring_manual"
+            elif item.get("platform", "cloud") == "onpremise" and version == "7.3.2_plus":
+                lifecycle = "long_lived_unverified"
+            else:
+                lifecycle = "expiry_unknown"
+            result.append({"platform": "cloud", "probe_interval_minutes": 5,
+                           "onpremise_version": version,
+                           **{k: v for k, v in item.items() if k not in self.SECRET_FIELDS}} |
+                          {"has_token": bool(item.get("token")),
+                           "has_workload_password": bool(item.get("workload_password")),
+                           "has_cdp_private_key": bool(item.get("cdp_private_key")),
+                           "renewal_ready": renewal_ready,
+                           "renewal_supported": renewal_ready,
+                           "credential_lifecycle": lifecycle} | metadata)
+        return result
+
+    @staticmethod
+    def _onpremise_version(connection: dict[str, Any]) -> str:
+        """Migra conexiones antiguas infiriendo v2 cuando la URL ya lo declara."""
+
+        configured = str(connection.get("onpremise_version") or "").strip()
+        if configured in {"7.3.2_plus", "legacy"}:
+            return configured
+        return "7.3.2_plus" if "/api/v2/" in str(connection.get("renewal_url") or "") else "legacy"
 
     @staticmethod
     def _renewal_ready(connection: dict[str, Any]) -> bool:
@@ -154,12 +308,16 @@ class ClouderaCatalog:
             return False
         if connection.get("platform", "cloud") == "cloud":
             return bool(connection.get("cdp_access_key_id") and connection.get("cdp_private_key"))
+        if ClouderaCatalog._onpremise_version(connection) == "7.3.2_plus":
+            # La topología homepage v2 usa una cookie SSO. Una Knox API key se
+            # guarda como credencial larga, pero no se puede rotar con Basic.
+            return False
         return bool(connection.get("workload_user") and connection.get("workload_password"))
 
     def save_connection(self, name: str, kind: str, url: str, token: str = "", platform: str = "cloud",
                         probe_interval_minutes: int = 5, workload_user: str = "", workload_password: str = "",
                         cdp_access_key_id: str = "", cdp_private_key: str = "", renewal_url: str = "",
-                        workload_name: str = "DE") -> dict[str, Any]:
+                        workload_name: str = "DE", onpremise_version: str = "legacy") -> dict[str, Any]:
         """Da de alta una conexión tras validar tipo, plataforma, URL y JWT.
 
         Una URL completa de endpoint se reduce a esquema+dominio porque las
@@ -169,11 +327,13 @@ class ClouderaCatalog:
 
         if kind not in {"inference", "workbench"}: raise RuntimeError("Tipo de conexión Cloudera no válido")
         if platform not in {"cloud", "onpremise"}: raise RuntimeError("La instalación debe ser Cloud u On-premise")
+        if onpremise_version not in {"7.3.2_plus", "legacy"}:
+            raise RuntimeError("Selecciona si el Runtime on-premise es 7.3.2 o posterior")
         if not 1 <= probe_interval_minutes <= 1440: raise RuntimeError("El intervalo debe estar entre 1 y 1440 minutos")
         parsed = urllib.parse.urlparse(url.strip())
         if parsed.scheme not in {"http", "https"} or not parsed.netloc: raise RuntimeError("La URL Cloudera no es válida")
-        if parsed.hostname and parsed.hostname.startswith("console."):
-            raise RuntimeError("Has pegado la URL de la consola CDP. Abre un Model Endpoint y usa el dominio que empieza por ml-")
+        if parsed.hostname and parsed.hostname.lower().startswith(("console.", "console-", "consoles.")):
+            raise RuntimeError("Has pegado la URL de la consola CDP. Abre el servicio y usa su URL de endpoints")
         # Es habitual copiar la URL completa de un endpoint. Para descubrir el
         # catálogo sólo necesitamos su origen; normalizar aquí evita un 404 poco claro.
         normalized = f"{parsed.scheme}://{parsed.netloc}"
@@ -182,14 +342,25 @@ class ClouderaCatalog:
             raise RuntimeError(f"El JWT está caducado desde {metadata['token_expires_at']}. Genera uno nuevo en Cloudera")
         data = self._read(); connection_id = self._id(kind, normalized)
         previous = next((item for item in data.get("connections", []) if item.get("id") == connection_id), {})
+        same_auth_context = (previous.get("platform", platform) == platform and
+                             self._onpremise_version(previous) == onpremise_version)
+        effective_renewal_url = self._validate_renewal_url(
+            renewal_url or (previous.get("renewal_url", "") if same_auth_context else ""),
+            platform, onpremise_version,
+        )
         entry = {"id": connection_id, "name": name.strip() or parsed.netloc, "kind": kind, "url": normalized,
                  "platform": platform, "probe_interval_minutes": probe_interval_minutes,
+                 "onpremise_version": onpremise_version,
                  "token": token.strip() or previous.get("token", ""),
-                 "workload_user": workload_user.strip() or previous.get("workload_user", ""),
-                 "workload_password": workload_password or previous.get("workload_password", ""),
-                 "cdp_access_key_id": cdp_access_key_id.strip() or previous.get("cdp_access_key_id", ""),
-                 "cdp_private_key": cdp_private_key.strip() or previous.get("cdp_private_key", ""),
-                 "renewal_url": self._normalize_renewal_url(renewal_url) or previous.get("renewal_url", ""),
+                 "workload_user": ((workload_user.strip() or (previous.get("workload_user", "") if same_auth_context else ""))
+                                   if platform == "onpremise" and onpremise_version == "legacy" else ""),
+                 "workload_password": ((workload_password or (previous.get("workload_password", "") if same_auth_context else ""))
+                                       if platform == "onpremise" and onpremise_version == "legacy" else ""),
+                 "cdp_access_key_id": ((cdp_access_key_id.strip() or (previous.get("cdp_access_key_id", "") if same_auth_context else ""))
+                                       if platform == "cloud" else ""),
+                 "cdp_private_key": ((cdp_private_key.strip() or (previous.get("cdp_private_key", "") if same_auth_context else ""))
+                                     if platform == "cloud" else ""),
+                 "renewal_url": effective_renewal_url,
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE")}
         data["connections"] = [item for item in data.get("connections", []) if item.get("id") != connection_id] + [entry]
         self._write(data)
@@ -206,7 +377,8 @@ class ClouderaCatalog:
     def update_connection(self, connection_id: str, name: str, kind: str, url: str, token: str = "",
                           platform: str = "cloud", probe_interval_minutes: int = 5, workload_user: str = "",
                           workload_password: str = "", cdp_access_key_id: str = "", cdp_private_key: str = "",
-                          renewal_url: str = "", workload_name: str = "DE") -> dict[str, Any]:
+                          renewal_url: str = "", workload_name: str = "DE",
+                          onpremise_version: str = "legacy") -> dict[str, Any]:
         """Edita una conexión, conservando secretos si los campos no cambian."""
         if kind not in {"inference", "workbench"}: raise RuntimeError("Tipo de conexión Cloudera no válido")
         data = self._read()
@@ -215,28 +387,42 @@ class ClouderaCatalog:
             if not token.strip():
                 raise RuntimeError("La conexión que estabas editando ya no existe. Cancela la edición o pega de nuevo la credencial para recrearla")
             return self.save_connection(name, kind, url, token, platform, probe_interval_minutes, workload_user,
-                                        workload_password, cdp_access_key_id, cdp_private_key, renewal_url, workload_name)
+                                        workload_password, cdp_access_key_id, cdp_private_key, renewal_url,
+                                        workload_name, onpremise_version)
         if platform not in {"cloud", "onpremise"}: raise RuntimeError("La instalación debe ser Cloud u On-premise")
+        if onpremise_version not in {"7.3.2_plus", "legacy"}:
+            raise RuntimeError("Selecciona si el Runtime on-premise es 7.3.2 o posterior")
         if not 1 <= probe_interval_minutes <= 1440: raise RuntimeError("El intervalo debe estar entre 1 y 1440 minutos")
         # Reutilizamos la validación/normalización y luego migramos credenciales
         # de modelos si el cambio de URL produce un identificador nuevo.
         parsed = urllib.parse.urlparse(url.strip())
         if parsed.scheme not in {"http", "https"} or not parsed.netloc: raise RuntimeError("La URL Cloudera no es válida")
-        if parsed.hostname and parsed.hostname.startswith("console."):
-            raise RuntimeError("Has pegado la URL de la consola CDP. Abre un Model Endpoint y usa el dominio que empieza por ml-")
+        if parsed.hostname and parsed.hostname.lower().startswith(("console.", "console-", "consoles.")):
+            raise RuntimeError("Has pegado la URL de la consola CDP. Abre el servicio y usa su URL de endpoints")
         normalized = f"{parsed.scheme}://{parsed.netloc}"
         metadata = self._token_metadata(token.strip()) if token.strip() else {}
         if metadata.get("token_expired"):
             raise RuntimeError(f"El JWT está caducado desde {metadata['token_expires_at']}. Genera uno nuevo en Cloudera")
         new_id = self._id(kind, normalized)
+        same_auth_context = (previous.get("platform", "cloud") == platform and
+                             self._onpremise_version(previous) == onpremise_version)
+        effective_renewal_url = self._validate_renewal_url(
+            renewal_url or (previous.get("renewal_url", "") if same_auth_context else ""),
+            platform, onpremise_version,
+        )
         entry = {"id": new_id, "name": name.strip() or parsed.netloc, "kind": kind, "url": normalized,
                  "platform": platform, "probe_interval_minutes": probe_interval_minutes,
+                 "onpremise_version": onpremise_version,
                  "token": token.strip() or previous.get("token", ""),
-                 "workload_user": workload_user.strip() or previous.get("workload_user", ""),
-                 "workload_password": workload_password or previous.get("workload_password", ""),
-                 "cdp_access_key_id": cdp_access_key_id.strip() or previous.get("cdp_access_key_id", ""),
-                 "cdp_private_key": cdp_private_key.strip() or previous.get("cdp_private_key", ""),
-                 "renewal_url": self._normalize_renewal_url(renewal_url) or previous.get("renewal_url", ""),
+                 "workload_user": ((workload_user.strip() or (previous.get("workload_user", "") if same_auth_context else ""))
+                                   if platform == "onpremise" and onpremise_version == "legacy" else ""),
+                 "workload_password": ((workload_password or (previous.get("workload_password", "") if same_auth_context else ""))
+                                       if platform == "onpremise" and onpremise_version == "legacy" else ""),
+                 "cdp_access_key_id": ((cdp_access_key_id.strip() or (previous.get("cdp_access_key_id", "") if same_auth_context else ""))
+                                       if platform == "cloud" else ""),
+                 "cdp_private_key": ((cdp_private_key.strip() or (previous.get("cdp_private_key", "") if same_auth_context else ""))
+                                     if platform == "cloud" else ""),
+                 "renewal_url": effective_renewal_url,
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE")}
         data["connections"] = [item for item in data.get("connections", []) if item.get("id") not in {connection_id, new_id}] + [entry]
         migrated = {}
@@ -294,7 +480,7 @@ class ClouderaCatalog:
         connection = next((item for item in data.get("connections", []) if item.get("id") == connection_id), None)
         if not connection: raise KeyError(connection_id)
         token_missing = not str(connection.get("token") or "").strip()
-        metadata = self._token_metadata(connection.get("token", ""))
+        metadata = self._connection_token_metadata(connection)
         expires_at = metadata.get("token_expires_at")
         if token_missing and not force and not self._renewal_ready(connection):
             return {"renewed": False, "generated": False,
@@ -306,6 +492,12 @@ class ClouderaCatalog:
             if remaining > 600:
                 return {"renewed": False, "message": "El token todavía no está próximo a caducar", **metadata}
 
+        if (connection.get("platform", "cloud") == "onpremise" and
+                self._onpremise_version(connection) == "7.3.2_plus"):
+            raise RuntimeError(
+                "Runtime 7.3.2 usa Knox Token API v2 con SSO: esta credencial no se puede renovar "
+                "con WORKLOAD-USER/WORKLOAD-PASS. Sustituye el JWT o utiliza una Knox API key larga."
+            )
         renewal_url = self._normalize_renewal_url(connection.get("renewal_url", ""))
         if not renewal_url:
             raise RuntimeError("Configura la URL de renovación de esta conexión")
@@ -409,7 +601,8 @@ class ClouderaCatalog:
         return results
 
     def probe_model(self, connection_id: str, external_id: str, url: str, protocol: str,
-                    model_name: str = "", task: str = "", has_chat_template: bool = True) -> dict[str, Any]:
+                    model_name: str = "", task: str = "", has_chat_template: bool = True,
+                    serving_engine: str = "", requires_input_type: bool = False) -> dict[str, Any]:
         """Hace una inferencia mínima en la URL exacta publicada por Cloudera.
 
         Un endpoint OpenAI de Cloudera no está obligado a exponer ``/models``.
@@ -436,7 +629,11 @@ class ClouderaCatalog:
             if "embed" in normalized_task:
                 if not target.endswith("/embeddings"):
                     target = f"{target}/embeddings"
-                payload = {"model": model_name or external_id, "input": "health check"}
+                payload = {"model": model_name or external_id, "input": ["health check"]}
+                if serving_engine == "nim" and requires_input_type:
+                    payload["model"] = re.sub(r"-(query|passage)$", "", str(payload["model"]),
+                                              flags=re.IGNORECASE)
+                    payload["input_type"] = "query"
             elif has_chat_template:
                 if not target.endswith("/chat/completions"):
                     target = f"{target}/chat/completions"
@@ -469,18 +666,29 @@ class ClouderaCatalog:
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
                 code = response.status
+            contract = ("nim-embedding-query" if payload and payload.get("input_type") == "query"
+                        else ("triton-readiness" if "/v2/health/ready" in target else protocol))
             return {"ok": 200 <= code < 300, "reachable": True, "http_status": code,
                     "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000),
                     "credential_source": source, **metadata,
-                    "probe_url": target, "message": ("El modelo respondió a una inferencia mínima" if payload is not None
-                                                        else "Endpoint preparado y credencial aceptada")}
+                    "probe_url": target, "probe_contract": contract,
+                    "message": ("El modelo respondió a una inferencia mínima" if payload is not None
+                                else "El endpoint de readiness respondió correctamente")}
         except urllib.error.HTTPError as exc:
             authenticated = exc.code not in {401, 403}
+            try:
+                raw_detail = exc.read().decode(errors="replace")[:500]
+                parsed_detail = json.loads(raw_detail)
+                error_detail = str(parsed_detail.get("message") or parsed_detail.get("error") or raw_detail)
+            except (AttributeError, ValueError, TypeError):
+                error_detail = ""
+            format_message = "El endpoint rechazó el contrato de prueba"
+            if error_detail:
+                format_message = f"{format_message}: {error_detail}"
             return {"ok": False, "reachable": True, "http_status": exc.code,
                     "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000),
                     "credential_source": source, "probe_url": target, **metadata,
-                    "message": ("Credencial rechazada o sin permiso de acceso" if not authenticated else
-                                "El endpoint rechazó el formato de la prueba; revisa el protocolo y el tipo de tarea publicados por Cloudera")}
+                    "message": ("Credencial rechazada o sin permiso de acceso" if not authenticated else format_message)}
         except OSError as exc:
             return {"ok": False, "reachable": False, "http_status": None, "credential_source": source,
                     "probe_url": target, **metadata, "message": f"No se pudo conectar con el endpoint: {exc}"}
@@ -515,7 +723,7 @@ class ClouderaCatalog:
         connection = next((item for item in self._read().get("connections", []) if item.get("id") == connection_id), None)
         if not connection: raise KeyError(connection_id)
         if not connection.get("token"): raise RuntimeError("Añade el CDP/API token antes de descubrir modelos")
-        metadata = self._token_metadata(connection["token"])
+        metadata = self._connection_token_metadata(connection)
         if metadata.get("token_expired"):
             raise RuntimeError(f"El JWT de esta conexión caducó en {metadata['token_expires_at']}. Edítala y pega un token nuevo")
         return connection
@@ -576,6 +784,7 @@ class ClouderaCatalog:
                     # seguir siendo útil aunque el detalle no esté permitido.
                     pass
                 merged = {**item, **detail}
+                profile = self._endpoint_profile(merged)
                 api_standard = str(merged.get("api_standard") or merged.get("apiStandard") or "").lower()
                 endpoint_url = str(merged.get("url") or "")
                 task = str(merged.get("task") or "")
@@ -606,7 +815,7 @@ class ClouderaCatalog:
                     "api_key_env": (self.environment_name(connection_id, external_id)
                                     if f"{connection_id}:{external_id}" in self._read().get("model_tokens", {})
                                     else self.connection_environment_name(connection_id)),
-                    **self.model_token_status(connection_id, external_id)})
+                    **profile, **self.model_token_status(connection_id, external_id)})
             return discovered
         projects = self._items(self._request(f"{connection['url']}/api/v2/projects?page_size=100", connection["token"]), "projects", "items")
         discovered = []

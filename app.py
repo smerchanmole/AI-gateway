@@ -526,6 +526,9 @@ class ModelCreate(BaseModel):
     drop_params: bool = True
     source: str = ""
     cloudera_kind: str = ""
+    serving_engine: str = ""
+    task: str = ""
+    embedding_input_type: str = ""
     restart: bool = True
 
 
@@ -558,6 +561,7 @@ class ClouderaConnection(BaseModel):
     cdp_private_key: str = ""
     renewal_url: str = ""
     workload_name: str = "DE"
+    onpremise_version: str = "legacy"
 
 
 class ClouderaTokenRenewal(BaseModel):
@@ -581,6 +585,8 @@ class ClouderaModelProbe(BaseModel):
     model_name: str = ""
     task: str = ""
     has_chat_template: bool = True
+    serving_engine: str = ""
+    requires_input_type: bool = False
 
 
 def _model_entry(model: ModelCreate) -> dict[str, object]:
@@ -602,6 +608,9 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
         entry["model_info"] = {
             "dashboard_source": "cloudera",
             "dashboard_cloudera_kind": "workbench" if model.cloudera_kind == "workbench" else "inference",
+            "dashboard_serving_engine": model.serving_engine.strip(),
+            "dashboard_task": model.task.strip(),
+            "dashboard_embedding_input_type": model.embedding_input_type.strip(),
         }
     return entry
 
@@ -670,7 +679,7 @@ def save_cloudera_connection(connection: ClouderaConnection):
         result = cloudera.save_connection(connection.name, connection.kind, connection.url, connection.token,
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
-            connection.renewal_url, connection.workload_name)
+            connection.renewal_url, connection.workload_name, connection.onpremise_version)
         result = generate_initial_cloudera_token(result)
         if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
@@ -687,7 +696,7 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
         result = cloudera.update_connection(connection_id, connection.name, connection.kind, connection.url, connection.token,
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
-            connection.renewal_url, connection.workload_name)
+            connection.renewal_url, connection.workload_name, connection.onpremise_version)
         result = generate_initial_cloudera_token(result)
         if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
@@ -757,7 +766,8 @@ def probe_cloudera_model(connection_id: str, model: ClouderaModelProbe):
 
     try:
         return cloudera.probe_model(connection_id, model.external_id, model.url, model.protocol,
-                                    model.model_name, model.task, model.has_chat_template)
+                                    model.model_name, model.task, model.has_chat_template,
+                                    model.serving_engine, model.requires_input_type)
     except KeyError as exc:
         raise HTTPException(404, "Conexión Cloudera no encontrada") from exc
     except RuntimeError as exc:

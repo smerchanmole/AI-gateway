@@ -328,6 +328,34 @@ def test_guided_model_config_uses_environment_reference(monkeypatch, client):
     assert captured[0]["litellm_params"]["api_key"] == "os.environ/OPENAI_API_KEY"
 
 
+def test_guided_cloudera_model_preserves_discovered_engine_and_embedding_role(monkeypatch, client):
+    captured = []
+    monkeypatch.setattr(
+        dashboard.manager,
+        "add_model",
+        lambda entry: captured.append(entry) or {"content": "model_list: []\n", "restarted": False},
+    )
+
+    response = client.post("/api/config/models", json={
+        "model_name": "embedqa-query",
+        "model": "openai/nvidia/llama-3.2-nv-embedqa-1b-v2-query",
+        "source": "cloudera",
+        "cloudera_kind": "inference",
+        "serving_engine": "nim",
+        "task": "EMBED",
+        "embedding_input_type": "query",
+    })
+
+    assert response.status_code == 200
+    assert captured[0]["model_info"] == {
+        "dashboard_source": "cloudera",
+        "dashboard_cloudera_kind": "inference",
+        "dashboard_serving_engine": "nim",
+        "dashboard_task": "EMBED",
+        "dashboard_embedding_input_type": "query",
+    }
+
+
 def test_guided_model_config_rejects_invalid_environment_name(client):
     response = client.post("/api/config/models", json={
         "model_name": "inseguro",
@@ -367,6 +395,32 @@ def test_cloudera_token_status_refreshes_without_page_reload():
     assert "token_renewed_at" in javascript
     assert "document.addEventListener(\"visibilitychange\"" in javascript
     assert "location.reload()" not in refresh_function
+
+
+def test_cloudera_ui_distinguishes_engine_and_asymmetric_embedding_roles():
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'serving_engine: model.serving_engine' in javascript
+    assert 'data-input-type="query">Preparar consulta' in javascript
+    assert 'data-input-type="passage">Preparar documentos' in javascript
+    assert 'Embedding asimétrico' in javascript
+
+
+def test_cloudera_form_is_contextual_and_explains_urls_and_credential_lifecycle():
+    html = (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="cloudera-onpremise-version"' in html
+    assert 'value="7.3.2_plus"' in html and 'value="legacy"' in html
+    assert 'id="cloudera-cloud-fields"' in html
+    assert 'id="cloudera-onprem-modern-fields"' in html
+    assert 'id="cloudera-onprem-legacy-fields"' in html
+    assert "URL de endpoints" in html and "URL de Knox Token API v2" in html
+    assert "gateway/homepage/knoxtoken/api/v2/token" in html
+    assert "gateway/authtkn/knoxtoken/api/v1/token" in html
+    assert "updateClouderaFormContext" in javascript
+    assert "Caduca · sustitución manual" in javascript
+    assert "Clave larga · verifica vigencia en Knox" in javascript
 
 
 def test_api_requires_login_and_rejects_csrf(tmp_path, monkeypatch):

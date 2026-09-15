@@ -22,7 +22,7 @@ def test_connection_and_model_tokens_are_never_returned(tmp_path):
     assert connection["has_token"] is True
     assert "token" not in connection
     assert "workload_password" not in connection and "cdp_private_key" not in connection
-    assert connection["has_workload_password"] is True and connection["has_cdp_private_key"] is True
+    assert connection["has_workload_password"] is False and connection["has_cdp_private_key"] is True
     assert connection["probe_interval_minutes"] == 5 and connection["platform"] == "cloud"
     assert catalog.connections()[0]["has_token"] is True
     assert catalog.environment()[variable] == "model-secret"
@@ -87,6 +87,35 @@ def test_full_endpoint_url_is_normalized_and_console_url_is_rejected(tmp_path):
     else:
         raise AssertionError("La URL de la consola no debe aceptarse como API")
 
+    try:
+        catalog.save_connection("Consola Private", "inference",
+            "https://console-cdp.apps.private.example.com", "token")
+    except RuntimeError as exc:
+        assert "consola CDP" in str(exc)
+    else:
+        raise AssertionError("Una consola console-cdp tampoco debe aceptarse como API")
+
+
+def test_onpremise_token_url_rejects_html_and_requires_matching_api_version(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    try:
+        catalog.save_connection(
+            "Private", "inference", "https://ml.private", "knox-key", platform="onpremise",
+            renewal_url="https://knox:8443/gateway/homepage/token-generation/index.html",
+            onpremise_version="7.3.2_plus",
+        )
+    except RuntimeError as exc:
+        assert "página web Token Generation" in str(exc)
+    else:
+        raise AssertionError("La página HTML no es una URL de API")
+
+    connection = catalog.save_connection(
+        "Private", "inference", "https://ml.private", "knox-key", platform="onpremise",
+        renewal_url="https://knox:8443/gateway/homepage/knoxtoken/api/v2/token",
+        onpremise_version="7.3.2_plus",
+    )
+    assert connection["renewal_url"].endswith("/knoxtoken/api/v2/token")
+
 
 def test_discovers_inference_endpoints(tmp_path, monkeypatch):
     catalog = ClouderaCatalog(tmp_path)
@@ -107,6 +136,70 @@ def test_discovers_inference_endpoints(tmp_path, monkeypatch):
     assert models[0]["has_chat_template"] is True
     assert models[0]["api_key_env"] == catalog.connection_environment_name(connection["id"])
     assert models[0]["replica_count"] == 1
+
+
+def test_discovery_profiles_nim_asymmetric_embedding(tmp_path, monkeypatch):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection("Inference", "inference", "https://ml.example", "token")
+
+    def response(url, *_args, **_kwargs):
+        if url.endswith("listEndpoints"):
+            return {"endpoints": [{"name": "embedqa", "state": "Running"}]}
+        return {
+            "name": "embedqa",
+            "url": "https://ml.example/endpoints/embedqa/v1/embeddings",
+            "api_standard": "openai",
+            "model_name": "nvidia/llama-3.2-nv-embedqa-1b-v2",
+            "task": "EMBED",
+        }
+
+    monkeypatch.setattr(catalog, "_request", response)
+    model = catalog.discover(connection["id"])[0]
+
+    assert model["protocol"] == "openai"
+    assert model["serving_engine"] == "nim"
+    assert model["engine_source"] == "model"
+    assert model["task_family"] == "embedding"
+    assert model["requires_input_type"] is True
+    assert model["embedding_input_types"] == ["query", "passage"]
+    assert model["canonical_model_name"] == "nvidia/llama-3.2-nv-embedqa-1b-v2"
+
+
+def test_endpoint_profile_prefers_explicit_vllm_and_detects_triton_route():
+    vllm = ClouderaCatalog._endpoint_profile({
+        "url": "https://ml.example/v1",
+        "model_name": "nvidia/llama-3.2-nv-embedqa-1b-v2",
+        "task": "EMBED",
+        "runtime": "vLLM",
+        "api_standard": "openai",
+    })
+    triton = ClouderaCatalog._endpoint_profile({
+        "url": "https://ml.example/v2/models/fraud/infer",
+        "model_name": "fraud",
+    })
+
+    assert vllm["serving_engine"] == "vllm"
+    assert vllm["requires_input_type"] is False
+    assert triton["serving_engine"] == "triton"
+    assert triton["task_family"] == "inference"
+
+
+def test_endpoint_profile_recognizes_nim_runtime_wrapping_triton():
+    profile = ClouderaCatalog._endpoint_profile({
+        "url": "https://ml.example/endpoints/embedqa/v1/embeddings",
+        "model_name": "nvidia/llama-3.2-nv-embedqa-1b-v2",
+        "task": "EMBED",
+        "api_standard": "openai",
+        "runtime_info": {
+            "runtime_name": "nim-nvidia-llama-32-nv-embedqa-1b-v2-v1.10.0",
+            "image_identifier": "registry/cloudera_thirdparty/nim/nvidia/embedqa:1.10.0",
+        },
+        "revisions": [{"container": "triton-inference-server"}],
+    })
+
+    assert profile["serving_engine"] == "nim"
+    assert profile["runtime_backend"] == "triton"
+    assert profile["requires_input_type"] is True
 
 
 def test_discovers_workbench_deployments(tmp_path, monkeypatch):
@@ -208,6 +301,36 @@ def test_openai_probe_does_not_duplicate_route_returned_by_cloudera(tmp_path, mo
     assert result["ok"] is True
 
 
+def test_nim_embedding_probe_adds_required_query_contract(tmp_path, monkeypatch):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection("Inference", "inference", "https://ml.example", "cdp-token")
+
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    def accepted(request, timeout=20):
+        assert request.full_url == "https://ml.example/endpoints/embedqa/v1/embeddings"
+        assert request.headers["Authorization"] == "Bearer cdp-token"
+        assert json.loads(request.data) == {
+            "model": "nvidia/llama-3.2-nv-embedqa-1b-v2",
+            "input": ["health check"],
+            "input_type": "query",
+        }
+        return Response()
+
+    monkeypatch.setattr("gateway.cloudera.urllib.request.urlopen", accepted)
+    result = catalog.probe_model(
+        connection["id"], "embedqa", "https://ml.example/endpoints/embedqa/v1/embeddings",
+        "openai", "nvidia/llama-3.2-nv-embedqa-1b-v2-query", "EMBED", False,
+        "nim", True,
+    )
+
+    assert result["ok"] is True
+    assert result["probe_contract"] == "nim-embedding-query"
+
+
 def test_onpremise_token_renewal_replaces_connection_token(tmp_path, monkeypatch):
     catalog = ClouderaCatalog(tmp_path)
     old = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 60)
@@ -231,6 +354,55 @@ def test_onpremise_token_renewal_replaces_connection_token(tmp_path, monkeypatch
     visible = catalog.connections()[0]
     assert visible["token_renewed_at"]
     assert visible["token_expires_at"] == result["token_expires_at"]
+
+
+def test_onpremise_732_uses_manual_knox_credential_and_never_basic_auth(tmp_path, monkeypatch):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection(
+        "Private 7.3.2", "inference", "https://ml.private", "opaque-knox-key",
+        platform="onpremise", workload_user="must-not-be-stored", workload_password="secret",
+        renewal_url="https://knox.private:8443/gateway/homepage/knoxtoken/api/v2/token",
+        onpremise_version="7.3.2_plus",
+    )
+
+    assert connection["renewal_ready"] is False
+    assert connection["renewal_supported"] is False
+    assert connection["credential_lifecycle"] == "long_lived_unverified"
+    assert connection["has_workload_password"] is False
+    assert catalog._connection_record(connection["id"])["workload_user"] == ""
+    monkeypatch.setattr("gateway.cloudera.urllib.request.urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("network")))
+    try:
+        catalog.renew_token(connection["id"], force=True)
+    except RuntimeError as exc:
+        assert "Token API v2 con SSO" in str(exc)
+    else:
+        raise AssertionError("Knox 7.3.2 homepage no debe renovarse mediante Basic")
+
+
+def test_expiring_manual_token_is_reported_without_claiming_renewal(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    token = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+    connection = catalog.save_connection(
+        "Private 7.3.2", "workbench", "https://ml.private", token,
+        platform="onpremise", onpremise_version="7.3.2_plus",
+    )
+
+    assert connection["token_expires_at"]
+    assert connection["credential_lifecycle"] == "expiring_manual"
+    assert connection["renewal_ready"] is False
+
+
+def test_cloud_declared_expiry_is_used_when_credential_is_opaque(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection("Cloud", "inference", "https://ml.example", "opaque-token")
+    data = catalog._read()
+    record = next(item for item in data["connections"] if item["id"] == connection["id"])
+    record["token_expire_at"] = (datetime.now(timezone.utc).timestamp() + 3600) * 1000
+    catalog._write(data)
+
+    visible = catalog.connections()[0]
+    assert visible["token_expires_at"]
+    assert visible["credential_lifecycle"] == "expiring_manual"
 
 
 def test_missing_token_is_generated_by_the_automatic_renewal_flow(tmp_path, monkeypatch):

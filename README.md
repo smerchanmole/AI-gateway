@@ -136,7 +136,7 @@ The Cloudera application runtime must have outbound DNS and HTTPS access to both
 
 #### Cloudera on-premises example
 
-Exact hostnames and gateway paths depend on the installation. Use values supplied by the platform administrator, for example:
+The form asks for the CDP Base Runtime generation because the supported unattended credential flow changes at 7.3.2. Exact hostnames and gateway paths depend on the installation.
 
 | Field | Example |
 |---|---|
@@ -145,10 +145,14 @@ Exact hostnames and gateway paths depend on the installation. Use values supplie
 | Full model endpoint URL | `https://ml.company.example/namespaces/serving-default/endpoints/my-model/openai/v1` |
 | Base URL entered in the form | `https://ml.company.example` |
 | Discovery API used by IA Gateway | `https://ml.company.example/api/v1alpha1/listEndpoints` for AI Inference |
-| Renewal URL | `https://cdp.company.example/gateway/cdp-proxy-api/knox-token-management/token` |
-| Credentials | `WORKLOAD-USER` and `WORKLOAD-PASS` |
+| Runtime before 7.3.2 | Complete Basic-enabled Knox token URL, for example `https://service.company.example/gateway/authtkn/knoxtoken/api/v1/token` |
+| Credentials before 7.3.2 | `WORKLOAD-USER` and `WORKLOAD-PASS`; IA Gateway obtains a fresh JWT before expiry |
+| Runtime 7.3.2+ | Prefer a long-lived Knox API key for AI Inference, or paste a current JWT |
+| Knox v2 reference URL | `https://knox.company.example:8443/gateway/homepage/knoxtoken/api/v2/token` |
 
-The on-premises renewal URL must be the complete Knox token endpoint and end in `/token`. Replace every example hostname and path with the values published by your Cloudera administrator.
+Do not paste the central CDP console or the interactive page ending in `/token-generation/index.html`. In Runtime 7.3.2+, the `homepage` topology authenticates with an SSO cookie, so IA Gateway deliberately does not claim that it can renew that credential with workload username/password. Ask the platform administrator for a non-interactive Knox topology if automatic rotation is required.
+
+Credential lifecycle is always reported explicitly. JWT expiry is read from the `exp` claim. Cloud JWTs and legacy Basic-enabled Knox JWTs are regenerated ten minutes before expiry when all generation fields are present. Opaque Knox and Workbench API keys do not expose an expiry claim, so IA Gateway reports their expiry as unknown and never promises automatic renewal; verify and rotate them according to the policy configured in Cloudera.
 
 You can either paste an existing CDP token/API v2 key or leave the token blank when complete renewal credentials are provided. IA Gateway then requests the initial token and subsequently renews it in the background. Secret values are stored in SQLite with file mode `0600` and are never returned to the browser.
 
@@ -163,6 +167,8 @@ You can either paste an existing CDP token/API v2 key or leave the token blank w
 7. Select **Add model** and apply the pending LiteLLM restart.
 
 A newly added model requires a LiteLLM restart because LiteLLM must rebuild its router. Token generation and renewal do not require a restart.
+
+AI Gateway reports the HTTP protocol separately from the serving stack. An endpoint can therefore be OpenAI-compatible while running NVIDIA NIM, vLLM, or Triton underneath. For asymmetric NVIDIA NIM embedding models, discovery exposes two explicit drafts: `-query` for user questions and `-passage` for document ingestion. Configure both aliases when the RAG client can select them independently; using the query role to index documents can materially reduce retrieval quality. Triton/KServe v2 endpoints are checked through their readiness route until a tensor schema-specific adapter is configured.
 
 ### 6. Configure an optional guardrail
 

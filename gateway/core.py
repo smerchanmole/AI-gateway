@@ -363,7 +363,7 @@ class GatewayManager:
             provider_model = str(params.get("model", ""))
             # LiteLLM soporta muchos endpoints. Para esta UI basta una heurística
             # explícita que distingue los embeddings locales conocidos del chat.
-            searchable_name = f"{name} {provider_model}".lower()
+            searchable_name = f"{name} {provider_model} {model_info.get('dashboard_task', '')}".lower()
             api_base = str(params.get("api_base", ""))
             api_hostname = (urlparse(api_base).hostname or "").lower()
             cloudera_kind = str(model_info.get("dashboard_cloudera_kind") or "")
@@ -388,9 +388,12 @@ class GatewayManager:
                 "drop_params": bool(params.get("drop_params", False)),
                 "fallbacks": fallback_map.get(name, []),
                 "enabled": name not in disabled,
-                "mode": "embedding" if "embedding" in searchable_name or "bge-" in searchable_name else "chat",
+                "mode": "embedding" if "embed" in searchable_name or "bge-" in searchable_name else "chat",
                 "source": "cloudera" if is_cloudera else ("ollama" if provider_model.startswith("ollama/") else "remote"),
                 "cloudera_kind": cloudera_kind,
+                "serving_engine": str(model_info.get("dashboard_serving_engine") or ""),
+                "task": str(model_info.get("dashboard_task") or ""),
+                "embedding_input_type": str(model_info.get("dashboard_embedding_input_type") or ""),
             })
         return result
 
