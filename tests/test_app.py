@@ -354,6 +354,7 @@ def test_guided_cloudera_model_preserves_discovered_engine_and_embedding_role(mo
         "dashboard_task": "EMBED",
         "dashboard_embedding_input_type": "query",
     }
+    assert captured[0]["litellm_params"]["encoding_format"] == "float"
 
 
 def test_guided_model_config_rejects_invalid_environment_name(client):

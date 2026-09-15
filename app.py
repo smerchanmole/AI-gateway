@@ -598,6 +598,11 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
     if model.api_key_env and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", model.api_key_env.strip()):
         raise RuntimeError("La variable API key debe tener formato MAYUSCULAS_CON_GUIONES_BAJOS")
     params: dict[str, object] = {"model": provider_model, "drop_params": model.drop_params}
+    if (model.source == "cloudera" and model.serving_engine == "nim"
+            and "embed" in model.task.lower()):
+        # LiteLLM 1.83.9 convierte la ausencia de este campo en JSON null. Los
+        # NIM de embeddings validan estrictamente el enum float|base64.
+        params["encoding_format"] = "float"
     if model.api_base.strip(): params["api_base"] = model.api_base.strip()
     if model.api_key_env.strip(): params["api_key"] = f"os.environ/{model.api_key_env.strip()}"
     if model.reasoning_effort: params["reasoning_effort"] = model.reasoning_effort
@@ -900,7 +905,7 @@ async def test_model(name: str, test: TestCall, request: Request):
     # pruebas engañosas y permite mantener una única interfaz en el navegador.
     endpoint = "embeddings" if model["mode"] == "embedding" else "chat/completions"
     payload = (
-        {"model": name, "input": prompt}
+        {"model": name, "input": prompt, "encoding_format": "float"}
         if model["mode"] == "embedding"
         else {"model": name, "messages": [{"role": "user", "content": prompt}]}
     )

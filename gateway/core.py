@@ -265,7 +265,8 @@ class GatewayManager:
                 raise RuntimeError(f"Ya existe un modelo con el alias '{new_name}'")
             old_params = dict(models[index].get("litellm_params") or {})
             new_params = dict(entry.get("litellm_params") or {})
-            managed = {"model", "api_base", "api_key", "reasoning_effort", "keep_alive", "timeout", "drop_params"}
+            managed = {"model", "api_base", "api_key", "reasoning_effort", "keep_alive", "timeout",
+                       "drop_params", "encoding_format"}
             if "api_key" not in new_params and old_params.get("api_key"):
                 managed.remove("api_key")
             models[index] = {**models[index], "model_name": new_name,
@@ -541,6 +542,15 @@ class GatewayManager:
                 model_info.get("dashboard_cloudera_kind") == "workbench"
                 or api_hostname.startswith("modelservice.")
             )
+            is_nim_embedding = (
+                str(model_info.get("dashboard_serving_engine") or "").lower() == "nim"
+                and "embed" in str(model_info.get("dashboard_task") or "").lower()
+            ) or bool(re.search(r"(?:nv-embedqa|retriever).*(?:-query|-passage)$", provider_model,
+                                flags=re.IGNORECASE))
+            if is_nim_embedding:
+                # LiteLLM 1.83.9 envía encoding_format=null cuando el cliente
+                # lo omite; NVIDIA NIM sólo admite float o base64.
+                params.setdefault("encoding_format", "float")
             if is_workbench:
                 has_workbench_models = True
                 # Model Service suele imponer un deadline cercano a 30 s. Una
