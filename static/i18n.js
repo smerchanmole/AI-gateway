@@ -27,7 +27,35 @@
     ["Aplicar cambios pendientes", "Apply pending changes", "Applica modifiche in sospeso"],
     ["Arrancar", "Start", "Avvia"], ["Detener", "Stop", "Arresta"],
     ["Secciones principales", "Main sections", "Sezioni principali"],
-    ["Modelos", "Models", "Modelli"], ["Configuración", "Configuration", "Configurazione"], ["Logs", "Logs", "Log"],
+    ["Modelos", "Models", "Modelli"], ["Configuración", "Configuration", "Configurazione"], ["Batería de pruebas", "Load testing", "Test di carico"], ["Logs", "Logs", "Log"],
+    ["CAPACIDAD · EXTREMO A EXTREMO", "CAPACITY · END TO END", "CAPACITÀ · END TO END"],
+    ["Encuentra el punto de saturación del gateway y de cada modelo con carga escalonada y respuestas autocorregibles.", "Find the saturation point of the gateway and each model with stepped load and automatically checked answers.", "Trova il punto di saturazione del gateway e di ogni modello con carico progressivo e risposte verificate automaticamente."],
+    ["Sin ejecutar", "Not run", "Non eseguito"], ["En ejecución", "Running", "In esecuzione"], ["Deteniendo", "Stopping", "Arresto in corso"], ["Completada", "Completed", "Completato"], ["Cancelada", "Cancelled", "Annullato"],
+    ["Diseño de la prueba", "Test design", "Configurazione del test"], ["Control de carga", "Load control", "Controllo del carico"],
+    ["La concurrencia sube nivel a nivel, nunca empieza directamente en el máximo.", "Concurrency increases one level at a time; it never starts directly at the maximum.", "La concorrenza aumenta un livello alla volta, senza iniziare direttamente dal massimo."],
+    ["1 · Modelos y techo de concurrencia", "1 · Models and concurrency ceiling", "1 · Modelli e limite di concorrenza"],
+    ["2 · Cuándo termina", "2 · Stopping rule", "2 · Criterio di arresto"], ["3 · Qué quieres medir", "3 · What to measure", "3 · Cosa misurare"],
+    ["Número de peticiones", "Number of requests", "Numero di richieste"], ["Tiempo total", "Total time", "Tempo totale"],
+    ["Misma cantidad por modelo", "Same amount per model", "Stessa quantità per modello"], ["Misma duración por modelo", "Same duration per model", "Stessa durata per modello"],
+    ["Peticiones por modelo", "Requests per model", "Richieste per modello"], ["Timeout por petición", "Per-request timeout", "Timeout per richiesta"],
+    ["Se reparte entre todos los niveles.", "Split across all levels.", "Suddiviso tra tutti i livelli."],
+    ["Estrategia", "Strategy", "Strategia"], ["Gateway completo · modelos en paralelo", "Full gateway · models in parallel", "Gateway completo · modelli in parallelo"],
+    ["Capacidad por modelo · uno tras otro", "Per-model capacity · one at a time", "Capacità per modello · uno alla volta"],
+    ["Mide la presión agregada sobre IA Gateway.", "Measures aggregate pressure on IA Gateway.", "Misura la pressione aggregata su IA Gateway."],
+    ["Aísla cada backend para comparar su capacidad sin interferencias.", "Isolates each backend for an interference-free capacity comparison.", "Isola ogni backend per confrontarne la capacità senza interferenze."],
+    ["Calentar cada modelo con una petición no contabilizada", "Warm up each model with one uncounted request", "Riscalda ogni modello con una richiesta non conteggiata"],
+    ["Carga prevista", "Planned load", "Carico previsto"], ["Iniciar batería", "Start test", "Avvia test"], ["Detener con seguridad", "Stop safely", "Arresta in sicurezza"],
+    ["Preparado para medir", "Ready to measure", "Pronto per la misurazione"],
+    ["Se usarán sumas, ordenaciones, copia exacta y transformaciones simples para separar disponibilidad de corrección.", "Arithmetic, sorting, exact copy, and simple transformations separate availability from correctness.", "Somme, ordinamenti, copia esatta e semplici trasformazioni separano la disponibilità dalla correttezza."],
+    ["TTFT y latencia p50 / p95 / p99", "TTFT and p50 / p95 / p99 latency", "TTFT e latenza p50 / p95 / p99"],
+    ["Throughput, errores y respuestas correctas", "Throughput, errors, and correct answers", "Throughput, errori e risposte corrette"],
+    ["Concurrencia sostenible antes de degradarse", "Sustainable concurrency before degradation", "Concorrenza sostenibile prima del degrado"],
+    ["Descargar JSON", "Download JSON", "Scarica JSON"], ["Prueba en curso", "Test in progress", "Test in corso"], ["Midiendo bajo carga", "Measuring under load", "Misurazione sotto carico"],
+    ["Carga escalonada en curso", "Stepped load in progress", "Carico progressivo in corso"], ["Medición completada", "Measurement completed", "Misurazione completata"], ["Medición interrumpida", "Measurement interrupted", "Misurazione interrotta"],
+    ["Peticiones", "Requests", "Richieste"], ["Throughput conjunto", "Combined throughput", "Throughput complessivo"], ["Error global", "Overall error rate", "Errore globale"], ["Corrección global", "Overall correctness", "Correttezza globale"],
+    ["Completadas", "Completed", "Completate"], ["Rendimiento", "Throughput", "Rendimento"], ["Latencia p95", "p95 latency", "Latenza p95"], ["Errores", "Errors", "Errori"], ["Correctas", "Correct", "Corrette"], ["Nivel sostenible", "Sustainable level", "Livello sostenibile"],
+    ["CONCURRENCIA", "CONCURRENCY", "CONCORRENZA"], ["TTFT P95 EN VIVO", "LIVE TTFT P95", "TTFT P95 IN TEMPO REALE"], ["Milisegundos", "Milliseconds", "Millisecondi"],
+    ["Cian nivel · violeta en vuelo", "Cyan level · violet in flight", "Ciano livello · viola in esecuzione"], ["Escalón", "Stage", "Livello"], ["Total p95", "Total p95", "Totale p95"], ["Error", "Error", "Errore"],
     ["Inventario y estado operativo", "Inventory and operational status", "Inventario e stato operativo"],
     ["Cargando modelos…", "Loading models…", "Caricamento modelli…"],
     ["Prueba rápida", "Quick test", "Test rapido"],
@@ -316,6 +344,9 @@
       [/^puerto (\d+)$/, "port $1"], [/^(\d+) encontrados · (\d+) activos · (\d+) OpenAI compatibles$/, "$1 found · $2 active · $3 OpenAI compatible"],
       [/^Comprobando (\d+)\/(\d+) modelos…$/, "Checking $1/$2 models…"], [/^(\d+) con error$/, "$1 failed"], [/^(\d+) sin probar$/, "$1 untested"],
       [/^Caduca: (.+)$/, "Expires: $1"], [/^Réplicas: (.+)$/, "Replicas: $1"], [/^(\d+) modelos configurados$/, "$1 models configured"]
+      , [/^Nivel (\d+) · (\d+) en vuelo$/, "Level $1 · $2 in flight"], [/^Nivel (\d+)$/, "Level $1"],
+      [/^Mínimo (\d+) para alcanzar realmente el nivel (\d+)\.$/, "Minimum $1 to actually reach level $2."],
+      [/^(\d+) peticiones$/, "$1 requests"], [/^(\d+) s previstos$/, "$1 s expected"]
     ],
     it: [
       [/^(\d+) modelos?$/, "$1 modelli"], [/^(\d+) errores$/, "$1 errori"], [/^(\d+) entrada · (\d+) salida$/, "$1 input · $2 output"],
@@ -336,6 +367,9 @@
       [/^puerto (\d+)$/, "porta $1"], [/^(\d+) encontrados · (\d+) activos · (\d+) OpenAI compatibles$/, "$1 trovati · $2 attivi · $3 compatibili OpenAI"],
       [/^Comprobando (\d+)\/(\d+) modelos…$/, "Verifica di $1/$2 modelli…"], [/^(\d+) con error$/, "$1 con errore"], [/^(\d+) sin probar$/, "$1 non testati"],
       [/^Caduca: (.+)$/, "Scade: $1"], [/^Réplicas: (.+)$/, "Repliche: $1"], [/^(\d+) modelos configurados$/, "$1 modelli configurati"]
+      , [/^Nivel (\d+) · (\d+) en vuelo$/, "Livello $1 · $2 in esecuzione"], [/^Nivel (\d+)$/, "Livello $1"],
+      [/^Mínimo (\d+) para alcanzar realmente el nivel (\d+)\.$/, "Minimo $1 per raggiungere effettivamente il livello $2."],
+      [/^(\d+) peticiones$/, "$1 richieste"], [/^(\d+) s previstos$/, "$1 s previsti"]
     ]
   };
 

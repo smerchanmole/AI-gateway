@@ -21,10 +21,11 @@
     <div class="gateway-control"><div class="status-wrap"><span id="status" class="status"><i></i><span>Comprobando…</span></span><span id="resources" class="resources">CPU — · RAM —</span><span id="persistence" class="persistence" role="status">SQLite · tokens sin reinicio · modelos con reinicio</span><span class="account-actions"><label class="language-picker"><span>Idioma</span><select class="language-select" aria-label="Idioma de la interfaz"><option value="es">ES</option><option value="en">EN</option><option value="it">IT</option></select></label><button id="change-password-button" type="button">Cambiar password</button><button id="logout-button" type="button">Salir</button></span></div><button id="apply-config-button" class="secondary pending-button" hidden>Aplicar cambios pendientes</button><button id="gateway-button" class="primary" disabled>Arrancar</button></div>
   </header>
 
-  <!-- Las tres áreas son vistas de una sola SPA; JavaScript conserva ?tab=. -->
+  <!-- Las áreas son vistas de una sola SPA; JavaScript conserva ?tab=. -->
   <nav class="primary-tabs" aria-label="Secciones principales">
     <button class="primary-tab active" data-view="models" aria-pressed="true">Modelos</button>
     <button class="primary-tab" data-view="config" aria-pressed="false">Configuración</button>
+    <button class="primary-tab" data-view="benchmark" aria-pressed="false">Batería de pruebas</button>
     <button class="primary-tab" data-view="logs" aria-pressed="false">Logs</button>
   </nav>
 
@@ -146,6 +147,34 @@
       <div class="config-panel yaml-panel"><div class="panel-heading"><h3>Editor avanzado de config.yaml</h3><span>Fuente de verdad · ancho completo</span></div><textarea id="yaml-editor" class="yaml-editor" spellcheck="false" aria-label="Contenido de config.yaml"></textarea><div class="config-actions"><p id="yaml-status" class="inline-status" role="status"></p><div class="action-group"><button id="validate-yaml" class="secondary" type="button">Validar</button><button id="save-yaml" class="primary" type="button">Validar y guardar</button></div></div></div>
       <p class="config-note">Los cambios requieren reiniciar LiteLLM. Al guardar podrás aplicarlos ahora o dejarlos pendientes.</p>
       <div class="config-panel backup-panel"><div class="panel-heading"><div><p class="model-kicker">COPIA DE SEGURIDAD</p><h3>Exportar o restaurar config.yaml</h3><p>La descarga conserva las referencias a credenciales, pero nunca expande sus valores. Trata el fichero como configuración sensible.</p></div><span>Formato YAML · máximo 1 MB</span></div><div class="backup-actions"><a id="download-yaml-backup" class="download-button" href="/api/config/backup">Descargar backup YAML</a><label class="backup-file">Seleccionar backup<input id="yaml-import-file" type="file" accept=".yaml,.yml,application/yaml,text/yaml" aria-describedby="yaml-import-hint"></label><button id="import-yaml-backup" class="primary" type="button" disabled>Validar e importar</button></div><p id="yaml-import-hint" class="backup-hint">Importar sustituye config.yaml después de validarlo. Si LiteLLM está activo, podrás aplicarlo ahora o dejarlo pendiente.</p><p id="yaml-import-status" class="inline-status" role="status" aria-live="polite"></p></div>
+    </section>
+  </div>
+
+  <!-- BATERÍA: carga escalonada, corrección objetiva y telemetría en vivo. -->
+  <div id="view-benchmark" class="page-view" hidden>
+    <section class="benchmark-section">
+      <div class="section-title benchmark-title"><div><p class="eyebrow">CAPACIDAD · EXTREMO A EXTREMO</p><h2>Batería de pruebas</h2><p>Encuentra el punto de saturación del gateway y de cada modelo con carga escalonada y respuestas autocorregibles.</p></div><span id="benchmark-state" class="benchmark-state idle">Sin ejecutar</span></div>
+      <div class="benchmark-shell">
+        <form id="benchmark-form" class="benchmark-config">
+          <div class="panel-heading"><div><h3>Diseño de la prueba</h3><p>La concurrencia sube nivel a nivel, nunca empieza directamente en el máximo.</p></div><span>Control de carga</span></div>
+          <fieldset class="benchmark-fieldset"><legend>1 · Modelos y techo de concurrencia</legend><div id="benchmark-models" class="benchmark-model-picker"><p class="empty compact">Cargando modelos…</p></div><small>Selecciona hasta 8 modelos. La suma de concurrencias no puede superar 64.</small></fieldset>
+          <fieldset class="benchmark-fieldset"><legend>2 · Cuándo termina</legend><div class="choice-cards"><label><input type="radio" name="benchmark-limit" value="requests" checked><span><b>Número de peticiones</b><small>Misma cantidad por modelo</small></span></label><label><input type="radio" name="benchmark-limit" value="duration"><span><b>Tiempo total</b><small>Misma duración por modelo</small></span></label></div><div class="benchmark-two-cols"><label id="benchmark-requests-field">Peticiones por modelo<input id="benchmark-requests" type="number" min="1" max="10000" value="50"><small id="benchmark-minimum-hint">Mínimo según la concurrencia elegida.</small></label><label id="benchmark-duration-field" hidden>Segundos por modelo<input id="benchmark-duration" type="number" min="5" max="3600" value="60"><small>Se reparte entre todos los niveles.</small></label><label>Timeout por petición <span>(s)</span><input id="benchmark-timeout" type="number" min="5" max="300" value="120"></label></div></fieldset>
+          <fieldset class="benchmark-fieldset"><legend>3 · Qué quieres medir</legend><label>Estrategia<select id="benchmark-strategy"><option value="parallel">Gateway completo · modelos en paralelo</option><option value="sequential">Capacidad por modelo · uno tras otro</option></select><small id="benchmark-strategy-help">Mide la presión agregada sobre IA Gateway.</small></label><label class="check-field"><input id="benchmark-warmup" type="checkbox" checked> Calentar cada modelo con una petición no contabilizada</label></fieldset>
+          <div class="benchmark-estimate" aria-live="polite"><span>Carga prevista</span><strong id="benchmark-estimate">—</strong><small id="benchmark-estimate-detail">Selecciona al menos un modelo.</small></div>
+          <p id="benchmark-form-status" class="inline-status" role="status" aria-live="polite"></p>
+          <div class="benchmark-actions"><button id="benchmark-start" class="primary" type="submit">Iniciar batería</button><button id="benchmark-cancel" class="danger" type="button" hidden>Detener con seguridad</button></div>
+        </form>
+
+        <div class="benchmark-live">
+          <div id="benchmark-empty" class="benchmark-empty"><span class="benchmark-radar" aria-hidden="true"><i></i></span><h3>Preparado para medir</h3><p>Se usarán sumas, ordenaciones, copia exacta y transformaciones simples para separar disponibilidad de corrección.</p><ul><li>TTFT y latencia p50 / p95 / p99</li><li>Throughput, errores y respuestas correctas</li><li>Concurrencia sostenible antes de degradarse</li></ul></div>
+          <div id="benchmark-results" hidden>
+            <div class="benchmark-run-head"><div><p id="benchmark-run-label" class="model-kicker">EJECUCIÓN</p><h3 id="benchmark-run-title">Prueba en curso</h3></div><a id="benchmark-download" class="download-button" href="/api/benchmarks/current/report" hidden>Descargar JSON</a></div>
+            <div class="benchmark-progress"><div><span id="benchmark-progress-label">Preparando…</span><strong id="benchmark-progress-value">0%</strong></div><progress id="benchmark-progress" max="100" value="0">0%</progress></div>
+            <div id="benchmark-overview" class="benchmark-overview"></div>
+            <div id="benchmark-model-results" class="benchmark-model-results"></div>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 

@@ -18,6 +18,7 @@ The same Python application runs locally and as a Cloudera AI Workbench applicat
 - Cloudera model discovery, endpoint probing, and token generation/renewal.
 - SQLite-only persistence for Cloudera credentials, dynamic tokens, and structured request logs.
 - Daily KPIs, hourly activity, origin/provider IPs, TTFT, duration, tokens, and Excel export.
+- Controlled load batteries with stepped concurrency, real TTFT percentiles, correctness checks, live charts, cancellation, and JSON reports.
 - Spanish, English, and Italian dashboard languages, persisted per browser.
 - Built-in administrator login with forced password change on first access.
 
@@ -159,7 +160,7 @@ The on-premises panel offers two deliberately separate modes:
 1. **Existing credential** accepts a UMS `CDP_TOKEN`, copied from Model Endpoint Details or produced by `cdp iam generate-workload-auth-token --workload-name DE`. A Knox API key is also accepted only for Cloudera AI 1.5.5 SP3 with Runtime 7.1.9 SP2 or 7.3.2, the combinations certified by Cloudera.
 2. **Automatic UMS `CDP_TOKEN`** uses the private Management Console origin. CDP CLI builds the `/api/v1/iam/generateWorkloadAuthToken` operation, signs it with the access key/private key, generates the first token immediately, and replaces it early without restarting LiteLLM.
 
-Private Control Planes often use a corporate or self-signed CA that is not present in the WebApp container. For those connections select **Private CA (PEM)** and paste the root CA plus any intermediate certificates; IA Gateway stores the bundle locally, invokes CDP CLI with `--ca-bundle`, and reuses the same trust policy for catalogue discovery and model probes. Trusting the certificate in a workstation browser does not install it in the Cloudera WebApp. **Do not verify (insecure)** is available only for short diagnostic tests and should not be used for automatic renewal in production.
+Private Control Planes often use a corporate or self-signed CA that is not present in the WebApp container. For those connections select **Private CA (PEM)** and paste the root CA plus any intermediate certificates; IA Gateway stores the bundle locally, invokes CDP CLI with `--ca-bundle`, and reuses the same trust policy for IAM, catalogue discovery, model probes, validation, and the live LiteLLM/OpenAI client. The latter installs a verified SSL context inside LiteLLM because its shared `aiohttp` client does not inherit a per-deployment CA path in every code path. Public roots, certificate dates, and hostname checks remain enabled. Trusting the certificate in a workstation browser does not install it in the Cloudera WebApp. **Do not verify (insecure)** is available only for short diagnostic tests and should not be used for automatic renewal in production.
 
 A general platform username/password is **not** a documented non-interactive credential for `iam generate-workload-auth-token`. A Basic-authenticated Knox token endpoint issues a different service JWT and must not be presented as a UMS `CDP_TOKEN`; consequently this CAI Inference form does not offer that misleading combination.
 
@@ -397,6 +398,21 @@ The guided editor accepts typed extras as `VARIABLE=VALUE`, one per line. JSON b
 Before a new or edited model can be saved, IA Gateway sends a minimal real inference using all configured request parameters. A successful result issues a short-lived validation proof bound to that exact configuration. Triton requires an explicit inference payload because its tensor schema cannot be inferred generically. The advanced YAML editor accepts unchanged legacy models, but rejects new or modified model definitions without a matching validation fingerprint.
 
 An optional **configuration advisor** can be selected next to the guardrail. From each model row, **Talk to the advisor** collects the use case and asks that model for a structured recommendation. Recommendations remain untrusted suggestions: the user reviews and applies them to the form, and the resulting configuration must still pass the real provider test.
+
+## Load testing
+
+Open **Batería de pruebas** after LiteLLM and the selected models are active. For each model choose its maximum concurrency. A value of 5 executes five separate stages—1, 2, 3, 4, and 5 simultaneous sessions—so the result shows where latency or errors begin to degrade instead of reporting only one arbitrary load point.
+
+Choose exactly one stopping rule:
+
+- **Requests per model** assigns the same request budget to every selected model. The UI enforces enough requests to exercise every concurrency stage.
+- **Seconds per model** divides the configured duration across the stages and continues issuing requests until each stage deadline.
+
+The **parallel** strategy runs the selected models together and measures aggregate gateway pressure. The **sequential** strategy isolates one backend at a time for a fairer capacity comparison. An optional warm-up request is excluded from the measured totals.
+
+Chat tests use deterministic arithmetic, sorting, exact-copy, and transformation prompts. Streaming is enabled so TTFT is measured at the first real output token; the final answer is checked automatically. Embedding tests validate that the endpoint returns a non-empty numeric vector and report total latency because TTFT does not apply. Live results include p50/p95/p99, throughput, error and correctness rates, per-stage degradation, in-flight concurrency, and an estimated sustainable level. A run can be stopped cooperatively and its current or final report downloaded as JSON.
+
+The sustainable level is the highest measured stage with no more than 1% errors, at least 95% correct answers, and p95 latency no more than twice the level-1 baseline. Treat it as an operational starting point, not a capacity guarantee: repeat tests with representative prompt lengths, model parameters, replica counts, guardrails, network placement, and production-like durations before setting limits.
 
 ## Authentication and security boundaries
 

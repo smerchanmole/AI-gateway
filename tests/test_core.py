@@ -14,7 +14,7 @@ import io
 
 from gateway.excel_export import build_logs_xlsx
 from gateway.log_store import daily_log_path, insert_log, log_kpis, read_day_logs, read_logs
-from gateway.litellm_callback import DashboardLogger, _classify_with_guardrail, _origin_ip
+from gateway.litellm_callback import DashboardLogger, _classify_with_guardrail, _configure_private_ca, _origin_ip
 
 
 def make_manager(tmp_path: Path) -> GatewayManager:
@@ -82,6 +82,26 @@ def test_cloudera_alias_maps_to_provider_model_for_callback(tmp_path):
     assert dashboard["provider_models"]["nemotron-publico"] == "openai/nvidia/nemotron-3-super-120b-a12b"
 
 
+def test_active_config_repairs_legacy_double_openai_prefix(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["model_list"][0] = {
+        "model_name": "gptoss20b",
+        "litellm_params": {
+            "model": "openai/openai/gpt-oss-20b",
+            "api_base": "https://inference.example/endpoints/gptoss20b/v1",
+            "api_key": "os.environ/CLOUDERA_DEMO_CDP_TOKEN",
+        },
+        "model_info": {"dashboard_source": "cloudera", "dashboard_cloudera_kind": "inference"},
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    manager._write_active_config()
+    active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
+
+    assert active["model_list"][0]["litellm_params"]["model"] == "openai/gpt-oss-20b"
+
+
 def test_cloudera_active_config_keeps_supported_vllm_extra_body(tmp_path):
     manager = make_manager(tmp_path)
     config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
@@ -139,6 +159,23 @@ def test_cloudera_active_config_propagates_private_ca_to_litellm(tmp_path):
 
     assert ca_path.exists()
     assert ca_path.read_text(encoding="utf-8") == certificate.read_text(encoding="utf-8")
+
+
+def test_litellm_callback_installs_private_ca_context(tmp_path, monkeypatch):
+    import litellm
+    import ssl
+
+    certificate, _key = ensure_self_signed_certificate(tmp_path / "certificate")
+    ca_dir = tmp_path / "runtime" / "cloudera-ca"
+    ca_dir.mkdir(parents=True)
+    (ca_dir / "private.pem").write_text(certificate.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr("gateway.litellm_callback._root", lambda: tmp_path)
+    monkeypatch.setattr(litellm, "ssl_verify", True)
+
+    _configure_private_ca()
+
+    assert isinstance(litellm.ssl_verify, ssl.SSLContext)
+    assert not (litellm.ssl_verify.verify_flags & getattr(ssl, "VERIFY_X509_STRICT", 0))
 
 
 def test_workbench_model_loads_custom_provider_and_migrates_old_prefix(tmp_path):

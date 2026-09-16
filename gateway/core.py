@@ -668,6 +668,11 @@ class GatewayManager:
             api_key = str(params.get("api_key") or "")
             model_info = item.get("model_info") or {}
             public_name = str(item.get("model_name") or "")
+            if (model_info.get("dashboard_source") == "cloudera"
+                    or api_key.startswith("os.environ/CLOUDERA_")):
+                while provider_model.lower().startswith("openai/openai/"):
+                    provider_model = provider_model[len("openai/"):]
+                params["model"] = provider_model
             tls_verify = cloudera_catalog.tls_verification_for(
                 api_key, str(params.get("api_base") or ""), as_context=False,
             )

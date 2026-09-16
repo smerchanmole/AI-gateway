@@ -206,6 +206,62 @@ def test_dashboard_disables_cache_and_uses_test_tabs(client):
     assert 'id="download-yaml-backup"' in response.text
     assert 'id="yaml-import-file"' in response.text
     assert 'id="import-yaml-backup"' in response.text
+    assert 'data-view="benchmark"' in response.text
+    assert 'id="benchmark-form"' in response.text
+
+
+def test_cloudera_model_entry_deduplicates_openai_provider_prefix():
+    model = dashboard.ModelCreate(
+        model_name="gptoss20b", model="openai/openai/gpt-oss-20b",
+        api_base="https://inference.example/endpoints/gptoss20b/v1",
+        source="cloudera", cloudera_kind="inference",
+    )
+
+    entry = dashboard._model_entry(model)
+
+    assert entry["litellm_params"]["model"] == "openai/gpt-oss-20b"
+
+
+def test_benchmark_rejects_too_few_requests_for_concurrency(monkeypatch, client):
+    monkeypatch.setattr(dashboard.manager, "models", lambda: [{
+        "name": "modelo", "enabled": True, "mode": "chat", "provider_model": "openai/demo",
+    }])
+    monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
+    monkeypatch.setattr(dashboard.manager, "active_model_names", lambda: ["modelo"])
+
+    response = client.post("/api/benchmarks", json={
+        "targets": [{"model": "modelo", "max_concurrency": 5}],
+        "limit_mode": "requests", "requests_per_model": 10,
+    })
+
+    assert response.status_code == 422
+    assert "al menos 15 peticiones" in response.json()["detail"]
+
+
+def test_benchmark_starts_against_internal_gateway(monkeypatch, client):
+    captured = {}
+
+    class Runner:
+        def start(self, config, models, base_url, headers):
+            captured.update(config=config, models=models, base_url=base_url, headers=headers)
+            return {"id": "run", "status": "running", "models": {}}
+
+    monkeypatch.setattr(dashboard, "benchmarks", Runner())
+    monkeypatch.setattr(dashboard.manager, "models", lambda: [{
+        "name": "modelo", "enabled": True, "mode": "chat", "provider_model": "openai/demo",
+    }])
+    monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
+    monkeypatch.setattr(dashboard.manager, "active_model_names", lambda: ["modelo"])
+
+    response = client.post("/api/benchmarks", json={
+        "targets": [{"model": "modelo", "max_concurrency": 3}],
+        "limit_mode": "requests", "requests_per_model": 12,
+        "strategy": "parallel", "request_timeout_seconds": 30,
+    })
+
+    assert response.status_code == 200
+    assert captured["base_url"] == f"http://{dashboard.manager.host}:{dashboard.manager.port}"
+    assert captured["models"][0]["name"] == "modelo"
 
 
 def test_config_backup_downloads_exact_yaml_as_attachment(client):

@@ -252,6 +252,7 @@ from gateway.edge import EdgeProxy, public_gateway_port
 from gateway.excel_export import build_logs_xlsx
 from gateway.log_store import available_days, log_kpis, parse_day, read_day_logs
 from gateway.auth import AuthStore, AuthenticationError, LoginRateLimited
+from gateway.benchmark import BenchmarkRunner
 from gateway.tls import ensure_self_signed_certificate
 
 
@@ -263,6 +264,7 @@ INTERNAL_DASHBOARD_PORT = environment_port("IA_GATEWAY_DASHBOARD_PORT", 18080)
 manager = GatewayManager(ROOT)
 cloudera = ClouderaCatalog(ROOT / "runtime")
 auth = AuthStore(ROOT / "runtime")
+benchmarks = BenchmarkRunner()
 _MODEL_VALIDATIONS: dict[str, tuple[str, float]] = {}
 
 # En local el proxy de borde también termina TLS; dentro de Cloudera esa función pertenece
@@ -367,6 +369,7 @@ async def lifespan(_app: FastAPI):
         supervisor.cancel()
         with suppress(asyncio.CancelledError):
             await supervisor
+        await benchmarks.shutdown()
         # El proxy es hijo del panel y no debe quedar huérfano al cerrar la app.
         manager.stop()
         edge.stop()
@@ -500,6 +503,25 @@ class TestCall(BaseModel):
     """Texto introducido en «Prueba rápida»; el backend decide chat o embedding."""
 
     prompt: str
+
+
+class BenchmarkTarget(BaseModel):
+    """Modelo y techo de concurrencia que recorrerá de 1 hasta N."""
+
+    model: str = Field(min_length=1, max_length=128)
+    max_concurrency: int = Field(ge=1, le=32)
+
+
+class BenchmarkRequest(BaseModel):
+    """Configuración acotada de una campaña comparable y cancelable."""
+
+    targets: list[BenchmarkTarget] = Field(min_length=1, max_length=8)
+    limit_mode: str = "requests"
+    requests_per_model: int = Field(default=50, ge=1, le=10_000)
+    duration_seconds: int = Field(default=60, ge=5, le=3_600)
+    strategy: str = "parallel"
+    request_timeout_seconds: int = Field(default=120, ge=5, le=300)
+    warmup: bool = True
 
 
 class ConfigUpdate(BaseModel):
@@ -665,6 +687,12 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
     """Traduce el formulario a YAML sin aceptar claves secretas en claro."""
     name = model.model_name.strip()
     provider_model = model.model.strip()
+    if model.source == "cloudera" and model.cloudera_kind != "workbench":
+        # Algunas versiones de CAI devuelven `model_name=openai/...`; el
+        # borrador de UI ya lo normaliza, pero esta defensa protege también a
+        # clientes API antiguos y configuraciones pegadas a mano.
+        while provider_model.lower().startswith("openai/openai/"):
+            provider_model = provider_model[len("openai/"):]
     if not name or not provider_model:
         raise RuntimeError("Alias y modelo LiteLLM son obligatorios")
     if model.api_key_env and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", model.api_key_env.strip()):
@@ -988,6 +1016,86 @@ def models():
 def model_resources():
     """Separa métricas locales de proveedores remotos no observables."""
     return manager.model_resources()
+
+
+@app.post("/api/benchmarks")
+async def start_benchmark(request: BenchmarkRequest):
+    """Inicia carga escalonada contra los alias activos del propio gateway."""
+
+    if request.limit_mode not in {"requests", "duration"}:
+        raise HTTPException(422, "El límite debe ser por peticiones o por tiempo")
+    if request.strategy not in {"parallel", "sequential"}:
+        raise HTTPException(422, "La estrategia debe ser paralela o secuencial")
+    target_names = [target.model.strip() for target in request.targets]
+    if len(target_names) != len(set(target_names)):
+        raise HTTPException(422, "Cada modelo sólo puede aparecer una vez")
+    if sum(target.max_concurrency for target in request.targets) > 64:
+        raise HTTPException(422, "La concurrencia agregada no puede superar 64")
+    available = {item["name"]: item for item in manager.models()}
+    unknown = [name for name in target_names if name not in available]
+    if unknown:
+        raise HTTPException(404, f"Modelos no encontrados: {', '.join(unknown)}")
+    if not manager.is_running():
+        raise HTTPException(409, "Arranca LiteLLM antes de iniciar la batería")
+    active = set(manager.active_model_names())
+    unavailable = [name for name in target_names if not available[name].get("enabled") or name not in active]
+    if unavailable:
+        raise HTTPException(409, f"Modelos inactivos o pendientes de aplicar: {', '.join(unavailable)}")
+    if request.limit_mode == "requests":
+        for target in request.targets:
+            minimum = target.max_concurrency * (target.max_concurrency + 1) // 2
+            if request.requests_per_model < minimum:
+                raise HTTPException(
+                    422,
+                    f"{target.model} necesita al menos {minimum} peticiones para recorrer "
+                    f"los niveles 1–{target.max_concurrency}",
+                )
+    else:
+        highest = max(target.max_concurrency for target in request.targets)
+        if request.duration_seconds < highest * 2:
+            raise HTTPException(422, "Reserva al menos 2 segundos por nivel de concurrencia")
+    config = request.model_dump()
+    try:
+        return benchmarks.start(
+            config,
+            [available[name] for name in target_names],
+            f"http://{manager.host}:{manager.port}",
+            gateway_auth_headers(),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/benchmarks/current")
+async def current_benchmark():
+    """Entrega agregados y series acotadas para refresco en tiempo real."""
+
+    return benchmarks.snapshot()
+
+
+@app.post("/api/benchmarks/current/cancel")
+async def cancel_benchmark():
+    """Solicita parada cooperativa; las peticiones en vuelo pueden terminar."""
+
+    try:
+        return benchmarks.cancel()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/benchmarks/current/report")
+async def download_benchmark_report():
+    """Descarga el estado completo visible como evidencia reproducible."""
+
+    report = benchmarks.snapshot()
+    if report.get("status") == "idle":
+        raise HTTPException(404, "Todavía no hay resultados de una batería")
+    filename = f"ia-gateway-benchmark-{report['id']}.json"
+    return Response(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/config")

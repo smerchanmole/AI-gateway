@@ -11,6 +11,7 @@ import os
 import asyncio
 import json
 import socket
+import ssl
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ import urllib.request
 from zoneinfo import ZoneInfo
 
 from litellm.integrations.custom_logger import CustomLogger
+import litellm
 
 from gateway.log_store import daily_log_path, insert_log
 
@@ -27,6 +29,38 @@ def _root() -> Path:
     """Recupera la raíz que el proceso padre inyectó al arrancar LiteLLM."""
 
     return Path(os.environ.get("IA_GATEWAY_ROOT", Path.cwd()))
+
+
+def _configure_private_ca() -> None:
+    """Hace que el cliente OpenAI/aiohttp de LiteLLM confíe en las CA privadas.
+
+    LiteLLM 1.83 crea el cliente OpenAI compartido sin trasladar el
+    ``ssl_verify`` del deployment. Instalar aquí un contexto global conserva
+    las CA públicas, añade todos los bundles Cloudera y mantiene verificación de
+    cadena, fecha y hostname. Sólo relajamos X509_STRICT para PKI privadas
+    antiguas que no publican Authority Key Identifier.
+    """
+
+    bundles = sorted((_root() / "runtime" / "cloudera-ca").glob("*.pem"))
+    if not bundles:
+        return
+    context = ssl.create_default_context()
+    loaded = False
+    for bundle in bundles:
+        try:
+            context.load_verify_locations(cafile=str(bundle))
+            loaded = True
+        except (OSError, ssl.SSLError):
+            continue
+    if not loaded:
+        return
+    strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
+    if strict:
+        context.verify_flags &= ~strict
+    litellm.ssl_verify = context
+
+
+_configure_private_ca()
 
 
 def _log_path(start: Any) -> Path:
