@@ -28,6 +28,24 @@ class ClouderaCatalog:
     """
 
     SECRET_FIELDS = {"token", "workload_password", "cdp_private_key"}
+    CAI_RUNTIME_COMPATIBILITY = {
+        "1.5.5_sp2": {"7.1.9_sp1", "7.3.1"},
+        "1.5.5_sp2_chf1": {"7.1.9_sp1", "7.3.1", "7.3.2"},
+        "1.5.5_sp3": {"7.1.9_sp2", "7.3.1", "7.3.2"},
+    }
+    CAI_VERSION_LABELS = {
+        "1.5.5_sp2": "1.5.5 SP2",
+        "1.5.5_sp2_chf1": "1.5.5 SP2 CHF1",
+        "1.5.5_sp3": "1.5.5 SP3",
+    }
+    RUNTIME_VERSION_LABELS = {
+        "7.1.9_sp1": "7.1.9 SP1",
+        "7.1.9_sp2": "7.1.9 SP2",
+        "7.3.1": "7.3.1",
+        "7.3.2": "7.3.2",
+        "legacy": "heredada",
+        "7.3.2_plus": "7.3.2+ (heredada)",
+    }
 
     @staticmethod
     def _endpoint_profile(endpoint: dict[str, Any]) -> dict[str, Any]:
@@ -142,21 +160,47 @@ class ClouderaCatalog:
                 raise RuntimeError("La URL de tokens Cloud debe ser el API IAM, no la consola CDP")
             return normalized
         if "token-generation" in path or path.endswith(".html"):
-            raise RuntimeError(
-                "Has pegado la página web Token Generation. Usa la URL del API Knox terminada en /token"
-            )
-        if onpremise_version == "7.3.2_plus":
+            target = ("el origen de Management Console/Control Plane" if onpremise_version != "legacy"
+                      else "la URL del API Knox terminada en /token")
+            raise RuntimeError(f"Has pegado la página web Token Generation. Usa {target}")
+        if onpremise_version != "legacy":
             # En Private Cloud moderno el CDP CLI firma contra el IAM del
             # Control Plane. La extensión ``pvcapipath`` del CLI añade
             # ``/api/v1``; conservar aquí otro path lo duplicaría.
             if path not in {"", "/api", "/api/v1"}:
                 raise RuntimeError(
-                    "Para Runtime 7.3.2+ usa el origen del Control Plane CDP, sin rutas de Knox"
+                    "Para renovar CDP_TOKEN usa el origen de Management Console/Control Plane, sin rutas de Knox"
                 )
             return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
         elif not path.endswith("/token"):
             raise RuntimeError("La URL de tokens Knox debe ser el endpoint completo terminado en /token")
         return normalized
+
+    @classmethod
+    def _validate_onpremise_profile(cls, platform: str, kind: str, cai_version: str,
+                                    runtime_version: str, auth_mode: str,
+                                    credential_type: str) -> None:
+        """Valida sólo perfiles CAI nuevos; conserva registros heredados legibles."""
+
+        if platform != "onpremise" or kind != "inference" or runtime_version in {"legacy", "7.3.2_plus"}:
+            return
+        if cai_version not in cls.CAI_RUNTIME_COMPATIBILITY:
+            raise RuntimeError("Selecciona una versión válida de Cloudera AI 1.5.5")
+        if runtime_version not in cls.CAI_RUNTIME_COMPATIBILITY[cai_version]:
+            raise RuntimeError(
+                f"{cls.CAI_VERSION_LABELS[cai_version]} no figura como compatible con Runtime "
+                f"{cls.RUNTIME_VERSION_LABELS.get(runtime_version, runtime_version)} en la matriz oficial"
+            )
+        if auth_mode not in {"manual", "ums_auto"}:
+            raise RuntimeError("Selecciona credencial existente o CDP_TOKEN automático")
+        if credential_type not in {"cdp_token", "knox_api_key"}:
+            raise RuntimeError("Selecciona CDP_TOKEN o Knox API key")
+        if (auth_mode == "manual" and credential_type == "knox_api_key"
+                and not (cai_version == "1.5.5_sp3"
+                         and runtime_version in {"7.1.9_sp2", "7.3.2"})):
+            raise RuntimeError(
+                "Knox API key sólo está certificada para CAI 1.5.5 SP3 con Runtime 7.1.9 SP2 o 7.3.2"
+            )
 
     def __init__(self, runtime_dir: Path) -> None:
         """Ubica el almacén SQLite privado y migra el JSON legado si existe."""
@@ -314,12 +358,22 @@ class ClouderaCatalog:
                 lifecycle = "renewable"
             elif metadata.get("token_expires_at"):
                 lifecycle = "expiring_manual"
-            elif item.get("platform", "cloud") == "onpremise" and version == "7.3.2_plus":
+            elif (item.get("platform", "cloud") == "onpremise"
+                  and (item.get("credential_type") == "knox_api_key"
+                       or version == "7.3.2_plus")):
                 lifecycle = "long_lived_unverified"
             else:
                 lifecycle = "expiry_unknown"
             result.append({"platform": "cloud", "probe_interval_minutes": 5,
                            "onpremise_version": version,
+                           "runtime_version_label": self.RUNTIME_VERSION_LABELS.get(version, version),
+                           "cai_version": item.get("cai_version", "1.5.5_sp3"),
+                           "cai_version_label": self.CAI_VERSION_LABELS.get(
+                               str(item.get("cai_version") or "1.5.5_sp3"),
+                               str(item.get("cai_version") or ""),
+                           ),
+                           "onpremise_auth_mode": item.get("onpremise_auth_mode", ""),
+                           "credential_type": item.get("credential_type", "cdp_token"),
                            **{k: v for k, v in item.items() if k not in self.SECRET_FIELDS}} |
                           {"has_token": bool(item.get("token")),
                            "has_workload_password": bool(item.get("workload_password")),
@@ -336,7 +390,7 @@ class ClouderaCatalog:
         """Migra conexiones antiguas infiriendo v2 cuando la URL ya lo declara."""
 
         configured = str(connection.get("onpremise_version") or "").strip()
-        if configured in {"7.3.2_plus", "legacy"}:
+        if configured in {"7.1.9_sp1", "7.1.9_sp2", "7.3.1", "7.3.2", "7.3.2_plus", "legacy"}:
             return configured
         return "7.3.2_plus" if "/api/v2/" in str(connection.get("renewal_url") or "") else "legacy"
 
@@ -348,7 +402,7 @@ class ClouderaCatalog:
             return False
         if connection.get("platform", "cloud") == "cloud":
             return bool(connection.get("cdp_access_key_id") and connection.get("cdp_private_key"))
-        if ClouderaCatalog._onpremise_version(connection) == "7.3.2_plus":
+        if ClouderaCatalog._onpremise_version(connection) != "legacy":
             # AI Inference acepta el CDP_TOKEN de UMS. En Private Cloud se
             # obtiene de forma desatendida firmando el IAM del Control Plane
             # con una access key; no depende de una cookie SSO ni de Basic.
@@ -363,7 +417,7 @@ class ClouderaCatalog:
 
         return (connection.get("platform", "cloud") == "cloud"
                 or (connection.get("platform") == "onpremise"
-                    and cls._onpremise_version(connection) == "7.3.2_plus"
+                    and cls._onpremise_version(connection) != "legacy"
                     and connection.get("kind") == "inference"))
 
     @classmethod
@@ -406,7 +460,8 @@ class ClouderaCatalog:
                         probe_interval_minutes: int = 5, workload_user: str = "", workload_password: str = "",
                         cdp_access_key_id: str = "", cdp_private_key: str = "", renewal_url: str = "",
                         workload_name: str = "DE", onpremise_version: str = "legacy",
-                        credential_expires_at: str = "") -> dict[str, Any]:
+                        credential_expires_at: str = "", cai_version: str = "1.5.5_sp3",
+                        onpremise_auth_mode: str = "", credential_type: str = "cdp_token") -> dict[str, Any]:
         """Da de alta una conexión tras validar tipo, plataforma, URL y JWT.
 
         Una URL completa de endpoint se reduce a esquema+dominio porque las
@@ -416,8 +471,16 @@ class ClouderaCatalog:
 
         if kind not in {"inference", "workbench"}: raise RuntimeError("Tipo de conexión Cloudera no válido")
         if platform not in {"cloud", "onpremise"}: raise RuntimeError("La instalación debe ser Cloud u On-premise")
-        if onpremise_version not in {"7.3.2_plus", "legacy"}:
-            raise RuntimeError("Selecciona si el Runtime on-premise es 7.3.2 o posterior")
+        if onpremise_version not in {*self.RUNTIME_VERSION_LABELS}:
+            raise RuntimeError("Selecciona una versión válida de Runtime on-premise")
+        new_inference_profile = (platform == "onpremise" and kind == "inference"
+                                 and onpremise_version not in {"legacy", "7.3.2_plus"})
+        auth_mode = onpremise_auth_mode or (
+            "ums_auto" if new_inference_profile and (renewal_url or cdp_access_key_id or cdp_private_key) else "manual"
+        )
+        self._validate_onpremise_profile(
+            platform, kind, cai_version, onpremise_version, auth_mode, credential_type,
+        )
         if not 1 <= probe_interval_minutes <= 1440: raise RuntimeError("El intervalo debe estar entre 1 y 1440 minutos")
         parsed = urllib.parse.urlparse(url.strip())
         if parsed.scheme not in {"http", "https"} or not parsed.netloc: raise RuntimeError("La URL Cloudera no es válida")
@@ -432,21 +495,27 @@ class ClouderaCatalog:
         declared_expiry = self._normalize_declared_expiry(credential_expires_at)
         data = self._read(); connection_id = self._id(kind, normalized)
         previous = next((item for item in data.get("connections", []) if item.get("id") == connection_id), {})
+        previous_mode = str(previous.get("onpremise_auth_mode") or auth_mode)
         same_auth_context = (previous.get("platform", platform) == platform and
-                             self._onpremise_version(previous) == onpremise_version)
+                             (not new_inference_profile or previous_mode == auth_mode))
         manual_modern_workbench = (platform == "onpremise" and
                                    onpremise_version == "7.3.2_plus" and kind == "workbench")
-        renewal_candidate = ("" if manual_modern_workbench else
+        manual_inference = new_inference_profile and auth_mode == "manual"
+        renewal_candidate = ("" if manual_modern_workbench or manual_inference else
                              renewal_url or (previous.get("renewal_url", "") if same_auth_context else ""))
         effective_renewal_url = self._validate_renewal_url(
             renewal_candidate, platform, onpremise_version,
         )
         iam_credentials_allowed = (platform == "cloud" or
-            (platform == "onpremise" and onpremise_version == "7.3.2_plus" and kind == "inference"))
+            (platform == "onpremise" and onpremise_version != "legacy" and kind == "inference"
+             and (not new_inference_profile or auth_mode == "ums_auto")))
         entry = {"id": connection_id, "name": name.strip() or parsed.netloc, "kind": kind, "url": normalized,
                  "platform": platform, "probe_interval_minutes": probe_interval_minutes,
                  "onpremise_version": onpremise_version,
-                 "token": token.strip() or previous.get("token", ""),
+                 "cai_version": cai_version,
+                 "onpremise_auth_mode": auth_mode if new_inference_profile else "",
+                 "credential_type": credential_type if new_inference_profile else "cdp_token",
+                 "token": token.strip() or (previous.get("token", "") if same_auth_context else ""),
                  "workload_user": ((workload_user.strip() or (previous.get("workload_user", "") if same_auth_context else ""))
                                    if platform == "onpremise" and onpremise_version == "legacy" else ""),
                  "workload_password": ((workload_password or (previous.get("workload_password", "") if same_auth_context else ""))
@@ -459,6 +528,15 @@ class ClouderaCatalog:
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE"),
                  "token_expire_at": (declared_expiry or
                     (previous.get("token_expire_at", "") if not token.strip() else ""))}
+        if new_inference_profile and auth_mode == "manual" and not entry["token"]:
+            raise RuntimeError("Pega un CDP_TOKEN o una Knox API key para usar la opción de credencial existente")
+        if new_inference_profile and auth_mode == "ums_auto" and not all((
+            entry["renewal_url"], entry["cdp_access_key_id"], entry["cdp_private_key"],
+        )):
+            raise RuntimeError(
+                "Para generar CDP_TOKEN automáticamente completa la URL de Management Console, "
+                "CDP_ACCESS_KEY_ID y CDP_PRIVATE_KEY"
+            )
         data["connections"] = [item for item in data.get("connections", []) if item.get("id") != connection_id] + [entry]
         self._write(data)
         return next(item for item in self.connections() if item["id"] == connection_id)
@@ -475,7 +553,9 @@ class ClouderaCatalog:
                           platform: str = "cloud", probe_interval_minutes: int = 5, workload_user: str = "",
                           workload_password: str = "", cdp_access_key_id: str = "", cdp_private_key: str = "",
                           renewal_url: str = "", workload_name: str = "DE",
-                          onpremise_version: str = "legacy", credential_expires_at: str = "") -> dict[str, Any]:
+                          onpremise_version: str = "legacy", credential_expires_at: str = "",
+                          cai_version: str = "1.5.5_sp3", onpremise_auth_mode: str = "",
+                          credential_type: str = "cdp_token") -> dict[str, Any]:
         """Edita una conexión, conservando secretos si los campos no cambian."""
         if kind not in {"inference", "workbench"}: raise RuntimeError("Tipo de conexión Cloudera no válido")
         data = self._read()
@@ -485,10 +565,19 @@ class ClouderaCatalog:
                 raise RuntimeError("La conexión que estabas editando ya no existe. Cancela la edición o pega de nuevo la credencial para recrearla")
             return self.save_connection(name, kind, url, token, platform, probe_interval_minutes, workload_user,
                                         workload_password, cdp_access_key_id, cdp_private_key, renewal_url,
-                                        workload_name, onpremise_version, credential_expires_at)
+                                        workload_name, onpremise_version, credential_expires_at, cai_version,
+                                        onpremise_auth_mode, credential_type)
         if platform not in {"cloud", "onpremise"}: raise RuntimeError("La instalación debe ser Cloud u On-premise")
-        if onpremise_version not in {"7.3.2_plus", "legacy"}:
-            raise RuntimeError("Selecciona si el Runtime on-premise es 7.3.2 o posterior")
+        if onpremise_version not in {*self.RUNTIME_VERSION_LABELS}:
+            raise RuntimeError("Selecciona una versión válida de Runtime on-premise")
+        new_inference_profile = (platform == "onpremise" and kind == "inference"
+                                 and onpremise_version not in {"legacy", "7.3.2_plus"})
+        auth_mode = onpremise_auth_mode or (
+            "ums_auto" if new_inference_profile and (renewal_url or cdp_access_key_id or cdp_private_key) else "manual"
+        )
+        self._validate_onpremise_profile(
+            platform, kind, cai_version, onpremise_version, auth_mode, credential_type,
+        )
         if not 1 <= probe_interval_minutes <= 1440: raise RuntimeError("El intervalo debe estar entre 1 y 1440 minutos")
         # Reutilizamos la validación/normalización y luego migramos credenciales
         # de modelos si el cambio de URL produce un identificador nuevo.
@@ -502,21 +591,27 @@ class ClouderaCatalog:
             raise RuntimeError(f"El JWT está caducado desde {metadata['token_expires_at']}. Genera uno nuevo en Cloudera")
         declared_expiry = self._normalize_declared_expiry(credential_expires_at)
         new_id = self._id(kind, normalized)
+        previous_mode = str(previous.get("onpremise_auth_mode") or auth_mode)
         same_auth_context = (previous.get("platform", "cloud") == platform and
-                             self._onpremise_version(previous) == onpremise_version)
+                             (not new_inference_profile or previous_mode == auth_mode))
         manual_modern_workbench = (platform == "onpremise" and
                                    onpremise_version == "7.3.2_plus" and kind == "workbench")
-        renewal_candidate = ("" if manual_modern_workbench else
+        manual_inference = new_inference_profile and auth_mode == "manual"
+        renewal_candidate = ("" if manual_modern_workbench or manual_inference else
                              renewal_url or (previous.get("renewal_url", "") if same_auth_context else ""))
         effective_renewal_url = self._validate_renewal_url(
             renewal_candidate, platform, onpremise_version,
         )
         iam_credentials_allowed = (platform == "cloud" or
-            (platform == "onpremise" and onpremise_version == "7.3.2_plus" and kind == "inference"))
+            (platform == "onpremise" and onpremise_version != "legacy" and kind == "inference"
+             and (not new_inference_profile or auth_mode == "ums_auto")))
         entry = {"id": new_id, "name": name.strip() or parsed.netloc, "kind": kind, "url": normalized,
                  "platform": platform, "probe_interval_minutes": probe_interval_minutes,
                  "onpremise_version": onpremise_version,
-                 "token": token.strip() or previous.get("token", ""),
+                 "cai_version": cai_version,
+                 "onpremise_auth_mode": auth_mode if new_inference_profile else "",
+                 "credential_type": credential_type if new_inference_profile else "cdp_token",
+                 "token": token.strip() or (previous.get("token", "") if same_auth_context else ""),
                  "workload_user": ((workload_user.strip() or (previous.get("workload_user", "") if same_auth_context else ""))
                                    if platform == "onpremise" and onpremise_version == "legacy" else ""),
                  "workload_password": ((workload_password or (previous.get("workload_password", "") if same_auth_context else ""))
@@ -529,6 +624,15 @@ class ClouderaCatalog:
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE"),
                  "token_expire_at": (declared_expiry or
                     (previous.get("token_expire_at", "") if not token.strip() else ""))}
+        if new_inference_profile and auth_mode == "manual" and not entry["token"]:
+            raise RuntimeError("Pega un CDP_TOKEN o una Knox API key para usar la opción de credencial existente")
+        if new_inference_profile and auth_mode == "ums_auto" and not all((
+            entry["renewal_url"], entry["cdp_access_key_id"], entry["cdp_private_key"],
+        )):
+            raise RuntimeError(
+                "Para generar CDP_TOKEN automáticamente completa la URL de Management Console, "
+                "CDP_ACCESS_KEY_ID y CDP_PRIVATE_KEY"
+            )
         data["connections"] = [item for item in data.get("connections", []) if item.get("id") not in {connection_id, new_id}] + [entry]
         migrated = {}
         for key, value in data.get("model_tokens", {}).items():
@@ -892,7 +996,8 @@ class ClouderaCatalog:
                 payload = self._request(f"{connection['url']}/api/v1alpha1/listEndpoints", connection["token"], "POST", {"namespace": "serving-default"})
             except RuntimeError as exc:
                 if (connection.get("platform") == "onpremise"
-                        and self._onpremise_version(connection) == "7.3.2_plus"
+                        and (connection.get("credential_type") == "knox_api_key"
+                             or self._onpremise_version(connection) == "7.3.2_plus")
                         and "Credencial rechazada" in str(exc)):
                     raise RuntimeError(
                         f"{exc}. Si has pegado una Knox API key, comprueba que sea el valor completo y que "

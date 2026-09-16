@@ -126,6 +126,70 @@ def test_onpremise_modern_uses_control_plane_origin_not_knox_token_url(tmp_path)
     assert connection["renewal_url"] == "https://console-cdp.apps.private.example"
 
 
+@pytest.mark.parametrize(("cai_version", "runtime_version"), [
+    ("1.5.5_sp2", "7.1.9_sp1"),
+    ("1.5.5_sp2", "7.3.1"),
+    ("1.5.5_sp2_chf1", "7.3.2"),
+    ("1.5.5_sp3", "7.1.9_sp2"),
+    ("1.5.5_sp3", "7.3.1"),
+    ("1.5.5_sp3", "7.3.2"),
+])
+def test_documented_onpremise_cai_combinations_accept_ums_auto(tmp_path, cai_version, runtime_version):
+    catalog = ClouderaCatalog(tmp_path)
+
+    connection = catalog.save_connection(
+        "Private", "inference", "https://ml.private", platform="onpremise",
+        onpremise_version=runtime_version, cai_version=cai_version,
+        onpremise_auth_mode="ums_auto", renewal_url="https://console-cdp.apps.private.example/api/v1",
+        cdp_access_key_id="machine-access", cdp_private_key="machine-private",
+    )
+
+    assert connection["renewal_ready"] is True
+    assert connection["renewal_url"] == "https://console-cdp.apps.private.example"
+    assert connection["cai_version"] == cai_version
+    assert connection["onpremise_version"] == runtime_version
+
+
+def test_sp2_requires_chf1_for_runtime_732(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+
+    with pytest.raises(RuntimeError, match="no figura como compatible"):
+        catalog.save_connection(
+            "Private", "inference", "https://ml.private", "token", platform="onpremise",
+            onpremise_version="7.3.2", cai_version="1.5.5_sp2",
+            onpremise_auth_mode="manual",
+        )
+
+
+def test_knox_api_key_is_limited_to_certified_sp3_runtimes(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+
+    with pytest.raises(RuntimeError, match="Knox API key sólo está certificada"):
+        catalog.save_connection(
+            "Private", "inference", "https://ml.private", "opaque-key", platform="onpremise",
+            onpremise_version="7.3.1", cai_version="1.5.5_sp3",
+            onpremise_auth_mode="manual", credential_type="knox_api_key",
+        )
+    connection = catalog.save_connection(
+        "Private", "inference", "https://ml.private", "opaque-key", platform="onpremise",
+        onpremise_version="7.3.2", cai_version="1.5.5_sp3",
+        onpremise_auth_mode="manual", credential_type="knox_api_key",
+    )
+    assert connection["credential_lifecycle"] == "long_lived_unverified"
+
+
+def test_username_password_cannot_be_presented_as_ums_token_generation(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+
+    with pytest.raises(RuntimeError, match="CDP_ACCESS_KEY_ID y CDP_PRIVATE_KEY"):
+        catalog.save_connection(
+            "Private", "inference", "https://ml.private", platform="onpremise",
+            onpremise_version="7.3.1", cai_version="1.5.5_sp3",
+            onpremise_auth_mode="ums_auto", renewal_url="https://console-cdp.apps.private.example",
+            workload_user="general-user", workload_password="password",
+        )
+
+
 def test_discovers_inference_endpoints(tmp_path, monkeypatch):
     catalog = ClouderaCatalog(tmp_path)
     connection = catalog.save_connection("Inference", "inference", "https://ml.example", "token")
@@ -415,7 +479,8 @@ def test_onpremise_732_inference_renews_ums_token_through_private_iam(tmp_path, 
         platform="onpremise", cdp_access_key_id="machine-access",
         cdp_private_key="machine-private",
         renewal_url="https://console-cdp.apps.private.example/api/v1",
-        onpremise_version="7.3.2_plus",
+        onpremise_version="7.3.2", cai_version="1.5.5_sp3",
+        onpremise_auth_mode="ums_auto",
     )
     captured = {}
 

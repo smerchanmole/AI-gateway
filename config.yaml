@@ -28,6 +28,20 @@ model_list:
     drop_params: true
     api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/goes---nemotron-3-super-120b/v1
     api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+    max_tokens: 4096
+    reasoning_effort: low
+  model_info:
+    dashboard_parameter_policy: model_wins
+    dashboard_context_window: 320000
+    max_input_tokens: 311904
+    max_output_tokens: 8096
+    dashboard_source: cloudera
+    dashboard_cloudera_kind: inference
+    dashboard_serving_engine: ''
+    dashboard_task: ''
+    dashboard_embedding_input_type: ''
+    dashboard_validation_fingerprint: 5c38607138414b963ccf391c9a194b16c55c939d279eca1ab70f41b5140cd48d
+    dashboard_validated_at: '2026-09-16T11:51:22Z'
 - model_name: hermes-3-llama-3-1-8b
   litellm_params:
     model: openai/NousResearch/Hermes-3-Llama-3.1-8B
@@ -91,6 +105,11 @@ dashboard_settings:
     model: guardian-seguridad
     policy: warn
     timeout: 8
+    excluded_models: []
+  advisor:
+    enabled: true
+    model: topito
+    timeout: 120
 router_settings:
   fallbacks:
   - topito:

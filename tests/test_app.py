@@ -167,6 +167,29 @@ def test_initial_cloudera_token_is_generated_when_renewal_is_ready(monkeypatch):
     assert result["token_generated"] is True
 
 
+def test_onpremise_cai_profile_and_auth_mode_reach_catalog(monkeypatch, client):
+    captured = {}
+
+    class Catalog:
+        def save_connection(self, *args):
+            captured["args"] = args
+            return {"id": "private-1", "has_token": True, "renewal_ready": False}
+
+    monkeypatch.setattr(dashboard, "cloudera", Catalog())
+    monkeypatch.setattr(dashboard.manager, "process_alive", lambda: False)
+
+    response = client.post("/api/cloudera/connections", json={
+        "name": "Private", "kind": "inference", "url": "https://ml.private",
+        "platform": "onpremise", "onpremise_version": "7.3.2",
+        "cai_version": "1.5.5_sp3", "onpremise_auth_mode": "ums_auto",
+        "credential_type": "cdp_token", "renewal_url": "https://console-cdp.apps.example",
+        "cdp_access_key_id": "access", "cdp_private_key": "private",
+    })
+
+    assert response.status_code == 200
+    assert captured["args"][-3:] == ("1.5.5_sp3", "ums_auto", "cdp_token")
+
+
 def test_dashboard_disables_cache_and_uses_test_tabs(client):
     response = client.get("/")
     assert response.headers["cache-control"].startswith("no-store")
@@ -562,6 +585,60 @@ def test_guardrail_endpoint_accepts_per_model_exclusions(monkeypatch, client):
     assert captured["restart"] is False
 
 
+def test_workbench_advisor_retries_without_system_role_or_temperature(monkeypatch, client):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = __import__("json").dumps(payload)
+
+        @property
+        def is_error(self):
+            return self.status_code >= 400
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+
+        async def post(self, _url, **kwargs):
+            calls.append(kwargs["json"])
+            if len(calls) == 1:
+                return FakeResponse(500, {"error": {"message": '{"success":false,"StatusCode":400}'}})
+            return FakeResponse(200, {"choices": [{"message": {"content": (
+                '<think>breve</think>\n{"summary":"Perfil RAG","rationale":["Precisión"],'
+                '"parameters":{"temperature":0.2,"unknown":"drop"}}'
+            )}}]})
+
+    monkeypatch.setattr(dashboard.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(dashboard.manager, "dashboard_settings", lambda: {
+        "advisor": {"enabled": True, "model": "qwen8", "timeout": 120},
+    })
+    monkeypatch.setattr(dashboard.manager, "models", lambda: [
+        {"name": "objetivo", "provider_model": "openai/modelo", "backend_profile": "vllm"},
+        {"name": "qwen8", "provider_model": "cloudera_workbench/qwen8", "cloudera_kind": "workbench"},
+    ])
+    monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
+    monkeypatch.setattr(dashboard.manager, "active_model_names", lambda: ["objetivo", "qwen8"])
+
+    response = client.post("/api/config/advisor/recommend", json={
+        "model_name": "objetivo", "use_case": "RAG de documentación técnica",
+    })
+
+    assert response.status_code == 200
+    assert [message["role"] for message in calls[0]["messages"]] == ["system", "user"]
+    assert calls[0]["temperature"] == 0.2
+    assert [message["role"] for message in calls[1]["messages"]] == ["user"]
+    assert "temperature" not in calls[1]
+    assert calls[1]["max_tokens"] == 512
+    assert response.json()["parameters"] == {"temperature": 0.2}
+
+
 def test_cloudera_models_show_independent_deployment_token_and_probe_states():
     javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
     assert "clouderaDeploymentState" in javascript
@@ -597,22 +674,31 @@ def test_cloudera_form_is_contextual_and_explains_urls_and_credential_lifecycle(
     javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
     assert 'id="cloudera-onpremise-version"' in html
-    assert 'value="7.3.2_plus"' in html and 'value="legacy"' in html
+    assert 'id="cloudera-cai-version"' in html
+    assert 'value="1.5.5_sp2"' in html and 'value="1.5.5_sp3"' in html
+    assert 'value="7.1.9_sp1"' in html and 'value="7.3.1"' in html and 'value="7.3.2"' in html
     assert 'id="cloudera-cloud-fields"' in html
-    assert 'id="cloudera-onprem-modern-fields"' in html
-    assert 'id="cloudera-onprem-legacy-fields"' in html
-    assert 'id="cloudera-modern-renewal-url"' in html
-    assert 'id="cloudera-modern-access-key-id"' in html
-    assert 'id="cloudera-modern-private-key"' in html
-    assert 'id="cloudera-modern-expiry"' in html
-    assert "URL de endpoints" in html and "CDP JWT (UMS)" in html
-    assert "gateway/cdp-proxy-token" in html
-    assert "gateway/authtkn/knoxtoken/api/v1/token" in html
+    assert 'id="cloudera-onprem-inference-fields"' in html
+    assert 'value="manual"' in html and 'value="ums_auto"' in html
+    assert 'id="cloudera-onprem-renewal-url"' in html
+    assert 'id="cloudera-onprem-access-key-id"' in html
+    assert 'id="cloudera-onprem-private-key"' in html
+    assert 'id="cloudera-onprem-expiry"' in html
+    assert "URL de endpoints" in html and "CDP_TOKEN (UMS)" in html
+    assert "/api/v1/iam/generateWorkloadAuthToken" in html
+    assert "usuario/contraseña general no sirve" in html
     assert "updateClouderaFormContext" in javascript
     assert "credential.accessKeyId" in javascript
     assert "Renovación prevista" in javascript
     assert "Caduca · sustitución manual" in javascript
     assert "Clave larga · verifica vigencia en Knox" in javascript
+
+
+def test_api_helper_accepts_empty_success_responses():
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "if (response.status === 204) return null" in javascript
+    assert "if (!rawBody) return null" in javascript
 
 
 def test_api_requires_login_and_rejects_csrf(tmp_path, monkeypatch):

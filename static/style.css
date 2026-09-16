@@ -475,6 +475,16 @@ textarea:focus, select:focus { outline: 2px solid var(--cyan); border-color: tra
 .cloudera-renewal-fields { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; min-width: 0; margin: 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--line); }
 .cloudera-renewal-fields legend { padding: 0 8px 0 0; color: #e6f4ff; font-size: 11px; font-weight: 800; }
 .cloudera-renewal-fields > p { grid-column: 1 / -1; margin: 0; color: #91a8bd; font-size: 10px; }
+.cloudera-auth-option { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: rgba(3, 10, 20, .3); }
+.cloudera-auth-option legend { padding: 0 6px; }
+.cloudera-auth-option legend label { display: flex; align-items: center; gap: 8px; color: #e6f4ff; font-size: 11px; cursor: pointer; }
+.cloudera-auth-option legend input { width: 15px; height: 15px; accent-color: var(--cyan); }
+.cloudera-auth-option > p { grid-column: 1 / -1; margin: 0; color: #91a8bd; font-size: 10px; line-height: 1.5; }
+.cloudera-auth-option code { color: #a5f3fc; }
+.cloudera-auth-option.inactive { opacity: .62; }
+.cloudera-auth-option.inactive > label { pointer-events: none; }
+.compatibility-note { padding: 9px 11px; border: 1px solid rgba(52, 211, 153, .28); border-radius: 9px; color: #b7f7dc !important; background: rgba(16, 185, 129, .06); }
+.compatibility-note.error { border-color: rgba(251, 113, 133, .45); color: #fecdd3 !important; background: rgba(190, 18, 60, .08); }
 .optional-mark { color: #91a8bd; font-size: 9px; font-weight: 500; }
 .cloudera-connections, .cloudera-models { display: grid; gap: 9px; margin-top: 14px; }
 .cloudera-connection { display: grid; grid-template-columns: 1fr 2fr auto auto; align-items: start; gap: 10px 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; }
@@ -645,6 +655,7 @@ pre { margin: 0; max-height: 380px; overflow: auto; color: #d8e2ee; white-space:
   .cloudera-form { grid-template-columns: 1fr 1fr; }
   .cloudera-form .wide { grid-column: auto; }
   .cloudera-renewal-fields { grid-template-columns: 1fr 1fr; }
+  .cloudera-auth-option { grid-template-columns: 1fr 1fr; }
   .cloudera-connection, .cloudera-model { grid-template-columns: 1fr 1fr; }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
   .backup-actions { grid-template-columns: 1fr; align-items: stretch; }
@@ -676,6 +687,7 @@ pre { margin: 0; max-height: 380px; overflow: auto; color: #d8e2ee; white-space:
   .hourly-chart { gap: 2px; }
   .cloudera-form, .cloudera-connection, .cloudera-model { grid-template-columns: 1fr; }
   .cloudera-renewal-fields { grid-template-columns: 1fr; }
+  .cloudera-auth-option { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

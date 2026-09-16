@@ -582,6 +582,31 @@ class ModelAdviceRequest(BaseModel):
     use_case: str
 
 
+def _advisor_json(content: str) -> dict[str, Any]:
+    """Acepta JSON puro o un objeto rodeado por Markdown/thinking del modelo."""
+
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
+    try:
+        value = json.loads(cleaned)
+        if isinstance(value, dict):
+            return value
+    except ValueError:
+        pass
+    decoder = json.JSONDecoder()
+    for position, character in enumerate(cleaned):
+        if character != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(cleaned[position:])
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise ValueError("No se encontró un objeto JSON en la respuesta")
+
+
 class ClouderaConnection(BaseModel):
     """Datos de conexión y renovación para una instalación Cloudera.
 
@@ -604,6 +629,9 @@ class ClouderaConnection(BaseModel):
     workload_name: str = "DE"
     onpremise_version: str = "legacy"
     credential_expires_at: str = ""
+    cai_version: str = "1.5.5_sp3"
+    onpremise_auth_mode: str = ""
+    credential_type: str = "cdp_token"
 
 
 class ClouderaTokenRenewal(BaseModel):
@@ -991,7 +1019,8 @@ def save_cloudera_connection(connection: ClouderaConnection):
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
             connection.renewal_url, connection.workload_name, connection.onpremise_version,
-            connection.credential_expires_at)
+            connection.credential_expires_at, connection.cai_version,
+            connection.onpremise_auth_mode, connection.credential_type)
         result = generate_initial_cloudera_token(result)
         if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
@@ -1009,7 +1038,8 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
             connection.renewal_url, connection.workload_name, connection.onpremise_version,
-            connection.credential_expires_at)
+            connection.credential_expires_at, connection.cai_version,
+            connection.onpremise_auth_mode, connection.credential_type)
         result = generate_initial_cloudera_token(result)
         if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
@@ -1119,7 +1149,9 @@ async def recommend_model_parameters(advice: ModelAdviceRequest):
         raise HTTPException(422, "Describe el caso de uso en un máximo de 8.000 caracteres")
     settings = manager.dashboard_settings().get("advisor") or {}
     advisor = str(settings.get("model") or "")
-    target = next((item for item in manager.models() if item["name"] == advice.model_name), None)
+    available_models = manager.models()
+    target = next((item for item in available_models if item["name"] == advice.model_name), None)
+    advisor_details = next((item for item in available_models if item["name"] == advisor), None)
     if not settings.get("enabled") or not advisor:
         raise HTTPException(409, "Configura primero un modelo asesor")
     if target is None:
@@ -1144,25 +1176,41 @@ async def recommend_model_parameters(advice: ModelAdviceRequest):
             "context_window", "max_output_tokens", "compatibility_profile")},
         "use_case": use_case,
     }, ensure_ascii=False)
+    endpoint = f"http://{manager.host}:{manager.port}/v1/chat/completions"
+    primary_payload = {"model": advisor, "messages": [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ], "temperature": 0.2}
+    workbench_advisor = bool(advisor_details and (
+        advisor_details.get("cloudera_kind") == "workbench"
+        or str(advisor_details.get("provider_model") or "").startswith("cloudera_workbench/")
+    ))
+    compatibility_retry = False
     try:
         async with httpx.AsyncClient(timeout=float(settings.get("timeout") or 120)) as client:
             response = await client.post(
-                f"http://{manager.host}:{manager.port}/v1/chat/completions",
-                headers=gateway_auth_headers(),
-                json={"model": advisor, "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ], "temperature": 0.2},
+                endpoint, headers=gateway_auth_headers(), json=primary_payload,
             )
+            workbench_contract_rejected = (
+                response.status_code == 400
+                or ("StatusCode" in response.text and "400" in response.text)
+                or "Contrato Workbench rechazado" in response.text
+            )
+            if response.is_error and workbench_advisor and workbench_contract_rejected:
+                compatibility_retry = True
+                response = await client.post(endpoint, headers=gateway_auth_headers(), json={
+                    "model": advisor,
+                    "messages": [{"role": "user", "content": f"{system}\n\nDATOS DEL CASO DE USO:\n{user}"}],
+                    "max_tokens": 512,
+                })
     except (httpx.RequestError, RuntimeError) as exc:
         raise HTTPException(502, f"No se pudo consultar al asesor: {exc}") from exc
     if response.is_error:
-        raise HTTPException(response.status_code, f"El asesor rechazó la consulta: {response.text[:1000]}")
+        suffix = " El reintento compatible con Workbench también fue rechazado." if compatibility_retry else ""
+        raise HTTPException(response.status_code, f"El asesor rechazó la consulta:{suffix} {response.text[:1000]}")
     try:
         content = response.json()["choices"][0]["message"]["content"].strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
-        result = json.loads(content)
+        result = _advisor_json(content)
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         raise HTTPException(502, "El asesor no devolvió el JSON estructurado solicitado") from exc
     parameters = result.get("parameters") if isinstance(result, dict) else None

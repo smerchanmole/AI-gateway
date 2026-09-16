@@ -1,10 +1,12 @@
 import io
 import json
+import urllib.error
 
 from litellm import ModelResponse
 
 from gateway.workbench_provider import ClouderaWorkbenchLLM
 from gateway.workbench_provider import _normalize_api_base, _request_body
+from litellm.llms.custom_llm import CustomLLMError
 
 
 def test_workbench_provider_defaults_and_caps_output_tokens():
@@ -76,3 +78,29 @@ def test_workbench_provider_wraps_request_and_unwraps_openai_response(monkeypatc
     }}
     assert result.choices[0].message.content == "¡Hola!"
     assert result.usage.total_tokens == 5
+
+
+def test_workbench_http_error_reports_safe_request_shape(monkeypatch):
+    def rejected(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "https://modelservice.example/model", 400, "Bad Request", {},
+            io.BytesIO(b'{"success":false,"StatusCode":400}'),
+        )
+
+    monkeypatch.setattr("gateway.workbench_provider.urllib.request.urlopen", rejected)
+    handler = ClouderaWorkbenchLLM()
+
+    try:
+        handler.completion(
+            model="qwen8", messages=[{"role": "system", "content": "secreto"}, {"role": "user", "content": "caso"}],
+            api_base="https://modelservice.example/model?accessKey=model-key",
+            model_response=ModelResponse(), optional_params={"temperature": 0.2}, timeout=30,
+        )
+    except CustomLLMError as exc:
+        message = str(exc)
+        assert "roles=['system', 'user']" in message
+        assert "temperature" in message
+        assert "secreto" not in message
+        assert "model-key" not in message
+    else:
+        raise AssertionError("Workbench debía devolver un error diagnóstico")

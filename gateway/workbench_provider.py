@@ -141,9 +141,11 @@ class ClouderaWorkbenchLLM(CustomLLM):
         request_headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if api_key:
             request_headers.setdefault("Authorization", f"Bearer {api_key}")
+        payload = _request_body(messages, optional_params)
+        encoded_payload = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
             _normalize_api_base(api_base),
-            data=json.dumps(_request_body(messages, optional_params)).encode("utf-8"),
+            data=encoded_payload,
             method="POST",
             headers=request_headers,
         )
@@ -153,7 +155,16 @@ class ClouderaWorkbenchLLM(CustomLLM):
                 raw = remote.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise CustomLLMError(status_code=exc.code, message=detail or str(exc)) from exc
+            roles = [str(item.get("role") or "") for item in messages if isinstance(item, dict)]
+            parameter_names = sorted(key for key in payload["request"] if key != "messages")
+            diagnostic = (
+                f"Contrato Workbench rechazado: roles={roles}, parámetros={parameter_names}, "
+                f"payload_bytes={len(encoded_payload)}"
+            )
+            raise CustomLLMError(
+                status_code=exc.code,
+                message=f"{detail or str(exc)} · {diagnostic}",
+            ) from exc
         except urllib.error.URLError as exc:
             raise CustomLLMError(status_code=502, message=f"No se pudo conectar con Workbench: {exc.reason}") from exc
         try:

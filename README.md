@@ -136,32 +136,42 @@ The Cloudera application runtime must have outbound DNS and HTTPS access to both
 
 #### Cloudera on-premises example
 
-The form asks for the CDP Base Runtime generation because the supported unattended credential flow changes at 7.3.2. Exact hostnames and gateway paths depend on the installation.
+This form currently covers **Cloudera AI Inference only**. Workbench authentication is intentionally left for a later phase. Select both the Cloudera AI service pack and the exact CDP Base Runtime so the dashboard can enforce Cloudera's compatibility matrix:
+
+| Cloudera AI | Supported Runtime selections |
+|---|---|
+| 1.5.5 SP2 | 7.1.9 SP1, 7.3.1 |
+| 1.5.5 SP2 CHF1 | 7.1.9 SP1, 7.3.1, 7.3.2 |
+| 1.5.5 SP3 | 7.1.9 SP2, 7.3.1, 7.3.2 |
 
 | Field | Example |
 |---|---|
-| Service | `Cloudera AI Inference` or `Cloudera AI Workbench` |
+| Service | `Cloudera AI Inference` |
 | Deployment | `On-premise` |
 | Full model endpoint URL | `https://ml.company.example/namespaces/serving-default/endpoints/my-model/openai/v1` |
 | Base URL entered in the form | `https://ml.company.example` |
 | Discovery API used by IA Gateway | `https://ml.company.example/api/v1alpha1/listEndpoints` for AI Inference |
-| Runtime before 7.3.2 | Complete Basic-enabled Knox token URL, for example `https://service.company.example/gateway/authtkn/knoxtoken/api/v1/token` |
-| Credentials before 7.3.2 | `WORKLOAD-USER` and `WORKLOAD-PASS`; IA Gateway obtains a fresh JWT before expiry |
-| Runtime 7.3.2+ · AI Inference (recommended unattended mode) | Private Control Plane origin plus `CDP_ACCESS_KEY_ID` and `CDP_PRIVATE_KEY` from a machine user; IA Gateway continuously generates UMS `CDP_TOKEN` values through IAM |
-| Runtime 7.3.2+ · AI Inference (static alternative) | Use the complete value of a long-lived Knox API key created in Model Endpoint Details |
-| Runtime 7.3.2+ · Workbench | Use an API key created in Workbench User Settings with API/Application audience |
+| Automatic CDP token URL | Management Console/Control Plane origin, for example `https://console-cdp.apps.company.example` |
+| Automatic credentials | `CDP_ACCESS_KEY_ID` and `CDP_PRIVATE_KEY` from a user or least-privilege machine user, plus workload name such as `DE` |
 
-For the Runtime 7.3.2+ unattended flow, the renewal URL is the private Control Plane origin, for example `https://console-cdp.apps.company.example`; the CDP CLI calls its `/api/v1/iam/generateWorkloadAuthToken` operation. Create the access key/private key in User Management, preferably for a least-privilege machine user. The interactive platform password is not stored and is not the renewal mechanism. Leave the current token empty and IA Gateway obtains the first token immediately.
+The on-premises panel offers two deliberately separate modes:
 
-Do not paste the interactive page ending in `/token-generation/index.html` or a generic Knox Gateway JWT whose Target Base URL is `/gateway/cdp-proxy-token`. AI Inference expects a UMS CDP JWT or its specifically configured Knox API key support.
+1. **Existing credential** accepts a UMS `CDP_TOKEN`, copied from Model Endpoint Details or produced by `cdp iam generate-workload-auth-token --workload-name DE`. A Knox API key is also accepted only for Cloudera AI 1.5.5 SP3 with Runtime 7.1.9 SP2 or 7.3.2, the combinations certified by Cloudera.
+2. **Automatic UMS `CDP_TOKEN`** uses the private Management Console origin. CDP CLI builds the `/api/v1/iam/generateWorkloadAuthToken` operation, signs it with the access key/private key, generates the first token immediately, and replaces it early without restarting LiteLLM.
 
-Knox API keys for AI Inference are not enabled merely by running Runtime 7.3.2. An administrator must add the `cdp-preauth` provider configuration to `conf/cdp-resources.xml` in the Data Lake Knox Gateway Default Group, save it, refresh the stale Knox configurations, and verify that the topology renders without errors in Knox Admin UI. If a UMS JWT works but a generated Knox API key returns HTTP 401, check this server-side prerequisite and ensure the complete generated key—not its identifier—was copied.
+A general platform username/password is **not** a documented non-interactive credential for `iam generate-workload-auth-token`. A Basic-authenticated Knox token endpoint issues a different service JWT and must not be presented as a UMS `CDP_TOKEN`; consequently this CAI Inference form does not offer that misleading combination.
 
-Credential lifecycle is always reported explicitly. JWT expiry is read from the `exp` claim. Cloud JWTs, Runtime 7.3.2+ on-premises UMS JWTs, and legacy Basic-enabled Knox JWTs are regenerated in advance when all generation fields are present. The default lead is up to seven days but is capped at 25% of the credential lifetime, so the normal one-hour UMS token rotates roughly 15 minutes early; `CDP_RENEWAL_LEAD_SECONDS` can lower that maximum. The supervisor retries every minute and the LiteLLM callback reads the replacement atomically from SQLite on every request.
+`cdp iam set-authentication-policy --workload-auth-token-expiration-sec ...` only changes the account-wide lifetime applied when UMS issues future tokens; it does not create or refresh one. IA Gateway therefore does not need to lengthen tokens to 90 days: it calls `generate-workload-auth-token` again inside the early-renewal window and atomically replaces the current value. Changing the global policy remains an explicit administrator decision because longer JWTs cannot be revoked individually.
 
-Opaque Knox and Workbench API keys do not expose an expiry claim. IA Gateway therefore cannot safely invent or renew them. Enter the administrative expiry date shown/configured in Cloudera (for example, 90 days) so the dashboard calculates an advance rotation date; replacing a saved key is atomic. Workbench lets the creator select an expiry date, and administrators can impose a maximum. For AI Inference, prefer the renewable UMS flow above when uninterrupted operation matters. If a model-specific JWT expires while the connection has a valid renewed CDP token, IA Gateway automatically falls back to the connection credential.
+Do not paste the interactive page ending in `/token-generation/index.html`, a Knox route, or a generic Knox Gateway JWT whose Target Base URL is `/gateway/cdp-proxy-token` into the IAM URL field. AI Inference expects a UMS CDP JWT or its specifically configured Knox API key support.
 
-You can either paste an existing CDP token/API v2 key or leave the token blank when complete renewal credentials are provided. IA Gateway then requests the initial token and subsequently renews it in the background. Secret values are stored in SQLite with file mode `0600` and are never returned to the browser.
+Knox API keys require an administrator to configure `cdp-preauth` in `conf/cdp-resources.xml` for the Data Lake Knox Gateway Default Group, refresh stale Knox configurations, and verify the topology in Knox Admin UI. If a UMS JWT works but a Knox API key returns HTTP 401, verify this prerequisite and that the complete generated key—not its identifier—was copied.
+
+Credential lifecycle is always reported explicitly. JWT expiry is read from the `exp` claim. UMS tokens are regenerated in advance when all IAM generation fields are present. The default lead is up to seven days but capped at 25% of token lifetime, so a normal one-hour UMS token rotates roughly 15 minutes early; `CDP_RENEWAL_LEAD_SECONDS` can lower that maximum. The supervisor retries every minute and the LiteLLM callback reads the replacement atomically from SQLite on every request.
+
+Opaque Knox API keys do not expose an expiry claim and cannot be regenerated by IA Gateway. Enter their administrative expiry date (for example, 90 days) so the dashboard calculates an advance rotation date. For uninterrupted operation, prefer the renewable UMS flow. If a model-specific JWT expires while the connection has a valid renewed CDP token, IA Gateway automatically falls back to the connection credential.
+
+You can either paste an existing CAI credential or select automatic UMS generation and leave the token blank. IA Gateway then requests the initial token and subsequently replaces it in the background. Secret values are stored in SQLite with file mode `0600` and are never returned to the browser.
 
 ### 5. Discover and add models
 
