@@ -1,6 +1,7 @@
 import json
 import base64
 import io
+import ssl
 import subprocess
 import urllib.error
 from datetime import datetime, timezone
@@ -537,6 +538,41 @@ def test_private_iam_renewal_uses_connection_ca_bundle_without_exposing_it(tmp_p
     bundle = captured["command"][2]
     assert bundle.endswith(f"{connection['id']}.pem")
     assert Path(bundle).read_text(encoding="utf-8") == ca_pem
+
+
+def test_discovery_reuses_private_ca_and_relaxes_only_legacy_x509_strictness(tmp_path, monkeypatch):
+    certificate, _key = ensure_self_signed_certificate(tmp_path / "certificate")
+    catalog = ClouderaCatalog(tmp_path / "runtime")
+    connection = catalog.save_connection(
+        "Private TLS", "inference", "https://ml.private", "opaque-token",
+        platform="onpremise", cdp_access_key_id="machine-access",
+        cdp_private_key="machine-private",
+        renewal_url="https://console-cdp.apps.private.example",
+        onpremise_version="7.3.2", cai_version="1.5.5_sp3",
+        onpremise_auth_mode="ums_auto", tls_verification="custom_ca",
+        tls_ca_pem=certificate.read_text(encoding="utf-8"),
+    )
+    captured = {}
+
+    class Response(io.BytesIO):
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    def accepted(request, timeout=20, context=None):
+        captured["context"] = context
+        return Response(json.dumps({"endpoints": []}).encode())
+
+    monkeypatch.setattr("gateway.cloudera.urllib.request.urlopen", accepted)
+    assert catalog.discover(connection["id"]) == []
+
+    context = captured["context"]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.check_hostname is True
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
+    if strict_flag:
+        assert context.verify_flags & strict_flag == 0
 
 
 def test_private_iam_can_explicitly_disable_tls_only_when_configured(tmp_path, monkeypatch):

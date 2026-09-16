@@ -375,6 +375,37 @@ class ClouderaCatalog:
         os.chmod(ca_path, 0o600)
         return ca_path
 
+    @staticmethod
+    def _tls_context(connection: dict[str, Any]) -> ssl.SSLContext | None:
+        """Construye el contexto TLS compartido por catálogo y sondas.
+
+        Los certificados de algunos Private Cloud antiguos no incluyen AKI.
+        Para una CA proporcionada explícitamente relajamos sólo X509_STRICT;
+        la cadena, fechas y hostname continúan verificándose.
+        """
+
+        mode = str(connection.get("tls_verification") or "system")
+        if mode == "system":
+            return None
+        if mode == "disabled":
+            return ssl._create_unverified_context()
+        context = ssl.create_default_context()
+        context.load_verify_locations(cadata=str(connection.get("tls_ca_pem") or ""))
+        strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
+        if strict_flag:
+            context.verify_flags &= ~strict_flag
+        return context
+
+    @classmethod
+    def _urlopen(cls, request: urllib.request.Request, connection: dict[str, Any],
+                 timeout: int = 20):
+        """Abre HTTPS con la política TLS de la conexión sin alterar el proceso global."""
+
+        context = cls._tls_context(connection)
+        if context is None:
+            return urllib.request.urlopen(request, timeout=timeout)
+        return urllib.request.urlopen(request, timeout=timeout, context=context)
+
     def connections(self) -> list[dict[str, Any]]:
         """Devuelve la vista pública de conexiones con indicadores de secretos."""
 
@@ -860,7 +891,7 @@ class ClouderaCatalog:
             request = urllib.request.Request(renewal_url, method="GET",
                 headers={"Authorization": f"Basic {basic}", "Accept": "application/json"})
             try:
-                with urllib.request.urlopen(request, timeout=20) as response: payload = json.load(response)
+                with self._urlopen(request, connection, timeout=20) as response: payload = json.load(response)
             except urllib.error.HTTPError as exc:
                 raise RuntimeError(f"Knox rechazó la renovación con HTTP {exc.code}") from exc
             except (OSError, ValueError) as exc:
@@ -975,7 +1006,7 @@ class ClouderaCatalog:
                      "Content-Type": "application/json"})
         started = datetime.now(timezone.utc)
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with self._urlopen(request, connection, timeout=20) as response:
                 code = response.status
             contract = ("nim-embedding-query" if payload and payload.get("input_type") == "query"
                         else ("triton-readiness" if "/v2/health/ready" in target else protocol))
@@ -1046,15 +1077,16 @@ class ClouderaCatalog:
             raise RuntimeError(f"El JWT de esta conexión caducó en {metadata['token_expires_at']}. Edítala y pega un token nuevo")
         return connection
 
-    @staticmethod
-    def _request(url: str, token: str, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
+    def _request(self, url: str, token: str, method: str = "GET",
+                 payload: dict[str, Any] | None = None,
+                 connection: dict[str, Any] | None = None) -> Any:
         """Cliente JSON pequeño que traduce errores HTTP a mensajes operables."""
 
         body = json.dumps(payload).encode() if payload is not None else None
         request = urllib.request.Request(url, data=body, method=method,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"})
         try:
-            with urllib.request.urlopen(request, timeout=20) as response: return json.load(response)
+            with self._urlopen(request, connection or {}, timeout=20) as response: return json.load(response)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")[:500]
             if exc.code in {401, 403}:
@@ -1088,7 +1120,10 @@ class ClouderaCatalog:
         connection = self._connection(connection_id)
         if connection["kind"] == "inference":
             try:
-                payload = self._request(f"{connection['url']}/api/v1alpha1/listEndpoints", connection["token"], "POST", {"namespace": "serving-default"})
+                payload = self._request(
+                    f"{connection['url']}/api/v1alpha1/listEndpoints", connection["token"],
+                    "POST", {"namespace": "serving-default"}, connection,
+                )
             except RuntimeError as exc:
                 if (connection.get("platform") == "onpremise"
                         and (connection.get("credential_type") == "knox_api_key"
@@ -1107,7 +1142,9 @@ class ClouderaCatalog:
                 detail: dict[str, Any] = {}
                 try:
                     described = self._request(f"{connection['url']}/api/v1alpha1/describeEndpoint",
-                        connection["token"], "POST", {"namespace": item.get("namespace") or "serving-default", "name": external_id})
+                        connection["token"], "POST",
+                        {"namespace": item.get("namespace") or "serving-default", "name": external_id},
+                        connection)
                     if isinstance(described, dict): detail = described
                 except RuntimeError:
                     # listEndpoints ya contiene los campos esenciales y debe
@@ -1147,7 +1184,10 @@ class ClouderaCatalog:
                                     else self.connection_environment_name(connection_id)),
                     **profile, **self.model_token_status(connection_id, external_id)})
             return discovered
-        projects = self._items(self._request(f"{connection['url']}/api/v2/projects?page_size=100", connection["token"]), "projects", "items")
+        projects = self._items(self._request(
+            f"{connection['url']}/api/v2/projects?page_size=100", connection["token"],
+            connection=connection,
+        ), "projects", "items")
         discovered = []
         parsed_base = urllib.parse.urlparse(connection["url"])
         modelservice_host = (parsed_base.hostname if (parsed_base.hostname or "").startswith("modelservice.")
@@ -1157,7 +1197,10 @@ class ClouderaCatalog:
         for project in projects[:50]:
             project_id = str(project.get("id") or "")
             if not project_id: continue
-            models = self._items(self._request(f"{connection['url']}/api/v2/projects/{project_id}/models?page_size=100", connection["token"]), "models", "items")
+            models = self._items(self._request(
+                f"{connection['url']}/api/v2/projects/{project_id}/models?page_size=100",
+                connection["token"], connection=connection,
+            ), "models", "items")
             for item in models:
                 external_id = str(item.get("id") or item.get("name"))
                 access_key = str(item.get("access_key") or item.get("accessKey") or "")
@@ -1167,7 +1210,7 @@ class ClouderaCatalog:
                 try:
                     build_payload = self._request(
                         f"{connection['url']}/api/v2/projects/{project_id}/models/{external_id}/builds?page_size=100",
-                        connection["token"])
+                        connection["token"], connection=connection)
                     builds = self._items(build_payload, "builds", "items")
                     for build in builds:
                         build_id = str(build.get("id") or "")
@@ -1175,7 +1218,7 @@ class ClouderaCatalog:
                             continue
                         deployment_payload = self._request(
                             f"{connection['url']}/api/v2/projects/{project_id}/models/{external_id}/builds/{build_id}/deployments?page_size=100",
-                            connection["token"])
+                            connection["token"], connection=connection)
                         deployments.extend(self._items(deployment_payload, "deployments", "items"))
                 except RuntimeError:
                     deployments = []
