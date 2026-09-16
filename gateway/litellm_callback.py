@@ -121,6 +121,7 @@ def _details(kwargs: dict[str, Any], start: Any, end: Any) -> dict[str, Any]:
         "ttft_ms": _ttft_ms(kwargs, start, end),
         "guardrail_status": guardrail.get("status"),
         "guardrail_reason": guardrail.get("reason"),
+        "parameters": _metadata(kwargs).get("dashboard_effective_parameters"),
     }
 
 
@@ -131,6 +132,41 @@ def _guardrail_settings() -> dict[str, Any]:
         return json.loads((_root() / "runtime" / "dashboard_settings.json").read_text(encoding="utf-8")).get("guardrail", {})
     except (OSError, ValueError, TypeError):
         return {}
+
+
+def _runtime_settings() -> dict[str, Any]:
+    """Lee las reglas dinámicas; un fallo nunca debe impedir la inferencia."""
+
+    try:
+        value = json.loads((_root() / "runtime" / "dashboard_settings.json").read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+_NON_LOGGED_PARAMETERS = {
+    "api_base", "api_key", "authorization", "headers", "input", "messages",
+    "metadata", "model", "prompt", "request_timeout",
+}
+
+
+def _merge_parameters(target: dict[str, Any], configured: dict[str, Any], overwrite: bool) -> None:
+    """Fusiona parámetros incluyendo diccionarios como ``extra_body``."""
+
+    for key, value in configured.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _merge_parameters(target[key], value, overwrite)
+        elif overwrite or key not in target:
+            target[key] = value
+
+
+def _effective_parameters(data: dict[str, Any]) -> dict[str, Any]:
+    """Devuelve sólo opciones de inferencia, nunca contenido ni credenciales."""
+
+    return {
+        str(key): value for key, value in data.items()
+        if str(key).lower() not in _NON_LOGGED_PARAMETERS and not str(key).startswith("litellm_")
+    }
 
 
 def _provider_model(alias: str) -> str | None:
@@ -211,19 +247,29 @@ class DashboardLogger(CustomLogger):
         levanta una excepción antes de consumir el modelo principal.
         """
 
-        settings = _guardrail_settings()
+        runtime = _runtime_settings()
+        settings = runtime.get("guardrail") or {}
         target = str(data.get("model") or "")
+        parameter_settings = (runtime.get("model_parameters") or {}).get(target) or {}
+        configured = parameter_settings.get("configured") or {}
+        _merge_parameters(data, configured, parameter_settings.get("policy") == "model_wins")
+        metadata = dict(data.get("metadata") or {})
+        metadata["dashboard_effective_parameters"] = _effective_parameters(data)
+        metadata["dashboard_parameter_policy"] = parameter_settings.get("policy", "caller_wins")
+        data["metadata"] = metadata
         provider_model = _provider_model(target)
         messages = data.get("messages")
         if provider_model:
-            metadata = dict(data.get("metadata") or {})
             metadata["dashboard_model_alias"] = target
             data["metadata"] = metadata
             api_key = _provider_api_key(target)
             if api_key:
                 data["api_key"] = api_key
+        excluded = {str(name) for name in (settings.get("excluded_models") or [])}
+        embedding_call = "embedding" in str(call_type).lower()
         if (not settings.get("enabled") or not settings.get("provider_model") or
-                not isinstance(messages, list) or target == settings.get("model")):
+                not isinstance(messages, list) or target == settings.get("model") or
+                target in excluded or embedding_call):
             if provider_model:
                 data["model"] = provider_model
             return data
@@ -238,7 +284,8 @@ class DashboardLogger(CustomLogger):
                    origin_ip=_origin_ip({"litellm_params": {"metadata": data.get("metadata") or {}}}),
                    provider_ip=_provider_ip({"api_base": settings.get("api_base")}),
                    ttft_ms=_duration_ms(guardrail_started, guardrail_ended),
-                   guardrail_status=verdict["status"], guardrail_reason=verdict["reason"])
+                   guardrail_status=verdict["status"], guardrail_reason=verdict["reason"],
+                   parameters={"stream": False})
         metadata = dict(data.get("metadata") or {})
         metadata["dashboard_guardrail"] = verdict
         data["metadata"] = metadata

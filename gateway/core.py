@@ -8,6 +8,8 @@ eso esta clase exige dos señales: proceso vivo y puerto accesible.
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import os
 import re
 import shutil
@@ -132,6 +134,13 @@ class GatewayManager:
         guardrail = (data.get("dashboard_settings") or {}).get("guardrail", {})
         if guardrail.get("enabled") and guardrail.get("model") not in names:
             raise RuntimeError("El modelo guardrail debe ser un alias existente")
+        exclusions = guardrail.get("excluded_models") or []
+        if (not isinstance(exclusions, list)
+                or any(not isinstance(name, str) or name not in names for name in exclusions)):
+            raise RuntimeError("Las exclusiones del guardrail deben usar alias existentes")
+        advisor = (data.get("dashboard_settings") or {}).get("advisor", {})
+        if advisor.get("enabled") and advisor.get("model") not in names:
+            raise RuntimeError("El modelo asesor debe ser un alias existente")
         return data
 
     def validate_config_text(self, content: str) -> dict[str, Any]:
@@ -164,6 +173,38 @@ class GatewayManager:
         return {"valid": True, "model_count": len(names), "models": names,
                 "missing_environment_variables": sorted(v for v in referenced if not os.environ.get(v) and not local_credentials.get(v))}
 
+    @staticmethod
+    def _activation_fingerprint(entry: dict[str, Any]) -> str:
+        """Firma estable de todo lo que puede modificar una inferencia."""
+
+        clean = json.loads(json.dumps(entry, ensure_ascii=False, default=str))
+        info = clean.get("model_info") or {}
+        info.pop("dashboard_validated_at", None)
+        info.pop("dashboard_validation_fingerprint", None)
+        encoded = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    def validate_model_activation_changes(self, content: str) -> None:
+        """Impide que el editor YAML active modelos nuevos o alterados sin sonda."""
+
+        try:
+            candidate = self._validate_config(yaml.safe_load(content))
+        except yaml.YAMLError as exc:
+            raise RuntimeError(f"YAML no válido: {exc}") from exc
+        current = {str(item.get("model_name")): item for item in self._source().get("model_list", [])}
+        for entry in candidate.get("model_list", []):
+            name = str(entry.get("model_name") or "")
+            previous = current.get(name)
+            if previous and self._activation_fingerprint(previous) == self._activation_fingerprint(entry):
+                continue
+            info = entry.get("model_info") or {}
+            fingerprint = str(info.get("dashboard_validation_fingerprint") or "")
+            if not fingerprint or not hmac.compare_digest(fingerprint, self._activation_fingerprint(entry)):
+                raise RuntimeError(
+                    f"El modelo '{name}' es nuevo o ha cambiado. Usa el formulario guiado para "
+                    "probar todos sus parámetros antes de activarlo"
+                )
+
     def config_text(self) -> str:
         """Devuelve el YAML fuente, incluidos comentarios y formato manual."""
         return self.source_config.read_text(encoding="utf-8")
@@ -173,7 +214,9 @@ class GatewayManager:
 
         return dict(self._source().get("dashboard_settings") or {})
 
-    def set_guardrail(self, enabled: bool, model: str, policy: str = "warn", restart: bool = True) -> dict[str, Any]:
+    def set_guardrail(self, enabled: bool, model: str, policy: str = "warn",
+                      excluded_models: list[str] | None = None,
+                      restart: bool = True) -> dict[str, Any]:
         """Configura el filtro global y reutiliza la actualización transaccional."""
 
         with self._config_lock:
@@ -186,9 +229,35 @@ class GatewayManager:
                 raise RuntimeError("Selecciona un modelo guardrail existente")
             if policy not in {"warn", "block"}:
                 raise RuntimeError("La política del guardrail debe ser permisiva o restringida")
-            config["dashboard_settings"] = {"guardrail": {
+            exclusions = list(dict.fromkeys(
+                str(name).strip() for name in (excluded_models or []) if str(name).strip()
+            ))
+            unknown = [name for name in exclusions if name not in names]
+            if unknown:
+                raise RuntimeError(f"Exclusiones de guardrail no encontradas: {', '.join(unknown)}")
+            exclusions = [name for name in exclusions if name != model]
+            dashboard = dict(config.get("dashboard_settings") or {})
+            dashboard["guardrail"] = {
                 "enabled": enabled, "model": model, "policy": policy, "timeout": 8,
-            }}
+                "excluded_models": exclusions,
+            }
+            config["dashboard_settings"] = dashboard
+            return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
+
+    def set_advisor(self, enabled: bool, model: str, restart: bool = True) -> dict[str, Any]:
+        """Selecciona el modelo que recomienda parámetros en el panel."""
+
+        with self._config_lock:
+            config = self._source()
+            enabled = bool(enabled and model)
+            if not enabled:
+                model = ""
+            names = {str(item.get("model_name")) for item in config.get("model_list", [])}
+            if enabled and model not in names:
+                raise RuntimeError("Selecciona un modelo asesor existente")
+            dashboard = dict(config.get("dashboard_settings") or {})
+            dashboard["advisor"] = {"enabled": enabled, "model": model, "timeout": 120}
+            config["dashboard_settings"] = dashboard
             return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
 
     def update_config(self, content: str, restart: bool = True) -> dict[str, Any]:
@@ -226,6 +295,8 @@ class GatewayManager:
         """Añade un modelo mediante el mismo camino transaccional del editor."""
         with self._config_lock:
             config = self._source()
+            entry = dict(entry)
+            entry.pop("_dashboard_managed_parameters", None)
             name = str(entry.get("model_name") or "").strip()
             if any(str(item.get("model_name")) == name for item in config.get("model_list", [])):
                 raise RuntimeError(f"Ya existe un modelo con el alias '{name}'")
@@ -255,6 +326,8 @@ class GatewayManager:
                      restart: bool = True) -> dict[str, Any]:
         """Modifica un modelo y repara todas las referencias si cambia el alias."""
         with self._config_lock:
+            entry = dict(entry)
+            managed_update = bool(entry.pop("_dashboard_managed_parameters", False))
             config = self._source()
             models = config.get("model_list", [])
             index = next((i for i, item in enumerate(models) if str(item.get("model_name")) == current_name), None)
@@ -265,14 +338,33 @@ class GatewayManager:
                 raise RuntimeError(f"Ya existe un modelo con el alias '{new_name}'")
             old_params = dict(models[index].get("litellm_params") or {})
             new_params = dict(entry.get("litellm_params") or {})
-            managed = {"model", "api_base", "api_key", "reasoning_effort", "keep_alive", "timeout",
-                       "drop_params", "encoding_format"}
             if "api_key" not in new_params and old_params.get("api_key"):
-                managed.remove("api_key")
-            models[index] = {**models[index], "model_name": new_name,
-                             "litellm_params": {**{k: v for k, v in old_params.items() if k not in managed}, **new_params}}
-            if entry.get("model_info"):
-                models[index]["model_info"] = entry["model_info"]
+                new_params["api_key"] = old_params["api_key"]
+            if managed_update:
+                models[index] = {"model_name": new_name, "litellm_params": new_params}
+            else:
+                managed = {"model", "api_base", "api_key", "reasoning_effort", "keep_alive", "timeout",
+                           "drop_params", "encoding_format"}
+                models[index] = {**models[index], "model_name": new_name,
+                                 "litellm_params": {**{k: v for k, v in old_params.items() if k not in managed}, **new_params}}
+            if managed_update or entry.get("model_info"):
+                old_info = dict(models[index].get("model_info") or {})
+                new_info = dict(entry.get("model_info") or {})
+                managed_info = {
+                    "dashboard_backend_profile", "dashboard_compatibility_profile",
+                    "dashboard_reasoning_mode", "dashboard_preserve_thinking",
+                    "dashboard_parameter_policy", "dashboard_extra_parameters",
+                    "dashboard_validated_at", "dashboard_validation_fingerprint",
+                    "dashboard_context_window", "max_input_tokens", "max_output_tokens",
+                    "supports_reasoning", "dashboard_source", "dashboard_cloudera_kind",
+                    "dashboard_serving_engine", "dashboard_task", "dashboard_embedding_input_type",
+                } if managed_update else set(new_info)
+                merged_info = (new_info if managed_update else
+                               {**{k: v for k, v in old_info.items() if k not in managed_info}, **new_info})
+                if merged_info:
+                    models[index]["model_info"] = merged_info
+                else:
+                    models[index].pop("model_info", None)
             router = config.get("router_settings") or {}
             for mapping in router.get("fallbacks", []):
                 if isinstance(mapping, dict):
@@ -285,6 +377,13 @@ class GatewayManager:
             guardrail = (config.get("dashboard_settings") or {}).get("guardrail", {})
             if guardrail.get("model") == current_name:
                 guardrail["model"] = new_name
+            guardrail["excluded_models"] = [
+                new_name if name == current_name else name
+                for name in (guardrail.get("excluded_models") or [])
+            ]
+            advisor = (config.get("dashboard_settings") or {}).get("advisor", {})
+            if advisor.get("model") == current_name:
+                advisor["model"] = new_name
             disabled = set(self._state().get("disabled_models", []))
             if current_name in disabled:
                 disabled.remove(current_name); disabled.add(new_name); self._write_state(disabled)
@@ -313,6 +412,12 @@ class GatewayManager:
             guardrail = (config.get("dashboard_settings") or {}).get("guardrail", {})
             if guardrail.get("model") == name:
                 guardrail.update({"enabled": False, "model": ""})
+            guardrail["excluded_models"] = [
+                item for item in (guardrail.get("excluded_models") or []) if item != name
+            ]
+            advisor = (config.get("dashboard_settings") or {}).get("advisor", {})
+            if advisor.get("model") == name:
+                advisor.update({"enabled": False, "model": ""})
             disabled = set(self._state().get("disabled_models", [])); disabled.discard(name); self._write_state(disabled)
             return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
 
@@ -383,10 +488,32 @@ class GatewayManager:
                 "api_base": params.get("api_base", ""),
                 "api_key": (params.get("api_key", "") if str(params.get("api_key", "")).startswith("os.environ/")
                             else ("Configurada (oculta)" if params.get("api_key") else "")),
+                "backend_profile": str(model_info.get("dashboard_backend_profile") or "auto"),
+                "compatibility_profile": str(model_info.get("dashboard_compatibility_profile") or "auto"),
+                "context_window": model_info.get("dashboard_context_window", ""),
+                "max_input_tokens": model_info.get("max_input_tokens", ""),
+                "max_output_tokens": model_info.get("max_output_tokens", ""),
+                "default_max_tokens": params.get("max_tokens", ""),
+                "temperature": params.get("temperature", ""),
+                "top_p": params.get("top_p", ""),
+                "top_k": (params.get("extra_body") or {}).get("top_k", ""),
+                "min_p": (params.get("extra_body") or {}).get("min_p", ""),
+                "repetition_penalty": (params.get("extra_body") or {}).get("repetition_penalty", ""),
+                "frequency_penalty": params.get("frequency_penalty", ""),
+                "presence_penalty": params.get("presence_penalty", ""),
+                "seed": params.get("seed", ""),
+                "stop": params.get("stop", []),
+                "reasoning_mode": str(model_info.get("dashboard_reasoning_mode") or "auto"),
                 "reasoning_effort": params.get("reasoning_effort", ""),
+                "preserve_thinking": bool(model_info.get("dashboard_preserve_thinking", False)),
+                "num_retries": params.get("num_retries", ""),
+                "max_parallel_requests": params.get("max_parallel_requests", ""),
                 "keep_alive": params.get("keep_alive", ""),
                 "timeout": params.get("timeout", ""),
                 "drop_params": bool(params.get("drop_params", False)),
+                "parameter_policy": str(model_info.get("dashboard_parameter_policy") or "caller_wins"),
+                "extra_parameters": dict(model_info.get("dashboard_extra_parameters") or {}),
+                "validated_at": str(model_info.get("dashboard_validated_at") or ""),
                 "fallbacks": fallback_map.get(name, []),
                 "enabled": name not in disabled,
                 "mode": "embedding" if "embed" in searchable_name or "bge-" in searchable_name else "chat",
@@ -531,12 +658,36 @@ class GatewayManager:
         # elegido el deployment correcto.
         provider_models: dict[str, str] = {}
         provider_api_key_env: dict[str, str] = {}
+        model_parameters: dict[str, dict[str, Any]] = {}
         has_workbench_models = False
         for item in config["model_list"]:
             params = item.get("litellm_params") or {}
             provider_model = str(params.get("model") or "")
             api_key = str(params.get("api_key") or "")
             model_info = item.get("model_info") or {}
+            public_name = str(item.get("model_name") or "")
+            configured = {
+                key: value for key, value in params.items()
+                if key not in {"api_base", "api_key", "drop_params", "max_parallel_requests",
+                               "model", "num_retries", "timeout"}
+            }
+            extra_parameters = model_info.get("dashboard_extra_parameters") or {}
+            for dotted_key, value in extra_parameters.items():
+                target = configured
+                parts = str(dotted_key).split(".")
+                for part in parts[:-1]:
+                    child = target.get(part)
+                    if not isinstance(child, dict):
+                        child = {}
+                        target[part] = child
+                    target = child
+                target[parts[-1]] = value
+            model_parameters[public_name] = {
+                "policy": str(model_info.get("dashboard_parameter_policy") or "caller_wins"),
+                "configured": configured,
+                "backend": str(model_info.get("dashboard_backend_profile") or
+                               model_info.get("dashboard_serving_engine") or "auto"),
+            }
             api_hostname = (urlparse(str(params.get("api_base") or "")).hostname or "").lower()
             is_workbench = (
                 model_info.get("dashboard_cloudera_kind") == "workbench"
@@ -568,7 +719,13 @@ class GatewayManager:
                     provider_api_key_env[public_alias] = api_key.removeprefix("os.environ/")
                 # `extra_body.model` no sustituye el campo superior que genera
                 # el SDK OpenAI y puede producir dos valores contradictorios.
-                params.pop("extra_body", None)
+                # Conservamos el resto: vLLM/NIM reciben aquí muestreo y thinking.
+                extra_body = dict(params.get("extra_body") or {})
+                extra_body.pop("model", None)
+                if extra_body:
+                    params["extra_body"] = extra_body
+                else:
+                    params.pop("extra_body", None)
         settings = dict(config.get("litellm_settings") or {})
         current_callbacks = settings.get("callbacks", [])
         if isinstance(current_callbacks, str):
@@ -602,6 +759,14 @@ class GatewayManager:
             config.pop("general_settings", None)
         guardrail = dict(dashboard_settings.get("guardrail") or {})
         guardrail["enabled"] = bool(guardrail.get("enabled") and guardrail.get("model"))
+        automatic_embedding_exclusions = {
+            str(item.get("model_name") or "") for item in config.get("model_list", [])
+            if "embed" in f"{item.get('model_name', '')} {(item.get('litellm_params') or {}).get('model', '')} {(item.get('model_info') or {}).get('dashboard_task', '')}".lower()
+            or "bge-" in str((item.get("litellm_params") or {}).get("model") or "").lower()
+        }
+        guardrail["excluded_models"] = sorted({
+            str(name) for name in (guardrail.get("excluded_models") or []) if name
+        } | automatic_embedding_exclusions)
         guardrail_name = guardrail.get("model")
         guardrail_entry = next((item for item in config.get("model_list", []) if item.get("model_name") == guardrail_name), None)
         if guardrail["enabled"] and guardrail_entry:
@@ -621,6 +786,8 @@ class GatewayManager:
                 "guardrail": guardrail,
                 "provider_models": provider_models,
                 "provider_api_key_env": provider_api_key_env,
+                "model_parameters": model_parameters,
+                "advisor": dict(dashboard_settings.get("advisor") or {}),
             }, indent=2),
             encoding="utf-8",
         )

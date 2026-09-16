@@ -80,6 +80,32 @@ def test_cloudera_alias_maps_to_provider_model_for_callback(tmp_path):
     assert dashboard["provider_models"]["nemotron-publico"] == "openai/nvidia/nemotron-3-super-120b-a12b"
 
 
+def test_cloudera_active_config_keeps_supported_vllm_extra_body(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["model_list"][0] = {
+        "model_name": "qwen",
+        "litellm_params": {
+            "model": "openai/Qwen/Qwen3-32B",
+            "api_base": "https://inference.example/v1",
+            "api_key": "os.environ/CLOUDERA_DEMO_CDP_TOKEN",
+            "extra_body": {
+                "model": "wrong",
+                "top_k": 40,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        },
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    manager._write_active_config()
+    active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
+    assert active["model_list"][0]["litellm_params"]["extra_body"] == {
+        "top_k": 40,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
 def test_workbench_model_loads_custom_provider_and_migrates_old_prefix(tmp_path):
     manager = make_manager(tmp_path)
     config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
@@ -136,6 +162,73 @@ def test_cloudera_callback_logs_with_public_alias_after_provider_rewrite(tmp_pat
     }
     asyncio.run(callback.async_log_success_event(kwargs, {"usage": {}}, now, now))
     assert len(read_day_logs(runtime, "nemotron-publico", now.date())) == 1
+
+
+def test_callback_enforces_model_parameters_and_logs_effective_values(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "dashboard_settings.json").write_text(__import__("json").dumps({
+        "guardrail": {"enabled": False},
+        "model_parameters": {"qwen": {
+            "policy": "model_wins",
+            "configured": {"temperature": 0.2, "extra_body": {"top_k": 40}},
+        }},
+    }), encoding="utf-8")
+    monkeypatch.setenv("IA_GATEWAY_ROOT", str(tmp_path))
+
+    callback = DashboardLogger()
+    data = {"model": "qwen", "messages": [], "temperature": 1.0,
+            "extra_body": {"top_k": 5, "guided_json": {"type": "object"}}}
+    rewritten = asyncio.run(callback.async_pre_call_hook(None, None, data, "completion"))
+
+    assert rewritten["temperature"] == 0.2
+    assert rewritten["extra_body"] == {"top_k": 40, "guided_json": {"type": "object"}}
+    effective = rewritten["metadata"]["dashboard_effective_parameters"]
+    assert effective["temperature"] == 0.2
+    assert effective["extra_body"]["top_k"] == 40
+
+    now = datetime.now().astimezone()
+    asyncio.run(callback.async_log_success_event({
+        "model": "qwen", "messages": [], "temperature": rewritten["temperature"],
+        "litellm_params": {"metadata": rewritten["metadata"]},
+    }, {"usage": {}}, now, now))
+    row = read_day_logs(runtime, "qwen", now.date())[0]
+    assert row["parameters"]["temperature"] == 0.2
+    assert row["parameters"]["extra_body"]["guided_json"] == {"type": "object"}
+
+
+def test_callback_skips_guardrail_for_explicit_exclusions_and_embeddings(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "dashboard_settings.json").write_text(__import__("json").dumps({
+        "guardrail": {
+            "enabled": True,
+            "model": "guardian",
+            "provider_model": "ollama/guardian",
+            "api_base": "http://localhost:11434",
+            "excluded_models": ["chat-interno"],
+        },
+    }), encoding="utf-8")
+    monkeypatch.setenv("IA_GATEWAY_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "gateway.litellm_callback._classify_with_guardrail",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("El guardrail no debe ejecutarse")),
+    )
+    callback = DashboardLogger()
+
+    excluded = asyncio.run(callback.async_pre_call_hook(
+        None, None,
+        {"model": "chat-interno", "messages": [{"role": "user", "content": "hola"}]},
+        "completion",
+    ))
+    embedding = asyncio.run(callback.async_pre_call_hook(
+        None, None,
+        {"model": "vectores", "input": "hola"},
+        "embedding",
+    ))
+
+    assert "dashboard_guardrail" not in excluded["metadata"]
+    assert "dashboard_guardrail" not in embedding["metadata"]
 
 
 def test_origin_ip_prefers_edge_header_over_litellm_loopback():
@@ -212,6 +305,26 @@ def test_log_store_keeps_network_and_latency_metadata(tmp_path):
     assert log["origin_ip"] == "192.168.1.20"
     assert log["provider_ip"] == "104.18.6.192"
     assert log["ttft_ms"] == 85
+
+
+def test_runtime_config_exposes_parameter_policy_and_typed_extras(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["model_list"][0]["litellm_params"]["temperature"] = 0.3
+    config["model_list"][0]["model_info"] = {
+        "dashboard_parameter_policy": "model_wins",
+        "dashboard_extra_parameters": {"extra_body.guided_json": {"type": "object"}},
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    manager._write_active_config()
+    settings = __import__("json").loads(manager.dashboard_settings_file.read_text(encoding="utf-8"))
+
+    assert settings["model_parameters"]["uno"] == {
+        "policy": "model_wins",
+        "configured": {"temperature": 0.3, "extra_body": {"guided_json": {"type": "object"}}},
+        "backend": "auto",
+    }
 
 
 def test_daily_logs_kpis_and_excel_export(tmp_path):
@@ -451,6 +564,24 @@ def test_dashboard_settings_are_not_forwarded_to_litellm(tmp_path):
     assert settings["guardrail"]["provider_model"] == "dos"
 
 
+def test_embeddings_are_automatically_excluded_from_guardrail(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.config_text())
+    config["model_list"][0] = {
+        "model_name": "vectores",
+        "litellm_params": {"model": "ollama/bge-m3:latest"},
+    }
+    config["dashboard_settings"] = {
+        "guardrail": {"enabled": True, "model": "dos", "policy": "warn", "excluded_models": []},
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    manager._write_active_config()
+    settings = __import__("json").loads(manager.dashboard_settings_file.read_text(encoding="utf-8"))
+
+    assert settings["guardrail"]["excluded_models"] == ["vectores"]
+
+
 def test_sqlite_mode_maps_dynamic_credentials_and_removes_external_database(tmp_path):
     manager = make_manager(tmp_path)
     config = yaml.safe_load(manager.config_text())
@@ -507,6 +638,47 @@ def test_guardrail_without_selected_model_is_disabled(tmp_path):
     settings = __import__("json").loads(manager.dashboard_settings_file.read_text(encoding="utf-8"))
     assert settings["guardrail"]["enabled"] is False
     assert "provider_model" not in settings["guardrail"]
+
+
+def test_advisor_selection_coexists_with_guardrail(tmp_path):
+    manager = make_manager(tmp_path)
+    manager.set_advisor(True, "uno", restart=False)
+    manager.set_guardrail(True, "dos", policy="warn", restart=False)
+
+    dashboard = manager.dashboard_settings()
+    assert dashboard["advisor"] == {"enabled": True, "model": "uno", "timeout": 120}
+    assert dashboard["guardrail"]["model"] == "dos"
+
+
+def test_guardrail_exclusions_follow_rename_and_delete(tmp_path):
+    manager = make_manager(tmp_path)
+    manager.set_guardrail(True, "dos", policy="warn", excluded_models=["uno"], restart=False)
+
+    renamed = manager.update_model(
+        "uno", {"model_name": "nuevo", "litellm_params": {"model": "ollama/nuevo"}}, restart=False,
+    )
+    config = yaml.safe_load(renamed["content"])
+    assert config["dashboard_settings"]["guardrail"]["excluded_models"] == ["nuevo"]
+
+    deleted = manager.delete_model("nuevo", restart=False)
+    config = yaml.safe_load(deleted["content"])
+    assert config["dashboard_settings"]["guardrail"]["excluded_models"] == []
+
+
+def test_advanced_yaml_rejects_unvalidated_model_changes(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["model_list"].append({
+        "model_name": "sin-probar",
+        "litellm_params": {"model": "openai/modelo"},
+    })
+
+    try:
+        manager.validate_model_activation_changes(yaml.safe_dump(config))
+    except RuntimeError as exc:
+        assert "probar todos sus parámetros" in str(exc)
+    else:
+        raise AssertionError("Un modelo nuevo sin prueba no debe poder activarse desde YAML")
 
 
 def test_cloudera_model_origin_metadata_is_exposed(tmp_path):

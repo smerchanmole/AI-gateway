@@ -232,6 +232,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
 import hmac
+import hashlib
 import json
 import re
 import secrets
@@ -262,6 +263,7 @@ INTERNAL_DASHBOARD_PORT = environment_port("IA_GATEWAY_DASHBOARD_PORT", 18080)
 manager = GatewayManager(ROOT)
 cloudera = ClouderaCatalog(ROOT / "runtime")
 auth = AuthStore(ROOT / "runtime")
+_MODEL_VALIDATIONS: dict[str, tuple[str, float]] = {}
 
 # En local el proxy de borde también termina TLS; dentro de Cloudera esa función pertenece
 # al proxy de la plataforma y nuestro listener recibe HTTP sobre loopback.
@@ -519,11 +521,34 @@ class ModelCreate(BaseModel):
     model: str
     api_base: str = ""
     api_key_env: str = ""
+    backend_profile: str = "auto"
+    compatibility_profile: str = "auto"
+    context_window: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+    default_max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    min_p: Optional[float] = None
+    repetition_penalty: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    seed: Optional[int] = None
+    stop: list[str] = Field(default_factory=list)
+    reasoning_mode: str = "auto"
     reasoning_effort: str = ""
+    preserve_thinking: bool = False
+    num_retries: Optional[int] = None
+    max_parallel_requests: Optional[int] = None
     keep_alive: str = ""
     timeout: Optional[float] = None
     fallback_model: str = ""
     drop_params: bool = True
+    parameter_policy: str = "caller_wins"
+    extra_parameters: dict[str, Any] = Field(default_factory=dict)
+    validation_payload: dict[str, Any] = Field(default_factory=dict)
+    validation_path: str = ""
+    validation_id: str = ""
     source: str = ""
     cloudera_kind: str = ""
     serving_engine: str = ""
@@ -538,7 +563,23 @@ class GuardrailUpdate(BaseModel):
     enabled: bool
     model: str = ""
     policy: str = "warn"
+    excluded_models: list[str] = Field(default_factory=list)
     restart: bool = True
+
+
+class AdvisorUpdate(BaseModel):
+    """Modelo que propone parámetros; nunca los aplica sin confirmación."""
+
+    enabled: bool
+    model: str = ""
+    restart: bool = True
+
+
+class ModelAdviceRequest(BaseModel):
+    """Caso de uso que el asesor convierte en una propuesta estructurada."""
+
+    model_name: str
+    use_case: str
 
 
 class ClouderaConnection(BaseModel):
@@ -562,6 +603,7 @@ class ClouderaConnection(BaseModel):
     renewal_url: str = ""
     workload_name: str = "DE"
     onpremise_version: str = "legacy"
+    credential_expires_at: str = ""
 
 
 class ClouderaTokenRenewal(BaseModel):
@@ -597,6 +639,84 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
         raise RuntimeError("Alias y modelo LiteLLM son obligatorios")
     if model.api_key_env and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", model.api_key_env.strip()):
         raise RuntimeError("La variable API key debe tener formato MAYUSCULAS_CON_GUIONES_BAJOS")
+    backend = model.backend_profile.strip().lower() or "auto"
+    compatibility = model.compatibility_profile.strip().lower() or "auto"
+    allowed_backends = {"auto", "openai", "vllm", "nim", "triton", "ollama", "workbench"}
+    allowed_compatibility = {"auto", "cloudera_1_5_5_sp3", "current"}
+    if backend not in allowed_backends:
+        raise RuntimeError("Perfil de backend no reconocido")
+    if compatibility not in allowed_compatibility:
+        raise RuntimeError("Perfil de compatibilidad no reconocido")
+    if model.reasoning_mode not in {"auto", "enabled", "disabled"}:
+        raise RuntimeError("El modo de razonamiento debe ser automático, activado o desactivado")
+    if model.reasoning_effort not in {"", "minimal", "low", "medium", "high"}:
+        raise RuntimeError("Nivel de razonamiento no reconocido")
+    if model.parameter_policy not in {"caller_wins", "model_wins"}:
+        raise RuntimeError("La política de parámetros debe permitir al cliente o imponer el modelo")
+    if len(model.extra_parameters) > 64:
+        raise RuntimeError("Un modelo no puede declarar más de 64 parámetros extra")
+    reserved_extra_roots = {
+        "api_base", "api_key", "authorization", "headers", "input", "messages",
+        "metadata", "model", "prompt", "stream",
+    }
+    for key in model.extra_parameters:
+        parts = str(key).split(".")
+        if (not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", part or "") for part in parts)
+                or parts[0].lower() in reserved_extra_roots):
+            raise RuntimeError(f"Parámetro extra no permitido: {key}")
+    if len(json.dumps(model.extra_parameters, ensure_ascii=False, default=str).encode("utf-8")) > 32_768:
+        raise RuntimeError("Los parámetros extra no pueden superar 32 KB")
+
+    effective_backend = backend
+    if effective_backend == "auto":
+        effective_backend = ("workbench" if model.cloudera_kind == "workbench" else
+                             model.serving_engine.strip().lower() or
+                             ("ollama" if provider_model.startswith("ollama/") else "openai"))
+
+    def bounded(value: int | float | None, label: str, minimum: float,
+                maximum: float | None = None) -> None:
+        if value is None:
+            return
+        if isinstance(value, bool) or value < minimum or (maximum is not None and value > maximum):
+            suffix = f" y {maximum:g}" if maximum is not None else ""
+            raise RuntimeError(f"{label} debe estar entre {minimum:g}{suffix}")
+
+    bounded(model.context_window, "La ventana de contexto", 1)
+    bounded(model.max_output_tokens, "La capacidad máxima de salida", 1)
+    bounded(model.default_max_tokens, "La salida predeterminada", 1)
+    bounded(model.temperature, "Temperature", 0, 2)
+    bounded(model.top_p, "Top P", 0, 1)
+    bounded(model.top_k, "Top K", -1)
+    bounded(model.min_p, "Min P", 0, 1)
+    bounded(model.repetition_penalty, "Repetition penalty", 0, 2)
+    bounded(model.frequency_penalty, "Frequency penalty", -2, 2)
+    bounded(model.presence_penalty, "Presence penalty", -2, 2)
+    bounded(model.seed, "Seed", 0)
+    bounded(model.num_retries, "Reintentos", 0, 10)
+    bounded(model.max_parallel_requests, "Concurrencia", 1)
+    if (model.context_window is not None and model.max_output_tokens is not None
+            and model.max_output_tokens >= model.context_window):
+        raise RuntimeError("La salida máxima debe ser menor que la ventana total de contexto")
+    if (model.max_output_tokens is not None and model.default_max_tokens is not None
+            and model.default_max_tokens > model.max_output_tokens):
+        raise RuntimeError("La salida predeterminada no puede superar la capacidad máxima de salida")
+
+    generation_values = (
+        model.default_max_tokens, model.temperature, model.top_p, model.top_k,
+        model.min_p, model.repetition_penalty, model.frequency_penalty,
+        model.presence_penalty, model.seed,
+    )
+    if effective_backend == "triton" and (any(value is not None for value in generation_values)
+                                            or model.stop or model.reasoning_mode != "auto"
+                                            or model.reasoning_effort):
+        raise RuntimeError(
+            "Triton OIP configura generación, tensores y batching en el deployment; "
+            "no admite los parámetros OpenAI de este formulario"
+        )
+    if (compatibility == "cloudera_1_5_5_sp3" and effective_backend == "workbench"
+            and model.default_max_tokens is not None and model.default_max_tokens > 512):
+        raise RuntimeError("Cloudera AI Workbench 1.5.5 SP3 limita este adaptador a 512 tokens de salida")
+
     params: dict[str, object] = {"model": provider_model, "drop_params": model.drop_params}
     if (model.source == "cloudera" and model.serving_engine == "nim"
             and "embed" in model.task.lower()):
@@ -605,19 +725,205 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
         params["encoding_format"] = "float"
     if model.api_base.strip(): params["api_base"] = model.api_base.strip()
     if model.api_key_env.strip(): params["api_key"] = f"os.environ/{model.api_key_env.strip()}"
+    if model.default_max_tokens is not None: params["max_tokens"] = model.default_max_tokens
+    if model.temperature is not None: params["temperature"] = model.temperature
+    if model.top_p is not None: params["top_p"] = model.top_p
+    if model.frequency_penalty is not None: params["frequency_penalty"] = model.frequency_penalty
+    if model.presence_penalty is not None: params["presence_penalty"] = model.presence_penalty
+    if model.seed is not None: params["seed"] = model.seed
+    cleaned_stop = [value.strip() for value in model.stop if value.strip()]
+    if cleaned_stop: params["stop"] = cleaned_stop
     if model.reasoning_effort: params["reasoning_effort"] = model.reasoning_effort
+    if model.num_retries is not None: params["num_retries"] = model.num_retries
+    if model.max_parallel_requests is not None: params["max_parallel_requests"] = model.max_parallel_requests
     if model.keep_alive.strip(): params["keep_alive"] = model.keep_alive.strip()
     if model.timeout is not None: params["timeout"] = model.timeout
+
+    if (effective_backend not in {"vllm", "nim", "workbench", "ollama"}
+            and any(value is not None for value in
+                    (model.top_k, model.min_p, model.repetition_penalty))):
+        raise RuntimeError("Top K, Min P y repetition penalty requieren un backend vLLM, NIM, Ollama o Workbench")
+    extra_body: dict[str, object] = {}
+    if effective_backend in {"vllm", "nim", "workbench", "ollama"}:
+        for key, value in {
+            "top_k": model.top_k, "min_p": model.min_p,
+            "repetition_penalty": model.repetition_penalty,
+        }.items():
+            if value is not None:
+                extra_body[key] = value
+    if model.reasoning_mode != "auto":
+        thinking = model.reasoning_mode == "enabled"
+        if effective_backend == "workbench":
+            extra_body["enable_thinking"] = thinking
+            if model.preserve_thinking:
+                extra_body["preserve_thinking"] = True
+        elif effective_backend in {"vllm", "nim"}:
+            extra_body["chat_template_kwargs"] = {"enable_thinking": thinking}
+    if extra_body:
+        params["extra_body"] = extra_body
+
     entry: dict[str, object] = {"model_name": name, "litellm_params": params}
+    model_info: dict[str, object] = {}
+    if backend != "auto":
+        model_info["dashboard_backend_profile"] = backend
+    if compatibility != "auto":
+        model_info["dashboard_compatibility_profile"] = compatibility
+    if model.reasoning_mode != "auto":
+        model_info["dashboard_reasoning_mode"] = model.reasoning_mode
+    if model.preserve_thinking:
+        model_info["dashboard_preserve_thinking"] = True
+    model_info["dashboard_parameter_policy"] = model.parameter_policy
+    if model.extra_parameters:
+        model_info["dashboard_extra_parameters"] = model.extra_parameters
+    if model.context_window is not None:
+        model_info["dashboard_context_window"] = model.context_window
+        model_info["max_input_tokens"] = (model.context_window - model.max_output_tokens
+                                          if model.max_output_tokens is not None else model.context_window)
+    if model.max_output_tokens is not None:
+        model_info["max_output_tokens"] = model.max_output_tokens
+    if model.reasoning_mode != "auto":
+        model_info["supports_reasoning"] = model.reasoning_mode == "enabled"
     if model.source == "cloudera":
-        entry["model_info"] = {
+        model_info.update({
             "dashboard_source": "cloudera",
             "dashboard_cloudera_kind": "workbench" if model.cloudera_kind == "workbench" else "inference",
             "dashboard_serving_engine": model.serving_engine.strip(),
             "dashboard_task": model.task.strip(),
             "dashboard_embedding_input_type": model.embedding_input_type.strip(),
-        }
+        })
+    if model_info:
+        entry["model_info"] = model_info
+    # El gestor retira esta marca antes de escribir YAML. Sirve para distinguir
+    # el formulario completo de consumidores antiguos que envían parches mínimos.
+    entry["_dashboard_managed_parameters"] = True
     return entry
+
+
+def _model_fingerprint(entry: dict[str, object]) -> str:
+    """Identifica exactamente la configuración que superó la prueba real."""
+
+    clean = json.loads(json.dumps(
+        {key: value for key, value in entry.items() if not key.startswith("_dashboard_")},
+        ensure_ascii=False, default=str,
+    ))
+    info = clean.get("model_info") or {}
+    info.pop("dashboard_validated_at", None)
+    info.pop("dashboard_validation_fingerprint", None)
+    encoded = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _register_model_validation(entry: dict[str, object]) -> str:
+    token = secrets.token_urlsafe(24)
+    _MODEL_VALIDATIONS[token] = (_model_fingerprint(entry), time.monotonic() + 900)
+    return token
+
+
+def _consume_model_validation(entry: dict[str, object], token: str) -> None:
+    expected = _MODEL_VALIDATIONS.pop(token, None)
+    if not expected or expected[1] < time.monotonic() or not hmac.compare_digest(expected[0], _model_fingerprint(entry)):
+        raise RuntimeError("Prueba el modelo con todos sus parámetros antes de guardarlo; la validación dura 15 minutos")
+
+
+def _resolved_model_api_key(params: dict[str, Any]) -> str:
+    reference = str(params.get("api_key") or "")
+    if not reference.startswith("os.environ/"):
+        return reference
+    name = reference.removeprefix("os.environ/")
+    return os.environ.get(name, "") or cloudera.environment().get(name, "")
+
+
+def _candidate_parameters(entry: dict[str, Any]) -> dict[str, Any]:
+    """Reproduce la mezcla del callback para que la prueba use los mismos valores."""
+
+    params = dict(entry.get("litellm_params") or {})
+    configured = {
+        key: value for key, value in params.items()
+        if key not in {"api_base", "api_key", "drop_params", "max_parallel_requests",
+                       "model", "num_retries", "timeout"}
+    }
+    for dotted, value in ((entry.get("model_info") or {}).get("dashboard_extra_parameters") or {}).items():
+        target = configured
+        parts = str(dotted).split(".")
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        target[parts[-1]] = value
+    return configured
+
+
+async def _probe_model_candidate(model: ModelCreate, entry: dict[str, Any]) -> dict[str, Any]:
+    """Ejecuta una inferencia mínima directamente contra el deployment candidato."""
+
+    params = dict(entry.get("litellm_params") or {})
+    info = dict(entry.get("model_info") or {})
+    backend = str(info.get("dashboard_backend_profile") or model.serving_engine or "auto").lower()
+    provider_model = str(params.get("model") or "")
+    api_base = str(params.get("api_base") or "").rstrip("/")
+    key = _resolved_model_api_key(params)
+    configured = _candidate_parameters(entry)
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    timeout = float(params.get("timeout") or 120)
+    embedding = "embed" in f"{model.task} {provider_model}".lower() or "bge-" in provider_model.lower()
+
+    if backend == "triton":
+        if not model.validation_payload:
+            raise RuntimeError("Triton requiere un JSON de prueba con sus inputs/tensores antes de activarlo")
+        path = model.validation_path.strip() or f"/v2/models/{provider_model.rsplit('/', 1)[-1]}/infer"
+        if not path.startswith("/") or ".." in path or "://" in path:
+            raise RuntimeError("La ruta de prueba Triton debe ser relativa y comenzar por /")
+        url, payload = f"{api_base}{path}", model.validation_payload
+    elif provider_model.startswith("ollama/") or backend == "ollama":
+        url = f"{api_base or 'http://localhost:11434'}/api/embed" if embedding else f"{api_base or 'http://localhost:11434'}/api/chat"
+        payload = {"model": provider_model.removeprefix("ollama/"), "stream": False}
+        if embedding:
+            payload["input"] = "Prueba de configuración"
+        else:
+            payload["messages"] = [{"role": "user", "content": "Responde solamente OK"}]
+        options = dict(configured.pop("extra_body", {}) or {})
+        options.update(configured)
+        if "max_tokens" in options:
+            options["num_predict"] = options.pop("max_tokens")
+        if options:
+            payload["options"] = options
+    elif provider_model.startswith("cloudera_workbench/") or backend == "workbench":
+        from gateway.workbench_provider import _request_body
+        url = api_base
+        payload = _request_body(
+            [{"role": "user", "content": "Responde solamente OK"}],
+            {**configured, "extra_body": configured.get("extra_body", {})},
+        )
+    else:
+        base = api_base or "https://api.openai.com/v1"
+        endpoint = "embeddings" if embedding else "chat/completions"
+        url = base if base.endswith(f"/{endpoint}") else f"{base}/{endpoint}"
+        payload = {"model": provider_model.removeprefix("openai/")}
+        if embedding:
+            payload["input"] = "Prueba de configuración"
+        else:
+            payload["messages"] = [{"role": "user", "content": "Responde solamente OK"}]
+        extra_body = configured.pop("extra_body", {})
+        payload.update(configured)
+        if isinstance(extra_body, dict):
+            payload.update(extra_body)
+
+    if not url:
+        raise RuntimeError("Falta API base para probar el deployment")
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, json=payload, headers=headers)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"No se pudo conectar con el modelo: {exc}") from exc
+    if response.is_error:
+        detail = response.text[:1500]
+        raise RuntimeError(f"El modelo rechazó la prueba de parámetros (HTTP {response.status_code}): {detail}")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise RuntimeError("El modelo respondió, pero no devolvió JSON válido") from exc
+    return {"status": response.status_code, "parameters": _candidate_parameters(entry),
+            "response_type": type(body).__name__}
 
 
 @app.get("/", include_in_schema=False)
@@ -684,7 +990,8 @@ def save_cloudera_connection(connection: ClouderaConnection):
         result = cloudera.save_connection(connection.name, connection.kind, connection.url, connection.token,
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
-            connection.renewal_url, connection.workload_name, connection.onpremise_version)
+            connection.renewal_url, connection.workload_name, connection.onpremise_version,
+            connection.credential_expires_at)
         result = generate_initial_cloudera_token(result)
         if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
@@ -701,7 +1008,8 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
         result = cloudera.update_connection(connection_id, connection.name, connection.kind, connection.url, connection.token,
             connection.platform, connection.probe_interval_minutes, connection.workload_user,
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
-            connection.renewal_url, connection.workload_name, connection.onpremise_version)
+            connection.renewal_url, connection.workload_name, connection.onpremise_version,
+            connection.credential_expires_at)
         result = generate_initial_cloudera_token(result)
         if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
@@ -784,15 +1092,94 @@ def update_guardrail(update: GuardrailUpdate):
     """Cambia el clasificador global y su política, con reinicio transaccional."""
 
     try:
-        return manager.set_guardrail(update.enabled, update.model.strip(), update.policy, restart=update.restart)
+        return manager.set_guardrail(
+            update.enabled, update.model.strip(), update.policy,
+            excluded_models=update.excluded_models, restart=update.restart,
+        )
     except RuntimeError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.put("/api/config/advisor")
+def update_advisor(update: AdvisorUpdate):
+    """Selecciona el asesor de configuración, igual que el guardrail global."""
+
+    try:
+        return manager.set_advisor(update.enabled, update.model.strip(), restart=update.restart)
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/config/advisor/recommend")
+async def recommend_model_parameters(advice: ModelAdviceRequest):
+    """Pide JSON al asesor y filtra su salida antes de mostrarla o aplicarla."""
+
+    use_case = advice.use_case.strip()
+    if not use_case or len(use_case) > 8_000:
+        raise HTTPException(422, "Describe el caso de uso en un máximo de 8.000 caracteres")
+    settings = manager.dashboard_settings().get("advisor") or {}
+    advisor = str(settings.get("model") or "")
+    target = next((item for item in manager.models() if item["name"] == advice.model_name), None)
+    if not settings.get("enabled") or not advisor:
+        raise HTTPException(409, "Configura primero un modelo asesor")
+    if target is None:
+        raise HTTPException(404, f"Modelo no encontrado: {advice.model_name}")
+    if not manager.is_running() or advisor not in manager.active_model_names():
+        raise HTTPException(409, "El modelo asesor debe estar activo en LiteLLM")
+    allowed = [
+        "temperature", "top_p", "top_k", "min_p", "repetition_penalty",
+        "frequency_penalty", "presence_penalty", "seed", "max_tokens", "stop",
+        "reasoning_mode", "reasoning_effort", "parameter_policy", "extra_parameters",
+    ]
+    system = (
+        "Eres asesor de configuración de inferencia. Devuelve SOLO un objeto JSON con "
+        "summary (string), rationale (array de strings) y parameters (objeto). "
+        f"parameters sólo puede usar estas claves: {', '.join(allowed)}. "
+        "extra_parameters debe ser un objeto cuyas claves usen notación como extra_body.guided_json. "
+        "No inventes parámetros incompatibles con el backend indicado."
+    )
+    user = json.dumps({
+        "target": {key: target.get(key) for key in (
+            "name", "provider_model", "backend_profile", "serving_engine", "task",
+            "context_window", "max_output_tokens", "compatibility_profile")},
+        "use_case": use_case,
+    }, ensure_ascii=False)
+    try:
+        async with httpx.AsyncClient(timeout=float(settings.get("timeout") or 120)) as client:
+            response = await client.post(
+                f"http://{manager.host}:{manager.port}/v1/chat/completions",
+                headers=gateway_auth_headers(),
+                json={"model": advisor, "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ], "temperature": 0.2},
+            )
+    except (httpx.RequestError, RuntimeError) as exc:
+        raise HTTPException(502, f"No se pudo consultar al asesor: {exc}") from exc
+    if response.is_error:
+        raise HTTPException(response.status_code, f"El asesor rechazó la consulta: {response.text[:1000]}")
+    try:
+        content = response.json()["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
+        result = json.loads(content)
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise HTTPException(502, "El asesor no devolvió el JSON estructurado solicitado") from exc
+    parameters = result.get("parameters") if isinstance(result, dict) else None
+    if not isinstance(parameters, dict):
+        raise HTTPException(502, "La recomendación no contiene un objeto parameters")
+    filtered = {key: value for key, value in parameters.items() if key in allowed}
+    return {"advisor": advisor, "target": advice.model_name,
+            "summary": str(result.get("summary") or "Recomendación preparada"),
+            "rationale": [str(item) for item in (result.get("rationale") or [])][:10],
+            "parameters": filtered}
 
 
 @app.put("/api/config")
 def update_config(update: ConfigUpdate):
     """Valida y aplica la edición completa con reinicio transaccional."""
     try:
+        manager.validate_model_activation_changes(update.content)
         return manager.update_config(update.content, restart=update.restart)
     except RuntimeError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -802,7 +1189,9 @@ def update_config(update: ConfigUpdate):
 def validate_config(update: ConfigUpdate):
     """Valida sin escribir ni reiniciar, útil para el editor avanzado."""
     try:
-        return manager.validate_config_text(update.content)
+        result = manager.validate_config_text(update.content)
+        manager.validate_model_activation_changes(update.content)
+        return result
     except RuntimeError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -816,11 +1205,27 @@ def apply_config():
         raise HTTPException(500, str(exc)) from exc
 
 
+@app.post("/api/config/models/validate")
+async def validate_model_candidate(model: ModelCreate):
+    """Prueba el deployment y todos los parámetros antes de permitir guardarlo."""
+
+    try:
+        entry = _model_entry(model)
+        probe = await _probe_model_candidate(model, entry)
+        return {**probe, "validation_id": _register_model_validation(entry), "expires_in_seconds": 900}
+    except RuntimeError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.post("/api/config/models")
 def create_model(model: ModelCreate):
     """Construye una entrada LiteLLM sin aceptar secretos en claro."""
     try:
         entry = _model_entry(model)
+        _consume_model_validation(entry, model.validation_id)
+        info = entry.setdefault("model_info", {})
+        info["dashboard_validation_fingerprint"] = _model_fingerprint(entry)
+        info["dashboard_validated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         if not model.fallback_model.strip() and model.restart:
             return manager.add_model(entry)
         return manager.add_model(entry,
@@ -834,6 +1239,10 @@ def edit_model(name: str, model: ModelCreate):
     """Edita campos conocidos conservando parámetros avanzados ajenos al formulario."""
     try:
         entry = _model_entry(model)
+        _consume_model_validation(entry, model.validation_id)
+        info = entry.setdefault("model_info", {})
+        info["dashboard_validation_fingerprint"] = _model_fingerprint(entry)
+        info["dashboard_validated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         return manager.update_model(name, entry, model.fallback_model.strip(), model.restart)
     except KeyError as exc:
         raise HTTPException(404, f"Modelo no encontrado: {name}") from exc

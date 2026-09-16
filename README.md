@@ -147,14 +147,19 @@ The form asks for the CDP Base Runtime generation because the supported unattend
 | Discovery API used by IA Gateway | `https://ml.company.example/api/v1alpha1/listEndpoints` for AI Inference |
 | Runtime before 7.3.2 | Complete Basic-enabled Knox token URL, for example `https://service.company.example/gateway/authtkn/knoxtoken/api/v1/token` |
 | Credentials before 7.3.2 | `WORKLOAD-USER` and `WORKLOAD-PASS`; IA Gateway obtains a fresh JWT before expiry |
-| Runtime 7.3.2+ · AI Inference | Use the complete value of a long-lived Knox API key created in Model Endpoint Details, or a current UMS CDP JWT |
+| Runtime 7.3.2+ · AI Inference (recommended unattended mode) | Private Control Plane origin plus `CDP_ACCESS_KEY_ID` and `CDP_PRIVATE_KEY` from a machine user; IA Gateway continuously generates UMS `CDP_TOKEN` values through IAM |
+| Runtime 7.3.2+ · AI Inference (static alternative) | Use the complete value of a long-lived Knox API key created in Model Endpoint Details |
 | Runtime 7.3.2+ · Workbench | Use an API key created in Workbench User Settings with API/Application audience |
 
-Do not paste the central CDP console, the interactive page ending in `/token-generation/index.html`, or a generic Knox Gateway JWT whose Target Base URL is `/gateway/cdp-proxy-token`. AI Inference expects a UMS CDP JWT or its specifically configured Knox API key support. In Runtime 7.3.2+, IA Gateway deliberately does not claim that it can renew these credentials with workload username/password.
+For the Runtime 7.3.2+ unattended flow, the renewal URL is the private Control Plane origin, for example `https://console-cdp.apps.company.example`; the CDP CLI calls its `/api/v1/iam/generateWorkloadAuthToken` operation. Create the access key/private key in User Management, preferably for a least-privilege machine user. The interactive platform password is not stored and is not the renewal mechanism. Leave the current token empty and IA Gateway obtains the first token immediately.
+
+Do not paste the interactive page ending in `/token-generation/index.html` or a generic Knox Gateway JWT whose Target Base URL is `/gateway/cdp-proxy-token`. AI Inference expects a UMS CDP JWT or its specifically configured Knox API key support.
 
 Knox API keys for AI Inference are not enabled merely by running Runtime 7.3.2. An administrator must add the `cdp-preauth` provider configuration to `conf/cdp-resources.xml` in the Data Lake Knox Gateway Default Group, save it, refresh the stale Knox configurations, and verify that the topology renders without errors in Knox Admin UI. If a UMS JWT works but a generated Knox API key returns HTTP 401, check this server-side prerequisite and ensure the complete generated key—not its identifier—was copied.
 
-Credential lifecycle is always reported explicitly. JWT expiry is read from the `exp` claim. Cloud JWTs and legacy Basic-enabled Knox JWTs are regenerated ten minutes before expiry when all generation fields are present. Opaque Knox and Workbench API keys do not expose an expiry claim, so IA Gateway reports their expiry as unknown and never promises automatic renewal; verify and rotate them according to the policy configured in Cloudera.
+Credential lifecycle is always reported explicitly. JWT expiry is read from the `exp` claim. Cloud JWTs, Runtime 7.3.2+ on-premises UMS JWTs, and legacy Basic-enabled Knox JWTs are regenerated in advance when all generation fields are present. The default lead is up to seven days but is capped at 25% of the credential lifetime, so the normal one-hour UMS token rotates roughly 15 minutes early; `CDP_RENEWAL_LEAD_SECONDS` can lower that maximum. The supervisor retries every minute and the LiteLLM callback reads the replacement atomically from SQLite on every request.
+
+Opaque Knox and Workbench API keys do not expose an expiry claim. IA Gateway therefore cannot safely invent or renew them. Enter the administrative expiry date shown/configured in Cloudera (for example, 90 days) so the dashboard calculates an advance rotation date; replacing a saved key is atomic. Workbench lets the creator select an expiry date, and administrators can impose a maximum. For AI Inference, prefer the renewable UMS flow above when uninterrupted operation matters. If a model-specific JWT expires while the connection has a valid renewed CDP token, IA Gateway automatically falls back to the connection credential.
 
 You can either paste an existing CDP token/API v2 key or leave the token blank when complete renewal credentials are provided. IA Gateway then requests the initial token and subsequently renews it in the background. Secret values are stored in SQLite with file mode `0600` and are never returned to the browser.
 
@@ -181,8 +186,9 @@ In **Configuration → Optional pre-request guardrail**:
 3. Choose a policy:
    - **Permissive:** record a warning and continue to the requested model.
    - **Restricted:** block the request when the guardrail marks it unsafe.
+4. Under **Do not apply guardrail to**, select any chat aliases that must bypass classification.
 
-The guardrail model must return a classification that IA Gateway can interpret. Llama Guard models are a natural fit, but the transport is provider-independent.
+Embedding requests are always excluded automatically: they carry vector inputs rather than a chat conversation and do not benefit from the current conversational classifier. Explicit exclusions are preserved when an alias is renamed and removed when that model is deleted. The guardrail model must return a classification that IA Gateway can interpret. Llama Guard models are a natural fit, but the transport is provider-independent.
 
 ## Local installation
 
@@ -313,6 +319,7 @@ dashboard_settings:
     model: ""
     policy: warn
     timeout: 8
+    excluded_models: []
 
 router_settings: {}
 ```
@@ -320,6 +327,64 @@ router_settings: {}
 Never put a secret value directly in `config.yaml`. Use an environment reference such as `os.environ/OPENAI_API_KEY`, or use the Cloudera credential form so the value is stored in SQLite.
 
 The advanced editor validates YAML structure, duplicate aliases, fallbacks, guardrail references, and environment references before saving. Export/import is available at the bottom of the Configuration page. Imports are validated before atomically replacing the configuration.
+
+### Per-model capacity and generation profiles
+
+The guided editor separates parameters by responsibility so a request option is not confused with a deployment limit:
+
+| Group | Stored as | Purpose |
+|---|---|---|
+| Total context window and maximum output capacity | `model_info.max_input_tokens` / `max_output_tokens` plus dashboard metadata | Declares the capacity LiteLLM should use for routing. It does not increase a vLLM `--max-model-len`, NIM engine limit, or Triton model configuration. |
+| Default output, temperature, Top P, penalties, seed and stop sequences | `litellm_params` | Default OpenAI-compatible generation behaviour for this deployment. |
+| Top K, Min P and repetition penalty | `litellm_params.extra_body` | Provider extensions used only by vLLM, NIM, Ollama and the Workbench adapter. |
+| Reasoning mode | standard `reasoning_effort`, plus backend-specific `extra_body` | Workbench receives `enable_thinking`; vLLM/NIM receive `chat_template_kwargs.enable_thinking`. Unsupported backends do not receive this extension. |
+| Timeout, retries and maximum parallel requests | `litellm_params` | Operational protection and per-deployment router concurrency. The Workbench-oriented presets use zero retries to avoid overlapping requests leaving a replica busy. |
+
+The `Cloudera AI 1.5.5 SP3` compatibility profile enforces the current Workbench adapter's safe default-output ceiling of 512 tokens. This ceiling is intentionally separate from the model's declared context capacity. The raw Triton OIP profile rejects OpenAI generation controls because tensor shapes, batching, scheduling, warmup and TensorRT-LLM engine limits belong to the Cloudera deployment or Triton `config.pbtxt`.
+
+Example generated profile for a Qwen model served by vLLM:
+
+```yaml
+model_list:
+  - model_name: qwen-reasoning
+    litellm_params:
+      model: openai/Qwen/Qwen3-32B
+      api_base: https://inference.example/v1
+      api_key: os.environ/CLOUDERA_TOKEN
+      max_tokens: 1024
+      temperature: 0.6
+      top_p: 0.9
+      max_parallel_requests: 4
+      extra_body:
+        top_k: 40
+        min_p: 0.05
+        repetition_penalty: 1.05
+        chat_template_kwargs:
+          enable_thinking: true
+    model_info:
+      max_input_tokens: 28672
+      max_output_tokens: 4096
+      supports_reasoning: true
+      dashboard_context_window: 32768
+      dashboard_backend_profile: vllm
+      dashboard_compatibility_profile: cloudera_1_5_5_sp3
+      dashboard_reasoning_mode: enabled
+```
+
+Provider behaviour is version-sensitive. vLLM documents non-OpenAI sampling values under `extra_body`; NVIDIA NIM exposes an OpenAI-compatible API but reasoning depends on the selected model and chat template; Triton deployment settings must be changed server-side. Keep the compatibility profile explicit when upgrading Cloudera AI, LiteLLM, NIM, or vLLM and re-run the endpoint probe after each change.
+
+### Parameter precedence, extras, validation, and advisor
+
+Each model has an explicit precedence policy:
+
+- **Client wins:** configured values are defaults and a caller may replace them in an OpenAI-compatible request.
+- **Model wins:** configured values are enforced immediately before the provider call, including nested `extra_body` values.
+
+The guided editor accepts typed extras as `VARIABLE=VALUE`, one per line. JSON booleans, numbers, arrays, and objects keep their types; dotted names such as `extra_body.guided_json={"type":"object"}` build nested provider payloads. Routing, credentials, messages, prompts, and headers are reserved and cannot be replaced through extras.
+
+Before a new or edited model can be saved, IA Gateway sends a minimal real inference using all configured request parameters. A successful result issues a short-lived validation proof bound to that exact configuration. Triton requires an explicit inference payload because its tensor schema cannot be inferred generically. The advanced YAML editor accepts unchanged legacy models, but rejects new or modified model definitions without a matching validation fingerprint.
+
+An optional **configuration advisor** can be selected next to the guardrail. From each model row, **Talk to the advisor** collects the use case and asks that model for a structured recommendation. Recommendations remain untrusted suggestions: the user reviews and applies them to the form, and the resulting configuration must still pass the real provider test.
 
 ## Authentication and security boundaries
 
@@ -336,7 +401,7 @@ The dashboard login is not currently an API key for `/v1/*`. If the Cloudera app
 
 ## Logs and client IPs
 
-Each model has structured daily logs containing request/response summaries, status, origin IP, provider IP, TTFT, total duration, token counts, and guardrail outcome. The dashboard shows KPIs and an hourly histogram and can export the selected day to Excel.
+Each model has structured daily logs containing request/response summaries, the effective sanitized provider parameters, status, origin IP, provider IP, TTFT, total duration, token counts, and guardrail outcome. This records the final OpenAI/vLLM/NIM/Workbench/Triton-compatible options after precedence rules have run, without logging API keys, authorization headers, messages as parameters, or routing secrets. The dashboard shows KPIs and an hourly histogram and can export the selected day to Excel.
 
 The edge trusts Cloudera/Istio forwarding metadata at the application boundary, preferring `X-Envoy-External-Address`, then the first non-loopback value in `X-Forwarded-For`, then `X-Real-IP`. If Cloudera removes the external address before the application, the only observable address will be the platform sidecar (`127.0.0.x`); application code cannot reconstruct information the ingress did not forward.
 

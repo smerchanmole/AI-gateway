@@ -98,7 +98,7 @@ def test_full_endpoint_url_is_normalized_and_console_url_is_rejected(tmp_path):
         raise AssertionError("Una consola console-cdp tampoco debe aceptarse como API")
 
 
-def test_onpremise_token_url_rejects_html_and_requires_matching_api_version(tmp_path):
+def test_onpremise_modern_uses_control_plane_origin_not_knox_token_url(tmp_path):
     catalog = ClouderaCatalog(tmp_path)
     try:
         catalog.save_connection(
@@ -111,12 +111,19 @@ def test_onpremise_token_url_rejects_html_and_requires_matching_api_version(tmp_
     else:
         raise AssertionError("La página HTML no es una URL de API")
 
+    with pytest.raises(RuntimeError, match="sin rutas de Knox"):
+        catalog.save_connection(
+            "Private", "inference", "https://ml.private", "knox-key", platform="onpremise",
+            renewal_url="https://knox:8443/gateway/homepage/knoxtoken/api/v2/token",
+            onpremise_version="7.3.2_plus",
+        )
+
     connection = catalog.save_connection(
         "Private", "inference", "https://ml.private", "knox-key", platform="onpremise",
-        renewal_url="https://knox:8443/gateway/homepage/knoxtoken/api/v2/token",
+        renewal_url="https://console-cdp.apps.private.example/api/v1",
         onpremise_version="7.3.2_plus",
     )
-    assert connection["renewal_url"] == ""
+    assert connection["renewal_url"] == "https://console-cdp.apps.private.example"
 
 
 def test_discovers_inference_endpoints(tmp_path, monkeypatch):
@@ -373,12 +380,11 @@ def test_onpremise_token_renewal_replaces_connection_token(tmp_path, monkeypatch
     assert visible["token_expires_at"] == result["token_expires_at"]
 
 
-def test_onpremise_732_uses_manual_knox_credential_and_never_basic_auth(tmp_path, monkeypatch):
+def test_onpremise_732_static_knox_credential_is_manual_without_iam_keys(tmp_path, monkeypatch):
     catalog = ClouderaCatalog(tmp_path)
     connection = catalog.save_connection(
         "Private 7.3.2", "inference", "https://ml.private", "opaque-knox-key",
         platform="onpremise", workload_user="must-not-be-stored", workload_password="secret",
-        renewal_url="https://knox.private:8443/gateway/homepage/knoxtoken/api/v2/token",
         onpremise_version="7.3.2_plus",
     )
 
@@ -391,9 +397,43 @@ def test_onpremise_732_uses_manual_knox_credential_and_never_basic_auth(tmp_path
     try:
         catalog.renew_token(connection["id"], force=True)
     except RuntimeError as exc:
-        assert "Token API v2 con SSO" in str(exc)
+        assert "Configura la URL de renovación" in str(exc)
     else:
-        raise AssertionError("Knox 7.3.2 homepage no debe renovarse mediante Basic")
+        raise AssertionError("Una Knox API key opaca sin IAM no puede regenerarse")
+
+
+def test_onpremise_732_inference_renews_ums_token_through_private_iam(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    executable = tmp_path / ".venv" / "bin" / "cdp"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    catalog = ClouderaCatalog(runtime)
+    old = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 60)
+    new = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+    connection = catalog.save_connection(
+        "Private 7.3.2", "inference", "https://ml.private", old,
+        platform="onpremise", cdp_access_key_id="machine-access",
+        cdp_private_key="machine-private",
+        renewal_url="https://console-cdp.apps.private.example/api/v1",
+        onpremise_version="7.3.2_plus",
+    )
+    captured = {}
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return SimpleNamespace(returncode=0,
+            stdout=json.dumps({"token": new, "expireAt": "2099-01-01T00:00:00Z"}), stderr="")
+
+    monkeypatch.setattr("gateway.cloudera.subprocess.run", run)
+    result = catalog.renew_token(connection["id"], force=True)
+
+    assert result["renewed"] is True
+    assert connection["renewal_ready"] is True
+    assert captured["command"][1:5] == ["--endpoint-url", "https://console-cdp.apps.private.example",
+                                        "--form-factor", "private"]
+    assert captured["env"]["CDP_ACCESS_KEY_ID"] == "machine-access"
+    assert catalog._connection_record(connection["id"])["token"] == new
 
 
 def test_expiring_manual_token_is_reported_without_claiming_renewal(tmp_path):
@@ -407,6 +447,75 @@ def test_expiring_manual_token_is_reported_without_claiming_renewal(tmp_path):
     assert connection["token_expires_at"]
     assert connection["credential_lifecycle"] == "expiring_manual"
     assert connection["renewal_ready"] is False
+    assert connection["rotation_due_at"]
+
+
+def test_modern_workbench_never_persists_iam_renewal_credentials(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection(
+        "Workbench", "workbench", "https://ml.private", "workbench-api-key",
+        platform="onpremise", cdp_access_key_id="must-not-be-stored",
+        cdp_private_key="must-not-be-stored",
+        renewal_url="https://console-cdp.apps.private.example",
+        onpremise_version="7.3.2_plus",
+        credential_expires_at="2099-12-31",
+    )
+
+    record = catalog._connection_record(connection["id"])
+    assert connection["renewal_ready"] is False
+    assert record["renewal_url"] == ""
+    assert record["cdp_access_key_id"] == ""
+    assert record["cdp_private_key"] == ""
+    assert connection["token_expires_at"].startswith("2099-12-31")
+    assert connection["rotation_due_at"]
+
+
+def test_declared_api_key_expiry_must_be_in_the_future(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    with pytest.raises(RuntimeError, match="debe estar en el futuro"):
+        catalog.save_connection(
+            "Workbench", "workbench", "https://ml.private", "workbench-api-key",
+            platform="onpremise", onpremise_version="7.3.2_plus",
+            credential_expires_at="2000-01-01",
+        )
+
+
+def test_renewal_window_is_early_and_bounded_by_token_lifetime(tmp_path, monkeypatch):
+    catalog = ClouderaCatalog(tmp_path)
+    now = int(datetime.now(timezone.utc).timestamp())
+    payload = base64.urlsafe_b64encode(json.dumps({"iat": now, "exp": now + 3600}).encode()).decode().rstrip("=")
+    token = f"e30.{payload}.signature"
+    connection = catalog.save_connection(
+        "Cloud", "inference", "https://ml.example", token, "cloud", 5, "", "",
+        "access-id", "private-key", "https://iamapi.us-west-1.altus.cloudera.com", "DE",
+    )
+    monkeypatch.setenv("CDP_RENEWAL_LEAD_SECONDS", "604800")
+
+    visible = catalog.connections()[0]
+    due = datetime.fromisoformat(visible["renewal_due_at"]).timestamp()
+
+    assert 850 <= (now + 3600 - due) <= 950
+    result = catalog.renew_token(connection["id"], force=False)
+    assert result["renewed"] is False
+    assert result["renewal_due_at"] == visible["renewal_due_at"]
+
+
+def test_expired_model_token_falls_back_to_renewed_connection_token(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    future = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+    expired = jwt_with_exp(1)
+    connection = catalog.save_connection("Inference", "inference", "https://ml.example", future)
+    variable = catalog.save_model_token(connection["id"], "chat-model", future)
+    data = catalog._read()
+    data["model_tokens"][f"{connection['id']}:chat-model"] = expired
+    catalog._write(data)
+
+    token, source, metadata = catalog.model_credential(connection["id"], "chat-model")
+
+    assert token == future
+    assert "fallback" in source
+    assert metadata["token_expired"] is False
+    assert catalog.environment()[variable] == future
 
 
 def test_cloud_declared_expiry_is_used_when_credential_is_opaque(tmp_path):
@@ -475,6 +584,7 @@ def test_cloud_renewal_repairs_markdown_url_and_calls_cdp_cli(tmp_path, monkeypa
 
     assert result["renewed"] is True
     assert captured["command"][2] == "https://iamapi.us-west-1.altus.cloudera.com"
+    assert captured["command"][3:5] == ["--form-factor", "public"]
     assert captured["timeout"] == 60
     assert catalog.connections()[0]["renewal_url"] == "https://iamapi.us-west-1.altus.cloudera.com"
 

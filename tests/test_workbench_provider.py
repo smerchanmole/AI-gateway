@@ -13,6 +13,8 @@ def test_workbench_provider_defaults_and_caps_output_tokens():
     assert _request_body(messages, {})["request"]["max_tokens"] == 128
     assert _request_body(messages, {"max_tokens": 4096})["request"]["max_tokens"] == 512
     assert _request_body(messages, {"extra_body": {"max_tokens": 900}})["request"]["max_tokens"] == 512
+    assert _request_body(messages, {"extra_body": {"custom_sampler": "mi-plugin"}})["request"]["custom_sampler"] == "mi-plugin"
+    assert _request_body(messages, {"extra_body": {"messages": "inseguro"}})["request"]["messages"] == messages
 
 
 def test_workbench_provider_normalizes_pasted_access_key_whitespace():

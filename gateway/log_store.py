@@ -15,7 +15,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 
-SECRET_KEYS = {"authorization", "api_key", "apikey", "token", "access_token", "secret"}
+SECRET_KEYS = {
+    "authorization", "api_key", "apikey", "token", "access_token", "accesskey",
+    "secret", "client_secret", "password", "private_key",
+}
 MADRID = ZoneInfo("Europe/Madrid")
 
 
@@ -72,7 +75,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
     existing = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
     for name, column_type in {
         "started_at": "TEXT", "origin_ip": "TEXT", "provider_ip": "TEXT", "ttft_ms": "INTEGER",
-        "guardrail_status": "TEXT", "guardrail_reason": "TEXT"
+        "guardrail_status": "TEXT", "guardrail_reason": "TEXT",
+        "parameters_json": "TEXT"
     }.items():
         if name not in existing:
             connection.execute(f"ALTER TABLE requests ADD COLUMN {name} {column_type}")
@@ -84,19 +88,21 @@ def insert_log(db_path: Path, model: str, status: str, duration_ms: int | None,
                request: Any, response: Any, error: str | None = None, *,
                started_at: str | None = None, origin_ip: str | None = None,
                provider_ip: str | None = None, ttft_ms: int | None = None,
-               guardrail_status: str | None = None, guardrail_reason: str | None = None) -> None:
+               guardrail_status: str | None = None, guardrail_reason: str | None = None,
+               parameters: Any = None) -> None:
     """Inserta un evento en una transacción corta para no bloquear el callback."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as connection:
         connection.execute(
             """INSERT INTO requests(
             model,status,duration_ms,request_json,response_json,error,
-            started_at,origin_ip,provider_ip,ttft_ms,guardrail_status,guardrail_reason
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            started_at,origin_ip,provider_ip,ttft_ms,guardrail_status,guardrail_reason,parameters_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (model, status, duration_ms,
              json.dumps(safe_value(request), ensure_ascii=False, default=str),
              json.dumps(safe_value(response), ensure_ascii=False, default=str), error,
-             started_at, origin_ip, provider_ip, ttft_ms, guardrail_status, guardrail_reason),
+             started_at, origin_ip, provider_ip, ttft_ms, guardrail_status, guardrail_reason,
+             json.dumps(safe_value(parameters), ensure_ascii=False, default=str)),
         )
 
 
@@ -113,6 +119,7 @@ def read_logs(db_path: Path, model: str, limit: int = 100) -> list[dict[str, Any
         item = dict(row)
         item["request"] = json.loads(item.pop("request_json") or "null")
         item["response"] = json.loads(item.pop("response_json") or "null")
+        item["parameters"] = json.loads(item.pop("parameters_json") or "null")
         result.append(item)
     return result
 

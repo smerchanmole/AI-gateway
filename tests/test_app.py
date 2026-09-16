@@ -312,6 +312,7 @@ def test_remote_latency_probe_works_without_gateway_auth(monkeypatch, client):
 
 def test_guided_model_config_uses_environment_reference(monkeypatch, client):
     captured = []
+    monkeypatch.setattr(dashboard, "_consume_model_validation", lambda *_args: None)
     monkeypatch.setattr(
         dashboard.manager,
         "add_model",
@@ -330,6 +331,7 @@ def test_guided_model_config_uses_environment_reference(monkeypatch, client):
 
 def test_guided_cloudera_model_preserves_discovered_engine_and_embedding_role(monkeypatch, client):
     captured = []
+    monkeypatch.setattr(dashboard, "_consume_model_validation", lambda *_args: None)
     monkeypatch.setattr(
         dashboard.manager,
         "add_model",
@@ -353,6 +355,9 @@ def test_guided_cloudera_model_preserves_discovered_engine_and_embedding_role(mo
         "dashboard_serving_engine": "nim",
         "dashboard_task": "EMBED",
         "dashboard_embedding_input_type": "query",
+        "dashboard_parameter_policy": "caller_wins",
+        "dashboard_validation_fingerprint": captured[0]["model_info"]["dashboard_validation_fingerprint"],
+        "dashboard_validated_at": captured[0]["model_info"]["dashboard_validated_at"],
     }
     assert captured[0]["litellm_params"]["encoding_format"] == "float"
 
@@ -368,6 +373,162 @@ def test_guided_model_config_rejects_invalid_environment_name(client):
     assert "MAYUSCULAS" in response.json()["detail"]
 
 
+def test_guided_vllm_profile_serializes_capacity_sampling_and_reasoning(monkeypatch, client):
+    captured = []
+    monkeypatch.setattr(dashboard, "_consume_model_validation", lambda *_args: None)
+    monkeypatch.setattr(
+        dashboard.manager,
+        "add_model",
+        lambda entry: captured.append(entry) or {"content": "model_list: []\n", "restarted": False},
+    )
+
+    response = client.post("/api/config/models", json={
+        "model_name": "qwen-reasoning",
+        "model": "openai/Qwen/Qwen3-32B",
+        "backend_profile": "vllm",
+        "compatibility_profile": "cloudera_1_5_5_sp3",
+        "context_window": 32768,
+        "max_output_tokens": 4096,
+        "default_max_tokens": 1024,
+        "temperature": 0.6,
+        "top_p": 0.9,
+        "top_k": 40,
+        "min_p": 0.05,
+        "repetition_penalty": 1.05,
+        "seed": 42,
+        "stop": ["</answer>"],
+        "reasoning_mode": "enabled",
+        "reasoning_effort": "high",
+        "num_retries": 1,
+        "max_parallel_requests": 4,
+    })
+
+    assert response.status_code == 200
+    params = captured[0]["litellm_params"]
+    assert params["max_tokens"] == 1024
+    assert params["temperature"] == 0.6
+    assert params["top_p"] == 0.9
+    assert params["stop"] == ["</answer>"]
+    assert params["extra_body"] == {
+        "top_k": 40, "min_p": 0.05, "repetition_penalty": 1.05,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    assert captured[0]["model_info"] == {
+        "dashboard_backend_profile": "vllm",
+        "dashboard_compatibility_profile": "cloudera_1_5_5_sp3",
+        "dashboard_reasoning_mode": "enabled",
+        "dashboard_context_window": 32768,
+        "max_input_tokens": 28672,
+        "max_output_tokens": 4096,
+        "supports_reasoning": True,
+        "dashboard_parameter_policy": "caller_wins",
+        "dashboard_validation_fingerprint": captured[0]["model_info"]["dashboard_validation_fingerprint"],
+        "dashboard_validated_at": captured[0]["model_info"]["dashboard_validated_at"],
+    }
+
+
+def test_model_must_pass_real_validation_before_it_can_be_saved(monkeypatch, client):
+    payload = {
+        "model_name": "qwen-json",
+        "model": "openai/Qwen/Qwen3-32B",
+        "api_base": "https://models.example/v1",
+        "backend_profile": "vllm",
+        "parameter_policy": "model_wins",
+        "extra_parameters": {"extra_body.guided_json": {"type": "object"}},
+    }
+    assert client.post("/api/config/models", json=payload).status_code == 422
+
+    async def successful_probe(model, entry):
+        return {"status": 200, "parameters": dashboard._candidate_parameters(entry), "response_type": "dict"}
+
+    captured = []
+    monkeypatch.setattr(dashboard, "_probe_model_candidate", successful_probe)
+    monkeypatch.setattr(
+        dashboard.manager, "add_model",
+        lambda entry: captured.append(entry) or {"content": "model_list: []\n", "restarted": False},
+    )
+    validation = client.post("/api/config/models/validate", json=payload)
+    assert validation.status_code == 200
+    payload["validation_id"] = validation.json()["validation_id"]
+
+    saved = client.post("/api/config/models", json=payload)
+    assert saved.status_code == 200
+    assert captured[0]["model_info"]["dashboard_parameter_policy"] == "model_wins"
+    assert captured[0]["model_info"]["dashboard_extra_parameters"] == {
+        "extra_body.guided_json": {"type": "object"},
+    }
+    assert captured[0]["model_info"]["dashboard_validation_fingerprint"]
+
+
+def test_cloudera_155_sp3_workbench_caps_guided_default_output(client):
+    response = client.post("/api/config/models", json={
+        "model_name": "qwen-workbench",
+        "model": "cloudera_workbench/qwen38",
+        "source": "cloudera",
+        "cloudera_kind": "workbench",
+        "backend_profile": "workbench",
+        "compatibility_profile": "cloudera_1_5_5_sp3",
+        "default_max_tokens": 513,
+    })
+
+    assert response.status_code == 422
+    assert "512 tokens" in response.json()["detail"]
+
+
+def test_triton_profile_rejects_openai_generation_parameters(client):
+    response = client.post("/api/config/models", json={
+        "model_name": "triton-oip",
+        "model": "custom/fraud-model",
+        "backend_profile": "triton",
+        "temperature": 0.2,
+    })
+
+    assert response.status_code == 422
+    assert "configura generación, tensores y batching en el deployment" in response.json()["detail"]
+
+
+def test_detected_triton_profile_also_rejects_openai_generation_parameters(client):
+    response = client.post("/api/config/models", json={
+        "model_name": "triton-oip",
+        "model": "custom/fraud-model",
+        "backend_profile": "auto",
+        "serving_engine": "triton",
+        "temperature": 0.2,
+    })
+
+    assert response.status_code == 422
+    assert "configura generación, tensores y batching en el deployment" in response.json()["detail"]
+
+
+def test_manual_workbench_profile_gets_cloudera_155_output_cap(client):
+    response = client.post("/api/config/models", json={
+        "model_name": "qwen-workbench",
+        "model": "cloudera_workbench/qwen38",
+        "backend_profile": "workbench",
+        "compatibility_profile": "cloudera_1_5_5_sp3",
+        "default_max_tokens": 513,
+    })
+
+    assert response.status_code == 422
+    assert "512 tokens" in response.json()["detail"]
+
+
+def test_model_parameter_editor_exposes_backend_specific_controls():
+    html = (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    for control in ("config-context-window", "config-default-max-tokens", "config-temperature",
+                    "config-top-k", "config-reasoning-mode", "config-max-parallel",
+                    "config-parameter-policy", "config-extra-parameters",
+                    "config-validation-payload", "advisor-model", "advisor-dialog",
+                    "guardrail-excluded-models", "save-guardrail-exclusions"):
+        assert f'id="{control}"' in html
+    assert "updateModelParameterContext" in javascript
+    assert "Triton OIP recibe tensores" in javascript
+    assert "Probando el deployment con todos los parámetros" in javascript
+    assert "dashboard_effective_parameters" in (dashboard.ROOT / "gateway" / "litellm_callback.py").read_text(encoding="utf-8")
+
+
 def test_dashboard_has_three_primary_areas_and_warn_only_guardrail():
     html = (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
     javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -375,6 +536,30 @@ def test_dashboard_has_three_primary_areas_and_warn_only_guardrail():
     assert 'data-view="config"' in html
     assert 'data-view="logs"' in html
     assert "Riesgo detectado; la petición continuó" in javascript
+
+
+def test_guardrail_endpoint_accepts_per_model_exclusions(monkeypatch, client):
+    captured = {}
+
+    def set_guardrail(enabled, model, policy, excluded_models=None, restart=True):
+        captured.update({
+            "enabled": enabled, "model": model, "policy": policy,
+            "excluded_models": excluded_models, "restart": restart,
+        })
+        return {"content": "model_list: []\n", "restarted": False}
+
+    monkeypatch.setattr(dashboard.manager, "set_guardrail", set_guardrail)
+    response = client.put("/api/config/guardrail", json={
+        "enabled": True,
+        "model": "guardian",
+        "policy": "warn",
+        "excluded_models": ["embedding-local", "chat-interno"],
+        "restart": False,
+    })
+
+    assert response.status_code == 200
+    assert captured["excluded_models"] == ["embedding-local", "chat-interno"]
+    assert captured["restart"] is False
 
 
 def test_cloudera_models_show_independent_deployment_token_and_probe_states():
@@ -416,10 +601,16 @@ def test_cloudera_form_is_contextual_and_explains_urls_and_credential_lifecycle(
     assert 'id="cloudera-cloud-fields"' in html
     assert 'id="cloudera-onprem-modern-fields"' in html
     assert 'id="cloudera-onprem-legacy-fields"' in html
+    assert 'id="cloudera-modern-renewal-url"' in html
+    assert 'id="cloudera-modern-access-key-id"' in html
+    assert 'id="cloudera-modern-private-key"' in html
+    assert 'id="cloudera-modern-expiry"' in html
     assert "URL de endpoints" in html and "CDP JWT (UMS)" in html
     assert "gateway/cdp-proxy-token" in html
     assert "gateway/authtkn/knoxtoken/api/v1/token" in html
     assert "updateClouderaFormContext" in javascript
+    assert "credential.accessKeyId" in javascript
+    assert "Renovación prevista" in javascript
     assert "Caduca · sustitución manual" in javascript
     assert "Clave larga · verifica vigencia en Knox" in javascript
 

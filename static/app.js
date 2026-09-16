@@ -18,6 +18,10 @@ let clouderaConnections = [];
 let clouderaModels = [];
 let editingClouderaConnectionId = null;
 let preparedClouderaSource = null;
+let advisorRecommendation = null;
+let advisorTargetName = null;
+let advisorTrigger = null;
+let guardrailExcludedModels = new Set();
 let csrfToken = "";
 let dashboardAuthenticated = false;
 const clouderaProbeTimers = new Map();
@@ -107,6 +111,7 @@ function updateClouderaFormContext() {
   $("#cloudera-cloud-fields").hidden = onpremise;
   $("#cloudera-onprem-modern-fields").hidden = !onpremise || version !== "7.3.2_plus";
   $("#cloudera-onprem-legacy-fields").hidden = !onpremise || version !== "legacy";
+  document.querySelectorAll(".modern-iam-field").forEach((field) => { field.hidden = kind === "workbench"; });
   const helpContext = `${platform}-${kind}`;
   document.querySelectorAll("[data-cloudera-help]").forEach((content) => {
     content.hidden = content.dataset.clouderaHelp !== helpContext;
@@ -114,6 +119,9 @@ function updateClouderaFormContext() {
   $("#cloudera-modern-token-label").textContent = kind === "workbench"
     ? "API key de Workbench"
     : "Knox API key de AI Inference o CDP JWT (UMS)";
+  $("#cloudera-modern-credential-help").textContent = kind === "workbench"
+    ? "Workbench usa una API key con audiencia API/Application y fecha de expiración. Créala en User Settings y rótala antes de esa fecha."
+    : "La opción recomendada es generar continuamente un CDP_TOKEN de UMS con una access key de machine user. También puedes pegar una Knox API key larga y rotarla según la política del Data Lake.";
   $("#cloudera-url").placeholder = kind === "workbench"
     ? "https://ml-workbench.example.com"
     : "https://ml-entorno.example.com";
@@ -122,12 +130,24 @@ function updateClouderaFormContext() {
 function clouderaFormCredential() {
   const platform = $("#cloudera-platform").value;
   if (platform === "cloud") {
-    return {token: $("#cloudera-token").value, renewalUrl: $("#cloudera-cloud-renewal-url").value};
+    return {token: $("#cloudera-token").value, renewalUrl: $("#cloudera-cloud-renewal-url").value,
+      accessKeyId: $("#cloudera-access-key-id").value, privateKey: $("#cloudera-private-key").value,
+      workloadName: $("#cloudera-workload-name").value || "DE", credentialExpiresAt: ""};
   }
   if ($("#cloudera-onpremise-version").value === "7.3.2_plus") {
-    return {token: $("#cloudera-modern-token").value, renewalUrl: ""};
+    if ($("#cloudera-kind").value === "workbench") {
+      return {token: $("#cloudera-modern-token").value, renewalUrl: "",
+        accessKeyId: "", privateKey: "", workloadName: "DE",
+        credentialExpiresAt: $("#cloudera-modern-expiry").value};
+    }
+    return {token: $("#cloudera-modern-token").value, renewalUrl: $("#cloudera-modern-renewal-url").value,
+      accessKeyId: $("#cloudera-modern-access-key-id").value,
+      privateKey: $("#cloudera-modern-private-key").value,
+      workloadName: $("#cloudera-modern-workload-name").value || "DE",
+      credentialExpiresAt: $("#cloudera-modern-expiry").value};
   }
-  return {token: $("#cloudera-legacy-token").value, renewalUrl: $("#cloudera-legacy-renewal-url").value};
+  return {token: $("#cloudera-legacy-token").value, renewalUrl: $("#cloudera-legacy-renewal-url").value,
+    accessKeyId: "", privateKey: "", workloadName: "DE", credentialExpiresAt: ""};
 }
 
 function clouderaLifecycleLabel(item) {
@@ -144,6 +164,8 @@ function clouderaCredentialSnapshot(connections) {
     id: item.id,
     has_token: item.has_token,
     token_expires_at: item.token_expires_at,
+    renewal_due_at: item.renewal_due_at,
+    rotation_due_at: item.rotation_due_at,
     token_renewed_at: item.token_renewed_at,
     renewal_state: item.renewal_state,
     renewal_message: item.renewal_message,
@@ -160,7 +182,7 @@ async function loadClouderaConnections({onlyIfChanged = false} = {}) {
   ));
   clouderaConnections = updated;
   $("#cloudera-connections").innerHTML = clouderaConnections.length ? clouderaConnections.map((item) => `
-    <article class="cloudera-connection" data-connection="${item.id}"><div><b>${escapeHtml(item.name)}</b><small>${item.kind === "inference" ? "AI Inference" : "Workbench API v2"} · ${item.platform === "onpremise" ? `On-premise ${item.onpremise_version === "7.3.2_plus" ? "7.3.2+" : "legacy"}` : "Cloud"}</small><small>Prueba automática cada ${escapeHtml(item.probe_interval_minutes || 5)} min</small></div><div class="connection-url">${escapeHtml(item.url)}</div><span class="credential-state ${item.token_expired ? "expired" : item.has_token ? "ready" : "missing"}">${item.renewal_state === "renewing" ? (item.has_token ? "Renovando token…" : "Generando token inicial…") : item.token_expired ? "JWT caducado" : item.has_token ? "Credencial guardada" : item.renewal_ready ? "Token pendiente de generar" : "Falta credencial"}${item.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(item.token_expires_at))}</small>` : ""}<small>${escapeHtml(clouderaLifecycleLabel(item))}</small></span><div class="row-actions"><button class="secondary discover-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Buscar modelos</button><button class="secondary check-all-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Probar todos</button>${item.renewal_ready ? `<button class="secondary renew-cloudera" data-id="${item.id}">${item.has_token ? "Renovar token" : "Generar token"}</button>` : ""}<button class="secondary edit-cloudera" data-id="${item.id}">${item.has_token && !item.renewal_ready ? "Sustituir credencial" : "Editar"}</button><button class="danger delete-cloudera" data-id="${item.id}">Borrar</button></div><div class="connection-health-summary" data-health-summary="${item.id}">Sin comprobaciones de modelos</div><p class="connection-progress ${item.renewal_state === "error" || item.token_expired ? "error" : ""}" data-progress="${item.id}" role="status">${escapeHtml(item.renewal_message || (item.token_expired ? (item.renewal_ready ? "JWT caducado; se regenerará automáticamente" : "JWT caducado; sustituye la credencial") : item.has_token ? "Lista para consultar" : item.renewal_ready ? "Completa la generación del token" : "Añade una credencial válida"))}</p><section class="connection-models" data-connection-models="${item.id}"><p class="empty compact">Pulsa «Buscar modelos» para ver los modelos de esta conexión.</p></section></article>`).join("") : '<p class="empty compact">No hay conexiones Cloudera configuradas. Añade una arriba para comenzar.</p>';
+    <article class="cloudera-connection" data-connection="${item.id}"><div><b>${escapeHtml(item.name)}</b><small>${item.kind === "inference" ? "AI Inference" : "Workbench API v2"} · ${item.platform === "onpremise" ? `On-premise ${item.onpremise_version === "7.3.2_plus" ? "7.3.2+" : "legacy"}` : "Cloud"}</small><small>Prueba automática cada ${escapeHtml(item.probe_interval_minutes || 5)} min</small></div><div class="connection-url">${escapeHtml(item.url)}</div><span class="credential-state ${item.token_expired ? "expired" : item.has_token ? "ready" : "missing"}">${item.renewal_state === "renewing" ? (item.has_token ? "Renovando token…" : "Generando token inicial…") : item.token_expired ? "JWT caducado" : item.has_token ? "Credencial guardada" : item.renewal_ready ? "Token pendiente de generar" : "Falta credencial"}${item.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(item.token_expires_at))}</small>` : ""}${item.renewal_due_at ? `<small>Renovación prevista: ${escapeHtml(madridTime(item.renewal_due_at))}</small>` : ""}${item.rotation_due_at ? `<small>Rotar antes de: ${escapeHtml(madridTime(item.rotation_due_at))}</small>` : ""}<small>${escapeHtml(clouderaLifecycleLabel(item))}</small></span><div class="row-actions"><button class="secondary discover-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Buscar modelos</button><button class="secondary check-all-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Probar todos</button>${item.renewal_ready ? `<button class="secondary renew-cloudera" data-id="${item.id}">${item.has_token ? "Renovar token" : "Generar token"}</button>` : ""}<button class="secondary edit-cloudera" data-id="${item.id}">${item.has_token && !item.renewal_ready ? "Sustituir credencial" : "Editar"}</button><button class="danger delete-cloudera" data-id="${item.id}">Borrar</button></div><div class="connection-health-summary" data-health-summary="${item.id}">Sin comprobaciones de modelos</div><p class="connection-progress ${item.renewal_state === "error" || item.token_expired ? "error" : ""}" data-progress="${item.id}" role="status">${escapeHtml(item.renewal_message || (item.token_expired ? (item.renewal_ready ? "JWT caducado; se regenerará automáticamente" : "JWT caducado; sustituye la credencial") : item.has_token ? "Lista para consultar" : item.renewal_ready ? "Completa la generación del token" : "Añade una credencial válida"))}</p><section class="connection-models" data-connection-models="${item.id}"><p class="empty compact">Pulsa «Buscar modelos» para ver los modelos de esta conexión.</p></section></article>`).join("") : '<p class="empty compact">No hay conexiones Cloudera configuradas. Añade una arriba para comenzar.</p>';
   document.querySelectorAll(".discover-cloudera").forEach((button) => button.onclick = () => discoverCloudera(button));
   document.querySelectorAll(".check-all-cloudera").forEach((button) => button.onclick = () => autoProbeConnection(button.dataset.id, true));
   document.querySelectorAll(".renew-cloudera").forEach((button) => button.onclick = () => renewClouderaToken(button.dataset.id, true));
@@ -195,11 +217,16 @@ function editClouderaConnection(id) {
   $("#cloudera-onpremise-version").value = item.onpremise_version || "legacy"; updateClouderaFormContext();
   $("#cloudera-probe-interval").value = item.probe_interval_minutes || 5; $("#cloudera-url").value = item.url; $("#cloudera-token").value = "";
   $("#cloudera-modern-token").value = ""; $("#cloudera-legacy-token").value = "";
+  $("#cloudera-modern-expiry").value = item.token_expires_at ? item.token_expires_at.slice(0, 10) : "";
   $("#cloudera-workload-user").value = item.workload_user || ""; $("#cloudera-workload-password").value = "";
   $("#cloudera-access-key-id").value = item.cdp_access_key_id || ""; $("#cloudera-private-key").value = "";
   $("#cloudera-cloud-renewal-url").value = item.platform === "cloud" ? item.renewal_url || "" : "";
+  $("#cloudera-modern-renewal-url").value = item.platform === "onpremise" && item.onpremise_version === "7.3.2_plus" ? item.renewal_url || "" : "";
   $("#cloudera-legacy-renewal-url").value = item.platform === "onpremise" && item.onpremise_version !== "7.3.2_plus" ? item.renewal_url || "" : "";
   $("#cloudera-workload-name").value = item.workload_name || "DE";
+  $("#cloudera-modern-workload-name").value = item.workload_name || "DE";
+  $("#cloudera-modern-access-key-id").value = item.platform === "onpremise" ? item.cdp_access_key_id || "" : "";
+  $("#cloudera-modern-private-key").value = "";
   $("#save-cloudera-connection").textContent = "Guardar cambios"; $("#cancel-cloudera-edit").hidden = false;
   setInlineStatus("#cloudera-status", `Editando conexión «${item.name}». La credencial actual se conservará si dejas el campo vacío.`);
   $("#cloudera-name").focus();
@@ -241,9 +268,10 @@ async function saveClouderaConnection(event) {
       probe_interval_minutes: Number($("#cloudera-probe-interval").value || 5), url: $("#cloudera-url").value,
       onpremise_version: $("#cloudera-onpremise-version").value,
       token: credential.token, workload_user: $("#cloudera-workload-user").value,
-      workload_password: $("#cloudera-workload-password").value, cdp_access_key_id: $("#cloudera-access-key-id").value,
-      cdp_private_key: $("#cloudera-private-key").value,
-      renewal_url: credential.renewalUrl, workload_name: $("#cloudera-workload-name").value || "DE",
+      workload_password: $("#cloudera-workload-password").value, cdp_access_key_id: credential.accessKeyId,
+      cdp_private_key: credential.privateKey,
+      renewal_url: credential.renewalUrl, workload_name: credential.workloadName,
+      credential_expires_at: credential.credentialExpiresAt,
     })});
     const action = editingClouderaConnectionId ? "actualizada" : "guardada";
     cancelClouderaEdit();
@@ -486,6 +514,11 @@ function prepareClouderaModel(index, inputType = "") {
       : `custom/${model.model_name || model.name}`;
   $("#config-api-base").value = (model.url || "").replace(/\/(chat\/completions|completions|embeddings)\/?$/, "");
   $("#config-api-key").value = model.api_key_env || "";
+  const detectedBackend = connection?.kind === "workbench" ? "workbench" : model.serving_engine;
+  $("#config-backend").value = ["vllm", "nim", "triton", "ollama", "workbench"].includes(detectedBackend)
+    ? detectedBackend : "openai";
+  $("#config-compatibility").value = "cloudera_1_5_5_sp3";
+  updateModelParameterContext();
   const supported = ["openai", "workbench"].includes(model.protocol);
   setInlineStatus("#model-form-status", supported
     ? (inputType
@@ -580,6 +613,7 @@ function modelCard(model, index) {
       </div>
       <div class="meta">
         <span>${escapeHtml(model.api_base || "API por defecto")}</span>
+        <button type="button" class="secondary model-advisor-button" data-advisor-target="${escapeHtml(model.name)}">Hablar con el asesor</button>
         <button
           data-model="${escapeHtml(model.name)}"
           data-enabled="${!model.enabled}"
@@ -596,6 +630,9 @@ async function loadModels() {
   $("#models").innerHTML = models.map(modelCard).join("");
   $("#models").querySelectorAll("button[data-model]").forEach((button) => {
     button.onclick = () => toggleModel(button);
+  });
+  $("#models").querySelectorAll("button[data-advisor-target]").forEach((button) => {
+    button.onclick = () => openAdvisor(button.dataset.advisorTarget, button);
   });
   $("#models").querySelectorAll(".model-help-trigger").forEach((button) => {
     button.onclick = (event) => {
@@ -723,7 +760,12 @@ async function loadConfig() {
   $("#guardrail-enabled").checked = Boolean(guardrail.enabled);
   $("#guardrail-model").value = guardrail.model ?? "";
   $("#guardrail-policy").value = guardrail.policy ?? "warn";
+  guardrailExcludedModels = new Set(guardrail.excluded_models ?? []);
   renderGuardrailPolicy();
+  renderGuardrailExclusions();
+  const advisor = config.dashboard_settings?.advisor ?? {};
+  $("#advisor-enabled").checked = Boolean(advisor.enabled);
+  $("#advisor-model").value = advisor.model ?? "";
 }
 
 function renderConfiguredModels() {
@@ -731,14 +773,15 @@ function renderConfiguredModels() {
     <article class="config-model-row">
       <div><b>${escapeHtml(model.name)}</b><small>Alias</small></div>
       <div><b>${escapeHtml(model.provider_model)}</b><small>Modelo LiteLLM</small></div>
-      <div><b>${escapeHtml(model.api_base || "API por defecto")}</b><small>API base</small></div>
-      <div><b>${escapeHtml(model.api_key || "No requerida")}</b><small>API key</small></div>
-      <div><b>${escapeHtml(model.reasoning_effort || "Por defecto")}</b><small>Razonamiento</small></div>
-      <div><b>${escapeHtml(model.keep_alive || "Por defecto")}</b><small>Keep alive</small></div>
-      <div><b>${escapeHtml(model.fallbacks?.join(", ") || "Sin fallback")}</b><small>Fallback</small></div>
-      <div class="row-actions"><button class="secondary edit-model" data-name="${escapeHtml(model.name)}">Editar</button><button class="danger delete-model" data-name="${escapeHtml(model.name)}">Eliminar</button></div>
+      <div><b>${escapeHtml(model.backend_profile === "auto" ? (model.serving_engine || "Auto") : model.backend_profile)}</b><small>Backend</small></div>
+      <div><b>${escapeHtml(model.context_window ? `${model.context_window} tokens` : "No declarada")}</b><small>Contexto</small></div>
+      <div><b>${escapeHtml(model.default_max_tokens || "Por petición")}</b><small>Salida predeterminada</small></div>
+      <div><b>${escapeHtml(model.reasoning_mode === "auto" ? "Según modelo" : model.reasoning_mode === "enabled" ? `Activo · ${model.reasoning_effort || "default"}` : "Desactivado")}</b><small>Razonamiento</small></div>
+      <div><b>${escapeHtml(model.parameter_policy === "model_wins" ? "Impone el modelo" : "Puede sustituir el cliente")}</b><small>Parámetros</small></div>
+      <div class="row-actions"><button class="secondary advise-model" data-name="${escapeHtml(model.name)}">Hablar con el asesor</button><button class="secondary edit-model" data-name="${escapeHtml(model.name)}">Editar</button><button class="danger delete-model" data-name="${escapeHtml(model.name)}">Eliminar</button></div>
     </article>`).join("") : '<p class="empty">No hay modelos configurados.</p>';
   document.querySelectorAll(".edit-model").forEach((button) => button.onclick = () => beginModelEdit(button.dataset.name));
+  document.querySelectorAll(".advise-model").forEach((button) => button.onclick = () => openAdvisor(button.dataset.name, button));
   document.querySelectorAll(".delete-model").forEach((button) => button.onclick = () => confirmDeleteModel(button.dataset.name));
   const options = models.map((model) => `<option value="${escapeHtml(model.name)}">${escapeHtml(model.name)}</option>`).join("");
   const fallbackValue = $("#config-fallback").value;
@@ -747,6 +790,100 @@ function renderConfiguredModels() {
   const guardrailValue = $("#guardrail-model").value;
   $("#guardrail-model").innerHTML = `<option value="">Sin guardrail · llamada directa</option>${options}`;
   $("#guardrail-model").value = guardrailValue;
+  renderGuardrailExclusions();
+  const advisorValue = $("#advisor-model").value;
+  $("#advisor-model").innerHTML = `<option value="">Sin asesor</option>${options}`;
+  $("#advisor-model").value = advisorValue;
+}
+
+function parseExtraParameters(text) {
+  const result = {};
+  text.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#")).forEach((line, index) => {
+    const separator = line.indexOf("=");
+    if (separator < 1) throw new Error(`Extra línea ${index + 1}: usa VARIABLE=VALOR`);
+    const key = line.slice(0, separator).trim();
+    const raw = line.slice(separator + 1).trim();
+    if (Object.hasOwn(result, key)) throw new Error(`Extra repetido: ${key}`);
+    try { result[key] = JSON.parse(raw); } catch { result[key] = raw; }
+  });
+  return result;
+}
+
+function formatExtraParameters(values) {
+  return Object.entries(values || {}).map(([key, value]) =>
+    `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`
+  ).join("\n");
+}
+
+function optionalNumber(selector) {
+  const value = $(selector).value.trim();
+  return value === "" ? null : Number(value);
+}
+
+function currentModelBackend() {
+  const configured = $("#config-backend").value;
+  const providerModel = $("#config-model").value.toLowerCase();
+  return configured !== "auto" ? configured
+    : preparedClouderaSource?.cloudera_kind === "workbench" ? "workbench"
+      : preparedClouderaSource?.serving_engine || (providerModel.startsWith("ollama/") ? "ollama" : "openai");
+}
+
+function updateModelParameterContext() {
+  const backend = currentModelBackend();
+  const triton = backend === "triton";
+  const supportsProviderSampling = ["vllm", "nim", "workbench", "ollama"].includes(backend);
+  const generation = $("#generation-parameter-section");
+  generation.setAttribute("aria-disabled", String(triton));
+  generation.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = triton; });
+  ["#config-top-k", "#config-min-p", "#config-repetition-penalty"].forEach((selector) => {
+    $(selector).disabled = triton || !supportsProviderSampling;
+  });
+  $("#config-reasoning-mode").disabled = triton;
+  $("#config-reasoning").disabled = triton || $("#config-reasoning-mode").value === "disabled";
+  $("#config-preserve-thinking").disabled = backend !== "workbench" || triton;
+  const compatibility = $("#config-compatibility").value;
+  const hints = {
+    triton: "Triton OIP recibe tensores. El contexto, batching y decoding se cambian en config.pbtxt o al desplegar el modelo, no como parámetros OpenAI.",
+    workbench: compatibility === "cloudera_1_5_5_sp3"
+      ? "Workbench 1.5.5 SP3 envía enable_thinking al wrapper y limita la salida predeterminada a 512 tokens para evitar dejar la réplica ocupada."
+      : "Workbench envuelve los parámetros dentro de request; confirma en el predictor qué opciones admite el modelo.",
+    nim: "NIM usa la API OpenAI compatible. Top K, Min P y repetición viajan en extra_body; el thinking se aplica mediante chat_template_kwargs cuando el modelo lo soporta.",
+    vllm: "vLLM recibe Top K, Min P y repetición en extra_body. La ventana real sigue limitada por --max-model-len del deployment.",
+    ollama: "LiteLLM traduce las opciones compatibles hacia Ollama. Keep alive controla cuánto permanece cargado el modelo.",
+    openai: "Sólo se envían parámetros OpenAI estándar; las opciones específicas de vLLM/NIM se omiten.",
+  };
+  $("#model-parameter-hint").textContent = hints[backend] || hints.openai;
+}
+
+function applyModelPreset() {
+  const backend = currentModelBackend();
+  const providerSampling = ["vllm", "nim", "workbench", "ollama"].includes(backend);
+  const compatibility = $("#config-compatibility").value;
+  const workbench155 = backend === "workbench" && compatibility === "cloudera_1_5_5_sp3";
+  const presets = {
+    deterministic: {temperature: 0, topP: 1, maxTokens: 512, reasoning: "disabled", effort: "", retries: 0, parallel: ""},
+    balanced: {temperature: 0.7, topP: 0.9, maxTokens: 512, reasoning: "auto", effort: "", retries: 1, parallel: ""},
+    creative: {temperature: 1, topP: 0.95, topK: 50, repetition: 1.05, maxTokens: 1024, reasoning: "auto", effort: "", retries: 1, parallel: ""},
+    reasoning: {temperature: 0.6, topP: 0.95, topK: 40, maxTokens: workbench155 ? 512 : 2048, reasoning: "enabled", effort: "high", retries: 0, parallel: ""},
+    rag: {temperature: 0.2, topP: 0.9, topK: 40, repetition: 1.05, maxTokens: 1024, reasoning: "auto", effort: "", retries: 1, parallel: ""},
+    throughput: {temperature: 0.2, topP: 0.9, maxTokens: 256, reasoning: "disabled", effort: "", retries: 0, parallel: 8},
+  };
+  const preset = presets[$("#config-use-case").value] || presets.balanced;
+  $("#config-temperature").value = preset.temperature;
+  $("#config-top-p").value = preset.topP;
+  $("#config-top-k").value = providerSampling && preset.topK !== undefined ? preset.topK : "";
+  $("#config-min-p").value = "";
+  $("#config-repetition-penalty").value = providerSampling && preset.repetition !== undefined ? preset.repetition : "";
+  $("#config-frequency-penalty").value = "";
+  $("#config-presence-penalty").value = "";
+  $("#config-seed").value = $("#config-use-case").value === "deterministic" ? 42 : "";
+  $("#config-default-max-tokens").value = workbench155 ? Math.min(preset.maxTokens, 512) : preset.maxTokens;
+  $("#config-reasoning-mode").value = preset.reasoning;
+  $("#config-reasoning").value = preset.effort;
+  $("#config-num-retries").value = preset.retries;
+  $("#config-max-parallel").value = preset.parallel;
+  updateModelParameterContext();
+  setInlineStatus("#model-form-status", "Perfil aplicado. Ajusta contexto y salida a los límites reales del deployment.", "success");
 }
 
 function beginModelEdit(name) {
@@ -762,11 +899,34 @@ function beginModelEdit(name) {
   $("#config-model").value = model.provider_model;
   $("#config-api-base").value = model.api_base || "";
   $("#config-api-key").value = model.api_key?.startsWith("os.environ/") ? model.api_key.slice(11) : "";
+  $("#config-backend").value = model.backend_profile || "auto";
+  $("#config-compatibility").value = model.compatibility_profile || "auto";
+  $("#config-context-window").value = model.context_window ?? "";
+  $("#config-max-output-tokens").value = model.max_output_tokens ?? "";
+  $("#config-default-max-tokens").value = model.default_max_tokens ?? "";
+  $("#config-temperature").value = model.temperature ?? "";
+  $("#config-top-p").value = model.top_p ?? "";
+  $("#config-top-k").value = model.top_k ?? "";
+  $("#config-min-p").value = model.min_p ?? "";
+  $("#config-repetition-penalty").value = model.repetition_penalty ?? "";
+  $("#config-frequency-penalty").value = model.frequency_penalty ?? "";
+  $("#config-presence-penalty").value = model.presence_penalty ?? "";
+  $("#config-seed").value = model.seed ?? "";
+  $("#config-stop").value = Array.isArray(model.stop) ? model.stop.join("\n") : "";
+  $("#config-reasoning-mode").value = model.reasoning_mode || "auto";
   $("#config-reasoning").value = model.reasoning_effort || "";
+  $("#config-preserve-thinking").checked = Boolean(model.preserve_thinking);
+  $("#config-num-retries").value = model.num_retries ?? "";
+  $("#config-max-parallel").value = model.max_parallel_requests ?? "";
   $("#config-keep-alive").value = model.keep_alive ?? "";
   $("#config-timeout").value = model.timeout ?? "";
   $("#config-fallback").value = model.fallbacks?.[0] || "";
   $("#config-drop-params").checked = model.drop_params;
+  $("#config-parameter-policy").value = model.parameter_policy || "caller_wins";
+  $("#config-extra-parameters").value = formatExtraParameters(model.extra_parameters);
+  $("#config-validation-payload").value = "";
+  $("#config-validation-path").value = "";
+  updateModelParameterContext();
   $("#save-model").textContent = "Guardar cambios";
   $("#cancel-model-edit").hidden = false;
   setInlineStatus("#model-form-status", `Editando ${name}`);
@@ -778,6 +938,8 @@ function cancelModelEdit() {
   preparedClouderaSource = null;
   $("#model-form").reset();
   $("#config-drop-params").checked = true;
+  $("#config-parameter-policy").value = "caller_wins";
+  updateModelParameterContext();
   $("#save-model").textContent = "Añadir modelo";
   $("#cancel-model-edit").hidden = true;
   setInlineStatus("#model-form-status", "");
@@ -825,16 +987,53 @@ async function addConfiguredModel(event) {
   const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
   setInlineStatus("#model-form-status", "Validando y guardando…");
+  const effectiveBackend = currentModelBackend();
+  const tritonProfile = effectiveBackend === "triton";
+  const providerSampling = ["vllm", "nim", "workbench", "ollama"].includes(effectiveBackend);
+  const reasoningMode = tritonProfile ? "auto" : $("#config-reasoning-mode").value;
+  let extraParameters;
+  let validationPayload = {};
+  try {
+    extraParameters = parseExtraParameters($("#config-extra-parameters").value);
+    const rawValidation = $("#config-validation-payload").value.trim();
+    if (rawValidation) validationPayload = JSON.parse(rawValidation);
+  } catch (exception) {
+    setInlineStatus("#model-form-status", `No se puede probar: ${exception.message}`, "error");
+    button.disabled = false;
+    return;
+  }
   const payload = {
     model_name: $("#config-name").value,
     model: $("#config-model").value,
     api_base: $("#config-api-base").value,
     api_key_env: $("#config-api-key").value,
-    reasoning_effort: $("#config-reasoning").value,
+    backend_profile: $("#config-backend").value,
+    compatibility_profile: $("#config-compatibility").value,
+    context_window: optionalNumber("#config-context-window"),
+    max_output_tokens: optionalNumber("#config-max-output-tokens"),
+    default_max_tokens: tritonProfile ? null : optionalNumber("#config-default-max-tokens"),
+    temperature: tritonProfile ? null : optionalNumber("#config-temperature"),
+    top_p: tritonProfile ? null : optionalNumber("#config-top-p"),
+    top_k: providerSampling ? optionalNumber("#config-top-k") : null,
+    min_p: providerSampling ? optionalNumber("#config-min-p") : null,
+    repetition_penalty: providerSampling ? optionalNumber("#config-repetition-penalty") : null,
+    frequency_penalty: tritonProfile ? null : optionalNumber("#config-frequency-penalty"),
+    presence_penalty: tritonProfile ? null : optionalNumber("#config-presence-penalty"),
+    seed: tritonProfile ? null : optionalNumber("#config-seed"),
+    stop: tritonProfile ? [] : $("#config-stop").value.split("\n").map((value) => value.trim()).filter(Boolean),
+    reasoning_mode: reasoningMode,
+    reasoning_effort: reasoningMode === "disabled" ? "" : $("#config-reasoning").value,
+    preserve_thinking: reasoningMode === "enabled" && $("#config-preserve-thinking").checked,
+    num_retries: optionalNumber("#config-num-retries"),
+    max_parallel_requests: optionalNumber("#config-max-parallel"),
     keep_alive: $("#config-keep-alive").value,
     timeout: $("#config-timeout").value ? Number($("#config-timeout").value) : null,
     fallback_model: $("#config-fallback").value,
     drop_params: $("#config-drop-params").checked,
+    parameter_policy: $("#config-parameter-policy").value,
+    extra_parameters: extraParameters,
+    validation_payload: validationPayload,
+    validation_path: $("#config-validation-path").value,
     source: preparedClouderaSource?.source || "",
     cloudera_kind: preparedClouderaSource?.cloudera_kind || "",
     serving_engine: preparedClouderaSource?.serving_engine || "",
@@ -842,6 +1041,13 @@ async function addConfiguredModel(event) {
     embedding_input_type: preparedClouderaSource?.embedding_input_type || "",
   };
   try {
+    setInlineStatus("#model-form-status", "Probando el deployment con todos los parámetros…");
+    const validation = await api("/api/config/models/validate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    payload.validation_id = validation.validation_id;
+    setInlineStatus("#model-form-status", "Prueba correcta. Preparando el guardado…", "success");
     const restart = await askRestart();
     if (restart === null) return;
     payload.restart = restart;
@@ -933,7 +1139,10 @@ async function updateGuardrail() {
   const restart = await askRestart();
   if (restart === null) return;
   try {
-    const result = await api("/api/config/guardrail", {method: "PUT", body: JSON.stringify({enabled: $("#guardrail-enabled").checked, model: $("#guardrail-model").value, policy: $("#guardrail-policy").value, restart})});
+    const selectedExclusions = [...document.querySelectorAll(".guardrail-exclusion:checked:not(:disabled)")]
+      .map((input) => input.value);
+    const result = await api("/api/config/guardrail", {method: "PUT", body: JSON.stringify({enabled: $("#guardrail-enabled").checked, model: $("#guardrail-model").value, policy: $("#guardrail-policy").value, excluded_models: selectedExclusions, restart})});
+    guardrailExcludedModels = new Set(selectedExclusions);
     $("#yaml-editor").value = result.content;
     const message = !$("#guardrail-enabled").checked
       ? "Guardrail desactivado: las llamadas irán directamente al modelo elegido."
@@ -942,7 +1151,20 @@ async function updateGuardrail() {
         : "Guardrail actualizado en política permisiva.";
     setInlineStatus("#yaml-status", message, "success");
     await Promise.all([loadStatus(), loadModels()]);
+    await loadConfig();
   } catch (exception) { showError(exception); }
+}
+
+function renderGuardrailExclusions() {
+  const target = $("#guardrail-excluded-models");
+  if (!target) return;
+  const guardrailModel = $("#guardrail-model").value;
+  const candidates = models.filter((model) => model.name !== guardrailModel);
+  target.innerHTML = candidates.length ? candidates.map((model) => {
+    const automatic = model.mode === "embedding";
+    const checked = automatic || guardrailExcludedModels.has(model.name);
+    return `<label><input class="guardrail-exclusion" type="checkbox" value="${escapeHtml(model.name)}" ${checked ? "checked" : ""} ${automatic ? "disabled" : ""}> <span>${escapeHtml(model.name)}</span>${automatic ? " <small>Embedding · automático</small>" : ""}</label>`;
+  }).join("") : '<span class="empty compact">No hay otros modelos configurados.</span>';
 }
 
 function renderGuardrailPolicy() {
@@ -956,6 +1178,92 @@ function renderGuardrailPolicy() {
   const restricted = $("#guardrail-policy").value === "block";
   $("#policy-chip").textContent = restricted ? "Política restringida · bloquea" : "Política permisiva · avisa y continúa";
   $("#policy-chip").classList.toggle("restricted", restricted);
+}
+
+async function updateAdvisor() {
+  if ($("#advisor-enabled").checked && !$("#advisor-model").value) {
+    $("#advisor-enabled").checked = false;
+    showError(new Error("Selecciona primero el modelo que actuará como asesor."));
+    return;
+  }
+  const restart = await askRestart();
+  if (restart === null) return;
+  try {
+    const result = await api("/api/config/advisor", {
+      method: "PUT",
+      body: JSON.stringify({enabled: $("#advisor-enabled").checked, model: $("#advisor-model").value, restart}),
+    });
+    $("#yaml-editor").value = result.content;
+    setInlineStatus("#advisor-status", $("#advisor-enabled").checked ? "Asesor disponible." : "Asesor desactivado.", "success");
+    await Promise.all([loadStatus(), loadModels()]);
+  } catch (exception) { setInlineStatus("#advisor-status", exception.message, "error"); }
+}
+
+function openAdvisor(name, trigger) {
+  if (!$("#advisor-enabled").checked || !$("#advisor-model").value) {
+    showError(new Error("Habilita y selecciona primero el modelo asesor en Configuración."));
+    return;
+  }
+  advisorTargetName = name;
+  advisorTrigger = trigger;
+  advisorRecommendation = null;
+  $("#advisor-target").textContent = `Modelo objetivo: ${name}`;
+  $("#advisor-use-case").value = "";
+  $("#advisor-recommendation").hidden = true;
+  $("#advisor-apply").hidden = true;
+  setInlineStatus("#advisor-dialog-status", "");
+  $("#advisor-dialog").showModal();
+  $("#advisor-use-case").focus();
+}
+
+function closeAdvisor() {
+  $("#advisor-dialog").close();
+  advisorTrigger?.focus();
+}
+
+async function askAdvisor(event) {
+  event.preventDefault();
+  const button = $("#advisor-ask");
+  button.disabled = true;
+  setInlineStatus("#advisor-dialog-status", "Analizando el caso de uso…");
+  try {
+    advisorRecommendation = await api("/api/config/advisor/recommend", {
+      method: "POST",
+      body: JSON.stringify({model_name: advisorTargetName, use_case: $("#advisor-use-case").value}),
+    });
+    $("#advisor-summary").textContent = advisorRecommendation.summary;
+    $("#advisor-rationale").innerHTML = advisorRecommendation.rationale.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+    $("#advisor-parameters").textContent = JSON.stringify(advisorRecommendation.parameters, null, 2);
+    $("#advisor-recommendation").hidden = false;
+    $("#advisor-apply").hidden = false;
+    setInlineStatus("#advisor-dialog-status", "Recomendación lista. Revísala antes de aplicarla.", "success");
+  } catch (exception) { setInlineStatus("#advisor-dialog-status", exception.message, "error"); }
+  finally { button.disabled = false; }
+}
+
+function applyAdvisorRecommendation() {
+  if (!advisorRecommendation) return;
+  beginModelEdit(advisorTargetName);
+  const parameters = advisorRecommendation.parameters || {};
+  const mapping = {
+    temperature: "#config-temperature", top_p: "#config-top-p", top_k: "#config-top-k",
+    min_p: "#config-min-p", repetition_penalty: "#config-repetition-penalty",
+    frequency_penalty: "#config-frequency-penalty", presence_penalty: "#config-presence-penalty",
+    seed: "#config-seed", max_tokens: "#config-default-max-tokens",
+    reasoning_mode: "#config-reasoning-mode", reasoning_effort: "#config-reasoning",
+    parameter_policy: "#config-parameter-policy",
+  };
+  Object.entries(mapping).forEach(([key, selector]) => {
+    if (parameters[key] !== undefined && parameters[key] !== null) $(selector).value = parameters[key];
+  });
+  if (Array.isArray(parameters.stop)) $("#config-stop").value = parameters.stop.join("\n");
+  if (parameters.extra_parameters && typeof parameters.extra_parameters === "object") {
+    $("#config-extra-parameters").value = formatExtraParameters(parameters.extra_parameters);
+  }
+  updateModelParameterContext();
+  setInlineStatus("#model-form-status", `Recomendación del asesor aplicada a ${advisorTargetName}. Debes guardarla y superar la prueba real.`, "success");
+  closeAdvisor();
+  $("#model-form").scrollIntoView({behavior: "smooth", block: "start"});
 }
 
 /** Una sola llamada mínima por modelo remoto y carga completa de la página. */
@@ -1075,6 +1383,7 @@ function logCard(log) {
         <span><b>Fin respuesta:</b> ${log.duration_ms ?? "—"} ms</span>
       </div>
       ${log.guardrail_status ? `<div class="guardrail-result ${escapeHtml(log.guardrail_status)}"><b>Guardrail:</b> ${log.guardrail_status === "warning" ? "⚠ Riesgo detectado; la petición continuó" : log.guardrail_status === "safe" ? "✓ Contenido clasificado como seguro" : "⚠ No se pudo evaluar; la petición continuó"}<span>${escapeHtml(log.guardrail_reason || "")}</span></div>` : ""}
+      <details class="parameter-log"><summary>Parámetros efectivos enviados al proveedor</summary><pre>${escapeHtml(JSON.stringify(log.parameters || {}, null, 2))}</pre></details>
       <div class="io-grid">
         <div><h4>Pregunta / entrada</h4><pre>${escapeHtml(JSON.stringify(log.request, null, 2))}</pre></div>
         <div><h4>Respuesta / salida</h4><pre>${escapeHtml(log.error || JSON.stringify(log.response, null, 2))}</pre></div>
@@ -1114,12 +1423,13 @@ function renderKpis(kpis) {
 
 function logTable(rows) {
   if (!rows.length) return '<p class="empty">No hay peticiones para este modelo y jornada.</p>';
-  return `<div class="log-table-wrap"><table class="log-table"><thead><tr><th>Hora</th><th>Estado</th><th>Origen</th><th>Destino</th><th>Pregunta / entrada</th><th>Respuesta / salida</th><th>TTFT</th><th>Total</th><th>Guardrail</th></tr></thead><tbody>${rows.map((log) => {
+  return `<div class="log-table-wrap"><table class="log-table"><thead><tr><th>Hora</th><th>Estado</th><th>Origen</th><th>Destino</th><th>Parámetros efectivos</th><th>Pregunta / entrada</th><th>Respuesta / salida</th><th>TTFT</th><th>Total</th><th>Guardrail</th></tr></thead><tbody>${rows.map((log) => {
     const time = madridTime(log.started_at || log.created_at);
     const request = displayPayload(log.request);
     const response = log.error || displayPayload(log.response);
     const guardrail = log.guardrail_status === "warning" ? "Riesgo · continuó" : log.guardrail_status === "safe" ? "Seguro" : log.guardrail_status === "unavailable" ? "No disponible" : "—";
-    return `<tr><td class="nowrap">${escapeHtml(time.split(", ").pop())}</td><td><span class="table-status ${log.status}">${log.status === "success" ? "Correcto" : "Error"}</span></td><td>${escapeHtml(log.origin_ip || "—")}</td><td>${escapeHtml(log.provider_ip || "—")}</td><td><details><summary>${escapeHtml(request.slice(0, 100))}</summary><pre>${escapeHtml(request)}</pre></details></td><td><details><summary>${escapeHtml(response.slice(0, 100))}</summary><pre>${escapeHtml(response)}</pre></details></td><td class="number">${log.ttft_ms ?? "—"}</td><td class="number">${log.duration_ms ?? "—"}</td><td><span class="guardrail-table ${escapeHtml(log.guardrail_status || "none")}">${guardrail}</span>${log.guardrail_reason ? `<details><summary>Detalle</summary><p>${escapeHtml(log.guardrail_reason)}</p></details>` : ""}</td></tr>`;
+    const parameters = JSON.stringify(log.parameters || {}, null, 2);
+    return `<tr><td class="nowrap">${escapeHtml(time.split(", ").pop())}</td><td><span class="table-status ${log.status}">${log.status === "success" ? "Correcto" : "Error"}</span></td><td>${escapeHtml(log.origin_ip || "—")}</td><td>${escapeHtml(log.provider_ip || "—")}</td><td><details><summary>${escapeHtml(parameters.slice(0, 100))}</summary><pre>${escapeHtml(parameters)}</pre></details></td><td><details><summary>${escapeHtml(request.slice(0, 100))}</summary><pre>${escapeHtml(request)}</pre></details></td><td><details><summary>${escapeHtml(response.slice(0, 100))}</summary><pre>${escapeHtml(response)}</pre></details></td><td class="number">${log.ttft_ms ?? "—"}</td><td class="number">${log.duration_ms ?? "—"}</td><td><span class="guardrail-table ${escapeHtml(log.guardrail_status || "none")}">${guardrail}</span>${log.guardrail_reason ? `<details><summary>Detalle</summary><p>${escapeHtml(log.guardrail_reason)}</p></details>` : ""}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 }
 
@@ -1223,6 +1533,11 @@ $("#clear-process-log").onclick = () => clearSelectedProcessLog().catch(showErro
 $("#log-day").onchange = () => { selectedLogDay = $("#log-day").value; loadLogs().catch(showError); };
 $("#test-button").onclick = runTest;
 $("#model-form").onsubmit = addConfiguredModel;
+$("#apply-model-preset").onclick = applyModelPreset;
+$("#config-backend").onchange = updateModelParameterContext;
+$("#config-compatibility").onchange = updateModelParameterContext;
+$("#config-reasoning-mode").onchange = updateModelParameterContext;
+$("#config-model").oninput = updateModelParameterContext;
 $("#save-yaml").onclick = saveYaml;
 $("#validate-yaml").onclick = () => validateYaml().catch(() => {});
 $("#yaml-import-file").onchange = () => {
@@ -1232,8 +1547,15 @@ $("#yaml-import-file").onchange = () => {
 };
 $("#import-yaml-backup").onclick = importYamlBackup;
 $("#guardrail-enabled").onchange = () => { renderGuardrailPolicy(); updateGuardrail(); };
-$("#guardrail-model").onchange = () => { $("#guardrail-enabled").checked = Boolean($("#guardrail-model").value); renderGuardrailPolicy(); updateGuardrail(); };
+$("#guardrail-model").onchange = () => { $("#guardrail-enabled").checked = Boolean($("#guardrail-model").value); renderGuardrailPolicy(); renderGuardrailExclusions(); updateGuardrail(); };
 $("#guardrail-policy").onchange = () => { renderGuardrailPolicy(); if ($("#guardrail-enabled").checked) updateGuardrail(); };
+$("#save-guardrail-exclusions").onclick = updateGuardrail;
+$("#advisor-enabled").onchange = updateAdvisor;
+$("#advisor-model").onchange = () => { $("#advisor-enabled").checked = Boolean($("#advisor-model").value); updateAdvisor(); };
+$("#advisor-form").onsubmit = askAdvisor;
+$("#advisor-cancel").onclick = closeAdvisor;
+$("#advisor-apply").onclick = applyAdvisorRecommendation;
+$("#advisor-dialog").addEventListener("close", () => advisorTrigger?.focus());
 $("#cancel-model-edit").onclick = cancelModelEdit;
 $("#cloudera-connection-form").onsubmit = saveClouderaConnection;
 $("#cloudera-platform").onchange = updateClouderaFormContext;
@@ -1258,6 +1580,7 @@ async function initialize() {
   await loadConfig();
   await loadClouderaConnections();
   renderConfiguredModels();
+  updateModelParameterContext();
   const requestedTab = new URLSearchParams(location.search).get("tab");
   document.querySelector(`.primary-tab[data-view="${requestedTab}"]`)?.click();
   if (gatewayProcessAlive) await loadRemoteLatencies();

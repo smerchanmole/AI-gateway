@@ -38,6 +38,7 @@ _FORWARDED_PARAMETERS = {
 }
 _DEFAULT_MAX_TOKENS = 128
 _MAX_MAX_TOKENS = 512
+_RESERVED_EXTRA_PARAMETERS = {"api_base", "api_key", "authorization", "headers", "messages", "model", "request"}
 
 
 def _normalize_api_base(value: str) -> str:
@@ -83,7 +84,7 @@ def _request_body(messages: list, optional_params: dict[str, Any]) -> dict[str, 
     if isinstance(extra_body, dict):
         request.update({
             key: value for key, value in extra_body.items()
-            if key in _FORWARDED_PARAMETERS
+            if key not in _RESERVED_EXTRA_PARAMETERS
         })
     max_tokens = request.get("max_tokens", _DEFAULT_MAX_TOKENS)
     if isinstance(max_tokens, int) and not isinstance(max_tokens, bool):
