@@ -210,7 +210,7 @@ def test_dashboard_disables_cache_and_uses_test_tabs(client):
     assert 'id="benchmark-form"' in response.text
 
 
-def test_cloudera_model_entry_deduplicates_openai_provider_prefix():
+def test_cloudera_model_entry_preserves_remote_openai_namespace():
     model = dashboard.ModelCreate(
         model_name="gptoss20b", model="openai/openai/gpt-oss-20b",
         api_base="https://inference.example/endpoints/gptoss20b/v1",
@@ -219,7 +219,21 @@ def test_cloudera_model_entry_deduplicates_openai_provider_prefix():
 
     entry = dashboard._model_entry(model)
 
-    assert entry["litellm_params"]["model"] == "openai/gpt-oss-20b"
+    assert entry["litellm_params"]["model"] == "openai/openai/gpt-oss-20b"
+
+
+def test_cloudera_model_entry_builds_provider_prefix_from_remote_model():
+    model = dashboard.ModelCreate(
+        model_name="gptoss20b", model="openai/gpt-oss-20b",
+        remote_model="openai/gpt-oss-20b",
+        api_base="https://inference.example/endpoints/gptoss20b/v1",
+        source="cloudera", cloudera_kind="inference",
+    )
+
+    entry = dashboard._model_entry(model)
+
+    assert entry["litellm_params"]["model"] == "openai/openai/gpt-oss-20b"
+    assert entry["model_info"]["dashboard_remote_model"] == "openai/gpt-oss-20b"
 
 
 def test_benchmark_rejects_too_few_requests_for_concurrency(monkeypatch, client):
@@ -583,6 +597,37 @@ def test_guided_model_probe_reuses_cloudera_private_ca(tmp_path, monkeypatch):
     assert isinstance(captured["verify"], ssl.SSLContext)
     assert captured["verify"].check_hostname is True
     assert captured["verify"].verify_mode == ssl.CERT_REQUIRED
+
+
+def test_cai_gpt_oss_probe_sends_complete_remote_model_identifier(monkeypatch):
+    model = dashboard.ModelCreate(
+        model_name="gptoss20b", model="openai/openai/gpt-oss-20b",
+        remote_model="openai/gpt-oss-20b",
+        api_base="https://inference.example/endpoints/gptoss20b/v1",
+        source="cloudera", cloudera_kind="inference",
+    )
+    entry = dashboard._model_entry(model)
+    captured = {}
+
+    class Response:
+        status_code = 200
+        is_error = False
+        def json(self): return {"choices": []}
+
+    class Client:
+        def __init__(self, **_kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        async def post(self, url, json, **_kwargs):
+            captured.update({"url": url, "json": json})
+            return Response()
+
+    monkeypatch.setattr(dashboard.httpx, "AsyncClient", Client)
+    result = asyncio.run(dashboard._probe_model_candidate(model, entry))
+
+    assert result["status"] == 200
+    assert captured["url"].endswith("/chat/completions")
+    assert captured["json"]["model"] == "openai/gpt-oss-20b"
 
 
 def test_cloudera_155_sp3_workbench_caps_guided_default_output(client):

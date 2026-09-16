@@ -85,7 +85,7 @@ def test_cloudera_alias_maps_to_provider_model_for_callback(tmp_path):
     assert dashboard["provider_models"]["nemotron-publico"] == "openai/nvidia/nemotron-3-super-120b-a12b"
 
 
-def test_active_config_repairs_legacy_double_openai_prefix(tmp_path):
+def test_active_config_preserves_cai_remote_openai_namespace(tmp_path):
     manager = make_manager(tmp_path)
     config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
     config["model_list"][0] = {
@@ -102,7 +102,27 @@ def test_active_config_repairs_legacy_double_openai_prefix(tmp_path):
     manager._write_active_config()
     active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
 
-    assert active["model_list"][0]["litellm_params"]["model"] == "openai/gpt-oss-20b"
+    assert active["model_list"][0]["litellm_params"]["model"] == "openai/openai/gpt-oss-20b"
+
+
+def test_active_config_repairs_old_cai_gpt_oss_draft(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["model_list"][0] = {
+        "model_name": "gptoss20b",
+        "litellm_params": {
+            "model": "openai/gpt-oss-20b",
+            "api_base": "https://inference.example/endpoints/gptoss20b/v1",
+            "api_key": "os.environ/CLOUDERA_DEMO_CDP_TOKEN",
+        },
+        "model_info": {"dashboard_source": "cloudera", "dashboard_cloudera_kind": "inference"},
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    manager._write_active_config()
+    active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
+
+    assert active["model_list"][0]["litellm_params"]["model"] == "openai/openai/gpt-oss-20b"
 
 
 def test_cloudera_active_config_keeps_supported_vllm_extra_body(tmp_path):

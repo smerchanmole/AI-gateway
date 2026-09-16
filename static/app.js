@@ -562,12 +562,15 @@ function prepareClouderaModel(index, inputType = "") {
     serving_engine: model.serving_engine || "",
     task: model.task || "",
     embedding_input_type: inputType,
+    remote_model: String(model.canonical_model_name || model.model_name || model.name)
+      .replace(/-(query|passage)$/i, ""),
   };
   const roleSuffix = inputType ? `-${inputType}` : "";
-  // CAI suele publicar ya el identificador como `openai/modelo`. El prefijo
-  // pertenece a LiteLLM, no al nombre remoto: evitar `openai/openai/modelo`.
+  // El primer `openai/` selecciona el proveedor LiteLLM. Si CAI publica un
+  // identificador que también empieza por `openai/`, el segundo pertenece al
+  // payload remoto y debe conservarse: LiteLLM retirará únicamente el primero.
   const canonicalModel = String(model.canonical_model_name || model.model_name || model.name)
-    .replace(/^openai\//i, "").replace(/-(query|passage)$/i, "");
+    .replace(/-(query|passage)$/i, "");
   $("#config-name").value = `${model.name}${roleSuffix}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   $("#config-model").value = model.protocol === "openai"
     ? `openai/${canonicalModel}${roleSuffix}`
@@ -1102,6 +1105,7 @@ async function addConfiguredModel(event) {
     serving_engine: preparedClouderaSource?.serving_engine || "",
     task: preparedClouderaSource?.task || "",
     embedding_input_type: preparedClouderaSource?.embedding_input_type || "",
+    remote_model: preparedClouderaSource?.remote_model || "",
   };
   try {
     setInlineStatus("#model-form-status", "Probando el deployment con todos los parámetros…");

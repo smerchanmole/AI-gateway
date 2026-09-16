@@ -576,6 +576,7 @@ class ModelCreate(BaseModel):
     serving_engine: str = ""
     task: str = ""
     embedding_input_type: str = ""
+    remote_model: str = ""
     restart: bool = True
 
 
@@ -688,11 +689,14 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
     name = model.model_name.strip()
     provider_model = model.model.strip()
     if model.source == "cloudera" and model.cloudera_kind != "workbench":
-        # Algunas versiones de CAI devuelven `model_name=openai/...`; el
-        # borrador de UI ya lo normaliza, pero esta defensa protege también a
-        # clientes API antiguos y configuraciones pegadas a mano.
-        while provider_model.lower().startswith("openai/openai/"):
+        # El primer prefijo selecciona el proveedor LiteLLM y el identificador
+        # remoto de CAI puede empezar también por `openai/`. Sólo reducimos
+        # prefijos triples accidentales; dos son correctos para esos modelos.
+        while provider_model.lower().startswith("openai/openai/openai/"):
             provider_model = provider_model[len("openai/"):]
+        remote_model = model.remote_model.strip()
+        if remote_model:
+            provider_model = f"openai/{remote_model}"
     if not name or not provider_model:
         raise RuntimeError("Alias y modelo LiteLLM son obligatorios")
     if model.api_key_env and not re.fullmatch(r"[A-Z_][A-Z0-9_]*", model.api_key_env.strip()):
@@ -849,6 +853,8 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
             "dashboard_task": model.task.strip(),
             "dashboard_embedding_input_type": model.embedding_input_type.strip(),
         })
+        if model.remote_model.strip():
+            model_info["dashboard_remote_model"] = model.remote_model.strip()
     if model_info:
         entry["model_info"] = model_info
     # El gestor retira esta marca antes de escribir YAML. Sirve para distinguir

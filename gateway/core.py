@@ -670,8 +670,17 @@ class GatewayManager:
             public_name = str(item.get("model_name") or "")
             if (model_info.get("dashboard_source") == "cloudera"
                     or api_key.startswith("os.environ/CLOUDERA_")):
-                while provider_model.lower().startswith("openai/openai/"):
+                while provider_model.lower().startswith("openai/openai/openai/"):
                     provider_model = provider_model[len("openai/"):]
+                remote_model = str(model_info.get("dashboard_remote_model") or "").strip()
+                if remote_model and model_info.get("dashboard_cloudera_kind") != "workbench":
+                    provider_model = f"openai/{remote_model}"
+                elif (model_info.get("dashboard_cloudera_kind") == "inference"
+                      and provider_model.lower().startswith("openai/gpt-oss")):
+                    # Migra los borradores creados por la normalización antigua:
+                    # CAI exige `openai/gpt-oss-*` dentro del JSON, además del
+                    # prefijo exterior que LiteLLM usa para elegir proveedor.
+                    provider_model = f"openai/{provider_model}"
                 params["model"] = provider_model
             tls_verify = cloudera_catalog.tls_verification_for(
                 api_key, str(params.get("api_base") or ""), as_context=False,
