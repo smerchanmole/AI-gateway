@@ -804,6 +804,13 @@ class GatewayManager:
             encoding="utf-8",
         )
         shutil.copy2(Path(__file__).with_name("litellm_callback.py"), self.runtime_dir / "litellm_callback.py")
+        # Se carga al iniciar el intérprete hijo, antes de que LiteLLM cree y
+        # cachee el transporte OpenAI/aiohttp. El callback por sí solo llega
+        # demasiado tarde en algunas versiones de LiteLLM.
+        shutil.copy2(
+            Path(__file__).with_name("litellm_sitecustomize.py"),
+            self.runtime_dir / "sitecustomize.py",
+        )
         if has_workbench_models:
             shutil.copy2(Path(__file__).with_name("workbench_provider.py"), self.runtime_dir / "workbench_provider.py")
         self.active_config.write_text(
@@ -824,8 +831,30 @@ class GatewayManager:
         env.pop("LITELLM_MASTER_KEY", None)
         env.pop("DATABASE_URL", None)
         env["LITELLM_MODE"] = "PRODUCTION"
-        env["PYTHONPATH"] = str(self.root) + os.pathsep + env.get("PYTHONPATH", "")
         env["IA_GATEWAY_ROOT"] = str(self.root)
+        # LiteLLM 1.83 no propaga siempre `ssl_verify: false` del deployment a
+        # su cliente OpenAI/aiohttp compartido. Comunicamos sólo los hosts de
+        # modelos que lo han solicitado expresamente; nunca se desactiva TLS
+        # para proveedores Cloud u otros destinos del mismo gateway.
+        try:
+            active = yaml.safe_load(self.active_config.read_text(encoding="utf-8")) or {}
+            insecure_hosts = sorted({
+                (urlparse(str(params.get("api_base") or "")).hostname or "").lower()
+                for item in active.get("model_list", [])
+                if isinstance(item, dict)
+                for params in [item.get("litellm_params") or {}]
+                if params.get("ssl_verify") is False
+            } - {""})
+        except (OSError, yaml.YAMLError, TypeError):
+            insecure_hosts = []
+        if insecure_hosts:
+            env["IA_GATEWAY_INSECURE_TLS_HOSTS"] = ",".join(insecure_hosts)
+        else:
+            env.pop("IA_GATEWAY_INSECURE_TLS_HOSTS", None)
+        python_paths = [str(self.runtime_dir), str(self.root)]
+        if env.get("PYTHONPATH"):
+            python_paths.append(env["PYTHONPATH"])
+        env["PYTHONPATH"] = os.pathsep.join(python_paths)
         return env
 
     def sync_cloudera_credentials(self) -> bool:

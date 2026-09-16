@@ -2,6 +2,9 @@ from pathlib import Path
 from types import SimpleNamespace
 import asyncio
 from datetime import datetime
+import os
+import subprocess
+import sys
 
 import yaml
 
@@ -176,6 +179,84 @@ def test_litellm_callback_installs_private_ca_context(tmp_path, monkeypatch):
 
     assert isinstance(litellm.ssl_verify, ssl.SSLContext)
     assert not (litellm.ssl_verify.verify_flags & getattr(ssl, "VERIFY_X509_STRICT", 0))
+
+
+def test_litellm_process_loads_private_ca_before_http_clients(tmp_path):
+    manager = make_manager(tmp_path)
+    certificate, _key = ensure_self_signed_certificate(tmp_path / "certificate")
+    ca_dir = manager.runtime_dir / "cloudera-ca"
+    ca_dir.mkdir(parents=True)
+    (ca_dir / "private.pem").write_text(certificate.read_text(encoding="utf-8"), encoding="utf-8")
+
+    manager._write_active_config()
+    env = manager._process_environment()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import ssl; "
+                "c=ssl.create_default_context(); "
+                "stats=c.cert_store_stats(); "
+                "print(ssl.create_default_context.__module__); "
+                "print(bool(c.verify_flags & getattr(ssl, 'VERIFY_X509_STRICT', 0))); "
+                "print(c.verify_mode == ssl.CERT_REQUIRED and c.check_hostname); "
+                "print(stats['x509'] > stats['x509_ca'])"
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == ["sitecustomize", "False", "True", "True"]
+    assert env["PYTHONPATH"].split(os.pathsep)[:2] == [str(manager.runtime_dir), str(tmp_path)]
+
+
+def test_litellm_process_disables_tls_only_for_configured_cloudera_host(tmp_path):
+    manager = make_manager(tmp_path)
+    catalog = ClouderaCatalog(manager.runtime_dir)
+    connection = catalog.save_connection(
+        "Laboratorio", "inference", "https://inference.lab.example", "opaque-token",
+        platform="onpremise", onpremise_version="7.3.2", cai_version="1.5.5_sp3",
+        onpremise_auth_mode="manual", tls_verification="disabled",
+    )
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["model_list"][0] = {
+        "model_name": "lab-model",
+        "litellm_params": {
+            "model": "openai/provider-model",
+            "api_base": "https://inference.lab.example/endpoints/model/v1",
+            "api_key": f"os.environ/{catalog.connection_environment_name(connection['id'])}",
+        },
+        "model_info": {"dashboard_source": "cloudera", "dashboard_cloudera_kind": "inference"},
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    manager._write_active_config()
+    env = manager._process_environment()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import aiohttp, sitecustomize; "
+                "print(sitecustomize._is_insecure_host('https://inference.lab.example/v1')); "
+                "print(sitecustomize._is_insecure_host('https://api.openai.com/v1')); "
+                "print(aiohttp.ClientSession._request.__module__)"
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert env["IA_GATEWAY_INSECURE_TLS_HOSTS"] == "inference.lab.example"
+    assert result.stdout.splitlines() == ["True", "False", "sitecustomize"]
 
 
 def test_workbench_model_loads_custom_provider_and_migrates_old_prefix(tmp_path):
