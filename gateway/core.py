@@ -646,6 +646,8 @@ class GatewayManager:
     def _write_active_config(self) -> None:
         """Genera una configuración filtrada y carga el callback junto a ella."""
         config = self._source()
+        from gateway.cloudera import ClouderaCatalog
+        cloudera_catalog = ClouderaCatalog(self.runtime_dir)
         dashboard_settings = config.pop("dashboard_settings", {}) or {}
         disabled = set(self._state().get("disabled_models", []))
         config["model_list"] = [
@@ -666,6 +668,11 @@ class GatewayManager:
             api_key = str(params.get("api_key") or "")
             model_info = item.get("model_info") or {}
             public_name = str(item.get("model_name") or "")
+            tls_verify = cloudera_catalog.tls_verification_for(
+                api_key, str(params.get("api_base") or ""), as_context=False,
+            )
+            if tls_verify is not None:
+                params["ssl_verify"] = tls_verify
             configured = {
                 key: value for key, value in params.items()
                 if key not in {"api_base", "api_key", "drop_params", "max_parallel_requests",

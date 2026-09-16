@@ -6,6 +6,8 @@ from datetime import datetime
 import yaml
 
 from gateway.core import GatewayManager, environment_port
+from gateway.cloudera import ClouderaCatalog
+from gateway.tls import ensure_self_signed_certificate
 from datetime import date
 import zipfile
 import io
@@ -104,6 +106,39 @@ def test_cloudera_active_config_keeps_supported_vllm_extra_body(tmp_path):
         "top_k": 40,
         "chat_template_kwargs": {"enable_thinking": False},
     }
+
+
+def test_cloudera_active_config_propagates_private_ca_to_litellm(tmp_path):
+    manager = make_manager(tmp_path)
+    certificate, _key = ensure_self_signed_certificate(tmp_path / "certificate")
+    catalog = ClouderaCatalog(manager.runtime_dir)
+    connection = catalog.save_connection(
+        "Private TLS", "inference", "https://ml.private", "opaque-token",
+        platform="onpremise", cdp_access_key_id="machine-access",
+        cdp_private_key="machine-private",
+        renewal_url="https://console-cdp.apps.private.example",
+        onpremise_version="7.3.2", cai_version="1.5.5_sp3",
+        onpremise_auth_mode="ums_auto", tls_verification="custom_ca",
+        tls_ca_pem=certificate.read_text(encoding="utf-8"),
+    )
+    config = yaml.safe_load(manager.source_config.read_text(encoding="utf-8"))
+    config["model_list"][0] = {
+        "model_name": "private-model",
+        "litellm_params": {
+            "model": "openai/provider-model",
+            "api_base": "https://ml.private/v1",
+            "api_key": f"os.environ/{catalog.connection_environment_name(connection['id'])}",
+        },
+        "model_info": {"dashboard_source": "cloudera", "dashboard_cloudera_kind": "inference"},
+    }
+    manager.source_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    manager._write_active_config()
+    active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
+    ca_path = Path(active["model_list"][0]["litellm_params"]["ssl_verify"])
+
+    assert ca_path.exists()
+    assert ca_path.read_text(encoding="utf-8") == certificate.read_text(encoding="utf-8")
 
 
 def test_workbench_model_loads_custom_provider_and_migrates_old_prefix(tmp_path):

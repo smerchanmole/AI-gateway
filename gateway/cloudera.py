@@ -375,6 +375,38 @@ class ClouderaCatalog:
         os.chmod(ca_path, 0o600)
         return ca_path
 
+    def tls_verification_for(self, api_key_reference: str = "", url: str = "",
+                             as_context: bool = False) -> bool | str | ssl.SSLContext | None:
+        """Resuelve la política TLS de una referencia `CLOUDERA_*` o su URL.
+
+        Devuelve ``None`` para conservar el comportamiento normal, ``False``
+        para el modo diagnóstico y un contexto/ruta PEM para una CA privada.
+        """
+
+        reference = str(api_key_reference or "").removeprefix("os.environ/")
+        hostname = (urllib.parse.urlparse(str(url or "")).hostname or "").lower()
+        selected = None
+        for connection in self._read().get("connections", []):
+            connection_id = str(connection.get("id") or "")
+            expected_prefix = f"CLOUDERA_{connection_id.upper()}_"
+            connection_host = (urllib.parse.urlparse(str(connection.get("url") or "")).hostname or "").lower()
+            if (reference and reference.startswith(expected_prefix)) or (
+                hostname and connection_host and
+                (hostname == connection_host or hostname == f"modelservice.{connection_host}")
+            ):
+                selected = connection
+                break
+        if not selected:
+            return None
+        mode = str(selected.get("tls_verification") or "system")
+        if mode == "disabled":
+            return False
+        if mode != "custom_ca":
+            return None
+        if as_context:
+            return self._tls_context(selected)
+        return str(self._write_ca_bundle(selected))
+
     @staticmethod
     def _tls_context(connection: dict[str, Any]) -> ssl.SSLContext | None:
         """Construye el contexto TLS compartido por catálogo y sondas.

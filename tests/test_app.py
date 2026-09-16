@@ -1,10 +1,14 @@
 from fastapi.testclient import TestClient
 from datetime import date
+import asyncio
+import ssl
 import pytest
 
 import app as dashboard
 from gateway.auth import AuthStore
+from gateway.cloudera import ClouderaCatalog
 from gateway.log_store import daily_log_path, insert_log
+from gateway.tls import ensure_self_signed_certificate
 
 
 def test_dependency_bootstrap_runs_before_external_imports():
@@ -481,6 +485,48 @@ def test_model_must_pass_real_validation_before_it_can_be_saved(monkeypatch, cli
         "extra_body.guided_json": {"type": "object"},
     }
     assert captured[0]["model_info"]["dashboard_validation_fingerprint"]
+
+
+def test_guided_model_probe_reuses_cloudera_private_ca(tmp_path, monkeypatch):
+    certificate, _key = ensure_self_signed_certificate(tmp_path / "certificate")
+    catalog = ClouderaCatalog(tmp_path / "runtime")
+    connection = catalog.save_connection(
+        "Private TLS", "inference", "https://ml.private", "opaque-token",
+        platform="onpremise", cdp_access_key_id="machine-access",
+        cdp_private_key="machine-private",
+        renewal_url="https://console-cdp.apps.private.example",
+        onpremise_version="7.3.2", cai_version="1.5.5_sp3",
+        onpremise_auth_mode="ums_auto", tls_verification="custom_ca",
+        tls_ca_pem=certificate.read_text(encoding="utf-8"),
+    )
+    model = dashboard.ModelCreate(
+        model_name="private-model", model="openai/provider-model",
+        api_base="https://ml.private/v1",
+        api_key_env=catalog.connection_environment_name(connection["id"]),
+        source="cloudera", cloudera_kind="inference",
+    )
+    entry = dashboard._model_entry(model)
+    captured = {}
+
+    class Response:
+        status_code = 200
+        is_error = False
+        def json(self): return {"data": []}
+
+    class Client:
+        def __init__(self, **kwargs): captured.update(kwargs)
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        async def post(self, *_args, **_kwargs): return Response()
+
+    monkeypatch.setattr(dashboard, "cloudera", catalog)
+    monkeypatch.setattr(dashboard.httpx, "AsyncClient", Client)
+    result = asyncio.run(dashboard._probe_model_candidate(model, entry))
+
+    assert result["status"] == 200
+    assert isinstance(captured["verify"], ssl.SSLContext)
+    assert captured["verify"].check_hostname is True
+    assert captured["verify"].verify_mode == ssl.CERT_REQUIRED
 
 
 def test_cloudera_155_sp3_workbench_caps_guided_default_output(client):

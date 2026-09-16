@@ -940,8 +940,14 @@ async def _probe_model_candidate(model: ModelCreate, entry: dict[str, Any]) -> d
 
     if not url:
         raise RuntimeError("Falta API base para probar el deployment")
+    tls_verify = cloudera.tls_verification_for(
+        str(params.get("api_key") or ""), api_base, as_context=True,
+    )
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            verify=True if tls_verify is None else tls_verify,
+        ) as client:
             response = await client.post(url, json=payload, headers=headers)
     except httpx.RequestError as exc:
         raise RuntimeError(f"No se pudo conectar con el modelo: {exc}") from exc
