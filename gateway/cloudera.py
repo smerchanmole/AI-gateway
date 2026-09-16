@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import re
+import ssl
 import sqlite3
 import subprocess
 import threading
@@ -27,7 +28,8 @@ class ClouderaCatalog:
     sólo recibe estructuras saneadas y variables de entorno temporales.
     """
 
-    SECRET_FIELDS = {"token", "workload_password", "cdp_private_key"}
+    SECRET_FIELDS = {"token", "workload_password", "cdp_private_key", "tls_ca_pem"}
+    TLS_VERIFICATION_MODES = {"system", "custom_ca", "disabled"}
     CAI_RUNTIME_COMPATIBILITY = {
         "1.5.5_sp2": {"7.1.9_sp1", "7.3.1"},
         "1.5.5_sp2_chf1": {"7.1.9_sp1", "7.3.1", "7.3.2"},
@@ -330,6 +332,49 @@ class ClouderaCatalog:
         except ValueError as exc:
             raise RuntimeError("La fecha de caducidad administrativa no es válida") from exc
 
+    @classmethod
+    def _validate_tls_settings(cls, mode: str, ca_pem: str) -> tuple[str, str]:
+        """Valida la política TLS y un posible bundle PEM antes de persistirlo."""
+
+        normalized_mode = str(mode or "system").strip().lower()
+        if normalized_mode not in cls.TLS_VERIFICATION_MODES:
+            raise RuntimeError("Selecciona una política válida de verificación TLS")
+        normalized_pem = str(ca_pem or "").strip()
+        if normalized_mode != "custom_ca":
+            return normalized_mode, ""
+        if not normalized_pem:
+            raise RuntimeError("Pega el certificado raíz/intermedio en formato PEM para usar una CA privada")
+        if len(normalized_pem.encode("utf-8")) > 262_144:
+            raise RuntimeError("El bundle de CA no puede superar 256 KB")
+        certificates = re.findall(
+            r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+            normalized_pem,
+            flags=re.DOTALL,
+        )
+        if not certificates:
+            raise RuntimeError("El bundle no contiene ningún certificado PEM válido")
+        try:
+            for certificate in certificates:
+                ssl.PEM_cert_to_DER_cert(certificate)
+        except ValueError as exc:
+            raise RuntimeError("El bundle contiene un certificado PEM no válido") from exc
+        return normalized_mode, "\n".join(certificates) + "\n"
+
+    def _ca_bundle_path(self, connection_id: str) -> Path:
+        """Devuelve una ruta privada y estable para el bundle usado por CDP CLI."""
+
+        ca_dir = self.path.parent / "cloudera-ca"
+        ca_dir.mkdir(parents=True, exist_ok=True)
+        return ca_dir / f"{connection_id}.pem"
+
+    def _write_ca_bundle(self, connection: dict[str, Any]) -> Path:
+        """Materializa el PEM justo antes de invocar CDP CLI."""
+
+        ca_path = self._ca_bundle_path(str(connection["id"]))
+        ca_path.write_text(str(connection.get("tls_ca_pem") or ""), encoding="utf-8")
+        os.chmod(ca_path, 0o600)
+        return ca_path
+
     def connections(self) -> list[dict[str, Any]]:
         """Devuelve la vista pública de conexiones con indicadores de secretos."""
 
@@ -378,6 +423,7 @@ class ClouderaCatalog:
                           {"has_token": bool(item.get("token")),
                            "has_workload_password": bool(item.get("workload_password")),
                            "has_cdp_private_key": bool(item.get("cdp_private_key")),
+                           "has_tls_ca": bool(item.get("tls_ca_pem")),
                            "renewal_ready": renewal_ready,
                            "renewal_supported": renewal_ready,
                            "renewal_due_at": renewal_due_at,
@@ -461,7 +507,8 @@ class ClouderaCatalog:
                         cdp_access_key_id: str = "", cdp_private_key: str = "", renewal_url: str = "",
                         workload_name: str = "DE", onpremise_version: str = "legacy",
                         credential_expires_at: str = "", cai_version: str = "1.5.5_sp3",
-                        onpremise_auth_mode: str = "", credential_type: str = "cdp_token") -> dict[str, Any]:
+                        onpremise_auth_mode: str = "", credential_type: str = "cdp_token",
+                        tls_verification: str = "system", tls_ca_pem: str = "") -> dict[str, Any]:
         """Da de alta una conexión tras validar tipo, plataforma, URL y JWT.
 
         Una URL completa de endpoint se reduce a esquema+dominio porque las
@@ -498,6 +545,13 @@ class ClouderaCatalog:
         previous_mode = str(previous.get("onpremise_auth_mode") or auth_mode)
         same_auth_context = (previous.get("platform", platform) == platform and
                              (not new_inference_profile or previous_mode == auth_mode))
+        requested_tls_mode = str(tls_verification or "system").strip().lower()
+        candidate_ca_pem = (tls_ca_pem or
+                            (previous.get("tls_ca_pem", "")
+                             if requested_tls_mode == "custom_ca" and same_auth_context else ""))
+        effective_tls_mode, effective_ca_pem = self._validate_tls_settings(
+            requested_tls_mode, candidate_ca_pem,
+        )
         manual_modern_workbench = (platform == "onpremise" and
                                    onpremise_version == "7.3.2_plus" and kind == "workbench")
         manual_inference = new_inference_profile and auth_mode == "manual"
@@ -526,6 +580,8 @@ class ClouderaCatalog:
                                      if iam_credentials_allowed else ""),
                  "renewal_url": effective_renewal_url,
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE"),
+                 "tls_verification": effective_tls_mode,
+                 "tls_ca_pem": effective_ca_pem,
                  "token_expire_at": (declared_expiry or
                     (previous.get("token_expire_at", "") if not token.strip() else ""))}
         if new_inference_profile and auth_mode == "manual" and not entry["token"]:
@@ -548,6 +604,10 @@ class ClouderaCatalog:
         data["connections"] = [item for item in data.get("connections", []) if item.get("id") != connection_id]
         data["model_tokens"] = {k: v for k, v in data.get("model_tokens", {}).items() if not k.startswith(f"{connection_id}:")}
         self._write(data)
+        try:
+            self._ca_bundle_path(connection_id).unlink()
+        except FileNotFoundError:
+            pass
 
     def update_connection(self, connection_id: str, name: str, kind: str, url: str, token: str = "",
                           platform: str = "cloud", probe_interval_minutes: int = 5, workload_user: str = "",
@@ -555,7 +615,8 @@ class ClouderaCatalog:
                           renewal_url: str = "", workload_name: str = "DE",
                           onpremise_version: str = "legacy", credential_expires_at: str = "",
                           cai_version: str = "1.5.5_sp3", onpremise_auth_mode: str = "",
-                          credential_type: str = "cdp_token") -> dict[str, Any]:
+                          credential_type: str = "cdp_token", tls_verification: str = "system",
+                          tls_ca_pem: str = "") -> dict[str, Any]:
         """Edita una conexión, conservando secretos si los campos no cambian."""
         if kind not in {"inference", "workbench"}: raise RuntimeError("Tipo de conexión Cloudera no válido")
         data = self._read()
@@ -566,7 +627,7 @@ class ClouderaCatalog:
             return self.save_connection(name, kind, url, token, platform, probe_interval_minutes, workload_user,
                                         workload_password, cdp_access_key_id, cdp_private_key, renewal_url,
                                         workload_name, onpremise_version, credential_expires_at, cai_version,
-                                        onpremise_auth_mode, credential_type)
+                                        onpremise_auth_mode, credential_type, tls_verification, tls_ca_pem)
         if platform not in {"cloud", "onpremise"}: raise RuntimeError("La instalación debe ser Cloud u On-premise")
         if onpremise_version not in {*self.RUNTIME_VERSION_LABELS}:
             raise RuntimeError("Selecciona una versión válida de Runtime on-premise")
@@ -594,6 +655,13 @@ class ClouderaCatalog:
         previous_mode = str(previous.get("onpremise_auth_mode") or auth_mode)
         same_auth_context = (previous.get("platform", "cloud") == platform and
                              (not new_inference_profile or previous_mode == auth_mode))
+        requested_tls_mode = str(tls_verification or "system").strip().lower()
+        candidate_ca_pem = (tls_ca_pem or
+                            (previous.get("tls_ca_pem", "")
+                             if requested_tls_mode == "custom_ca" and same_auth_context else ""))
+        effective_tls_mode, effective_ca_pem = self._validate_tls_settings(
+            requested_tls_mode, candidate_ca_pem,
+        )
         manual_modern_workbench = (platform == "onpremise" and
                                    onpremise_version == "7.3.2_plus" and kind == "workbench")
         manual_inference = new_inference_profile and auth_mode == "manual"
@@ -622,6 +690,8 @@ class ClouderaCatalog:
                                      if iam_credentials_allowed else ""),
                  "renewal_url": effective_renewal_url,
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE"),
+                 "tls_verification": effective_tls_mode,
+                 "tls_ca_pem": effective_ca_pem,
                  "token_expire_at": (declared_expiry or
                     (previous.get("token_expire_at", "") if not token.strip() else ""))}
         if new_inference_profile and auth_mode == "manual" and not entry["token"]:
@@ -639,6 +709,11 @@ class ClouderaCatalog:
             migrated[f"{new_id}:{key.split(':', 1)[1]}" if key.startswith(f"{connection_id}:") else key] = value
         data["model_tokens"] = migrated
         self._write(data)
+        if new_id != connection_id:
+            try:
+                self._ca_bundle_path(connection_id).unlink()
+            except FileNotFoundError:
+                pass
         return next(item for item in self.connections() if item["id"] == new_id)
 
     def save_model_token(self, connection_id: str, external_id: str, token: str) -> str:
@@ -742,9 +817,16 @@ class ClouderaCatalog:
                 timeout = 60
             try:
                 form_factor = "private" if connection.get("platform") == "onpremise" else "public"
-                completed = subprocess.run([str(executable), "--endpoint-url", renewal_url,
+                command = [str(executable)]
+                tls_mode = str(connection.get("tls_verification") or "system")
+                if tls_mode == "custom_ca":
+                    command.extend(["--ca-bundle", str(self._write_ca_bundle(connection))])
+                elif tls_mode == "disabled":
+                    command.append("--no-verify-tls")
+                command.extend(["--endpoint-url", renewal_url,
                     "--form-factor", form_factor, "iam",
-                    "generate-workload-auth-token", "--workload-name", connection.get("workload_name") or "DE"],
+                    "generate-workload-auth-token", "--workload-name", connection.get("workload_name") or "DE"])
+                completed = subprocess.run(command,
                     capture_output=True, text=True, timeout=timeout, env=env)
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError(
@@ -752,7 +834,20 @@ class ClouderaCatalog:
                     f"salida HTTPS hacia {urllib.parse.urlparse(renewal_url).hostname}"
                 ) from exc
             if completed.returncode:
-                raise RuntimeError(f"CDP CLI no pudo renovar el token: {completed.stderr.strip()[-500:]}")
+                detail = completed.stderr.strip()[-500:]
+                if "CERTIFICATE_VERIFY_FAILED" in detail or "unable to get local issuer certificate" in detail:
+                    if str(connection.get("tls_verification") or "system") == "custom_ca":
+                        raise RuntimeError(
+                            "No se pudo validar el certificado del Control Plane con la CA configurada. "
+                            "Comprueba que el PEM incluya la CA raíz y las intermedias, y que el certificado "
+                            "sea válido para el hostname."
+                        )
+                    raise RuntimeError(
+                        "El contenedor de IA Gateway no confía en el certificado del Control Plane. "
+                        "Edita la conexión y selecciona «CA privada (PEM)»; aceptar el certificado "
+                        "en el navegador del PC no lo instala dentro de la WebApp."
+                    )
+                raise RuntimeError(f"CDP CLI no pudo renovar el token: {detail}")
             try: payload = json.loads(completed.stdout)
             except ValueError as exc: raise RuntimeError("CDP CLI devolvió una respuesta no válida") from exc
             token = payload.get("token")

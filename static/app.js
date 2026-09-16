@@ -157,8 +157,18 @@ function updateClouderaOnpremCompatibility() {
   [["#cloudera-manual-auth", "manual"], ["#cloudera-ums-auth", "ums_auto"]].forEach(([selector, optionMode]) => {
     const section = $(selector); const active = mode === optionMode;
     section.classList.toggle("inactive", !active);
-    section.querySelectorAll("input:not([name='cloudera-auth-mode']), select").forEach((control) => { control.disabled = !active; });
+    section.querySelectorAll("input:not([name='cloudera-auth-mode']), select, textarea").forEach((control) => { control.disabled = !active; });
   });
+  updateClouderaTlsFields();
+}
+
+function updateClouderaTlsFields() {
+  const automatic = document.querySelector('input[name="cloudera-auth-mode"]:checked')?.value === "ums_auto";
+  const mode = $("#cloudera-onprem-tls-verification").value;
+  const custom = automatic && mode === "custom_ca";
+  $("#cloudera-onprem-ca-field").hidden = !custom;
+  $("#cloudera-onprem-ca-pem").disabled = !custom;
+  $("#cloudera-onprem-tls-warning").hidden = !(automatic && mode === "disabled");
 }
 
 function clouderaFormCredential() {
@@ -166,16 +176,20 @@ function clouderaFormCredential() {
   if (platform === "cloud") {
     return {token: $("#cloudera-token").value, renewalUrl: $("#cloudera-cloud-renewal-url").value,
       accessKeyId: $("#cloudera-access-key-id").value, privateKey: $("#cloudera-private-key").value,
-      workloadName: $("#cloudera-workload-name").value || "DE", credentialExpiresAt: ""};
+      workloadName: $("#cloudera-workload-name").value || "DE", credentialExpiresAt: "",
+      tlsVerification: "system", tlsCaPem: ""};
   }
   const mode = document.querySelector('input[name="cloudera-auth-mode"]:checked')?.value || "manual";
   return mode === "ums_auto"
     ? {token: "", renewalUrl: $("#cloudera-onprem-renewal-url").value,
       accessKeyId: $("#cloudera-onprem-access-key-id").value,
       privateKey: $("#cloudera-onprem-private-key").value,
-      workloadName: $("#cloudera-onprem-workload-name").value || "DE", credentialExpiresAt: ""}
+      workloadName: $("#cloudera-onprem-workload-name").value || "DE", credentialExpiresAt: "",
+      tlsVerification: $("#cloudera-onprem-tls-verification").value,
+      tlsCaPem: $("#cloudera-onprem-ca-pem").value}
     : {token: $("#cloudera-onprem-token").value, renewalUrl: "", accessKeyId: "", privateKey: "",
-      workloadName: "DE", credentialExpiresAt: $("#cloudera-onprem-expiry").value};
+      workloadName: "DE", credentialExpiresAt: $("#cloudera-onprem-expiry").value,
+      tlsVerification: "system", tlsCaPem: ""};
 }
 
 function clouderaLifecycleLabel(item) {
@@ -260,6 +274,11 @@ function editClouderaConnection(id) {
   $("#cloudera-onprem-workload-name").value = item.workload_name || "DE";
   $("#cloudera-onprem-access-key-id").value = item.platform === "onpremise" ? item.cdp_access_key_id || "" : "";
   $("#cloudera-onprem-private-key").value = "";
+  $("#cloudera-onprem-tls-verification").value = item.tls_verification || "system";
+  $("#cloudera-onprem-ca-pem").value = "";
+  $("#cloudera-onprem-ca-pem").placeholder = item.has_tls_ca
+    ? "Bundle guardado · déjalo vacío para conservarlo"
+    : "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
   updateClouderaOnpremCompatibility();
   $("#save-cloudera-connection").textContent = "Guardar cambios"; $("#cancel-cloudera-edit").hidden = false;
   setInlineStatus("#cloudera-status", `Editando conexión «${item.name}». La credencial actual se conservará si dejas el campo vacío.`);
@@ -268,6 +287,7 @@ function editClouderaConnection(id) {
 
 function cancelClouderaEdit() {
   editingClouderaConnectionId = null; $("#cloudera-connection-form").reset();
+  $("#cloudera-onprem-ca-pem").placeholder = "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
   $("#save-cloudera-connection").textContent = "Guardar conexión"; $("#cancel-cloudera-edit").hidden = true;
   updateClouderaFormContext();
 }
@@ -308,6 +328,7 @@ async function saveClouderaConnection(event) {
       cdp_private_key: credential.privateKey,
       renewal_url: credential.renewalUrl, workload_name: credential.workloadName,
       credential_expires_at: credential.credentialExpiresAt,
+      tls_verification: credential.tlsVerification, tls_ca_pem: credential.tlsCaPem,
     })});
     const action = editingClouderaConnectionId ? "actualizada" : "guardada";
     cancelClouderaEdit();
@@ -1599,6 +1620,7 @@ $("#cloudera-kind").onchange = updateClouderaFormContext;
 $("#cloudera-onpremise-version").onchange = updateClouderaOnpremCompatibility;
 $("#cloudera-cai-version").onchange = updateClouderaOnpremCompatibility;
 $("#cloudera-credential-type").onchange = updateClouderaOnpremCompatibility;
+$("#cloudera-onprem-tls-verification").onchange = updateClouderaTlsFields;
 document.querySelectorAll('input[name="cloudera-auth-mode"]').forEach((radio) => {
   radio.onchange = updateClouderaOnpremCompatibility;
 });

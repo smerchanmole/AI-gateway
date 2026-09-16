@@ -187,7 +187,7 @@ def test_onpremise_cai_profile_and_auth_mode_reach_catalog(monkeypatch, client):
     })
 
     assert response.status_code == 200
-    assert captured["args"][-3:] == ("1.5.5_sp3", "ums_auto", "cdp_token")
+    assert captured["args"][-5:] == ("1.5.5_sp3", "ums_auto", "cdp_token", "system", "")
 
 
 def test_dashboard_disables_cache_and_uses_test_tabs(client):
@@ -684,11 +684,16 @@ def test_cloudera_form_is_contextual_and_explains_urls_and_credential_lifecycle(
     assert 'id="cloudera-onprem-access-key-id"' in html
     assert 'id="cloudera-onprem-private-key"' in html
     assert 'id="cloudera-onprem-expiry"' in html
+    assert 'id="cloudera-onprem-tls-verification"' in html
+    assert 'id="cloudera-onprem-ca-pem"' in html
+    assert "CA privada (PEM)" in html and "No verificar (inseguro)" in html
     assert "URL de endpoints" in html and "CDP_TOKEN (UMS)" in html
     assert "/api/v1/iam/generateWorkloadAuthToken" in html
     assert "usuario/contraseña general no sirve" in html
     assert "updateClouderaFormContext" in javascript
     assert "credential.accessKeyId" in javascript
+    assert "credential.tlsVerification" in javascript
+    assert "credential.tlsCaPem" in javascript
     assert "Renovación prevista" in javascript
     assert "Caduca · sustitución manual" in javascript
     assert "Clave larga · verifica vigencia en Knox" in javascript

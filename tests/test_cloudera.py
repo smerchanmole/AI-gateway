@@ -4,11 +4,13 @@ import io
 import subprocess
 import urllib.error
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from gateway.cloudera import ClouderaCatalog
+from gateway.tls import ensure_self_signed_certificate
 
 
 def jwt_with_exp(expiration):
@@ -499,6 +501,83 @@ def test_onpremise_732_inference_renews_ums_token_through_private_iam(tmp_path, 
                                         "--form-factor", "private"]
     assert captured["env"]["CDP_ACCESS_KEY_ID"] == "machine-access"
     assert catalog._connection_record(connection["id"])["token"] == new
+
+
+def test_private_iam_renewal_uses_connection_ca_bundle_without_exposing_it(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    executable = tmp_path / ".venv" / "bin" / "cdp"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    certificate, _key = ensure_self_signed_certificate(tmp_path / "certificate")
+    ca_pem = certificate.read_text(encoding="utf-8")
+    catalog = ClouderaCatalog(runtime)
+    new = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+    connection = catalog.save_connection(
+        "Private TLS", "inference", "https://ml.private", "",
+        platform="onpremise", cdp_access_key_id="machine-access",
+        cdp_private_key="machine-private",
+        renewal_url="https://console-cdp.apps.private.example",
+        onpremise_version="7.3.2", cai_version="1.5.5_sp3",
+        onpremise_auth_mode="ums_auto", tls_verification="custom_ca",
+        tls_ca_pem=ca_pem,
+    )
+    captured = {}
+
+    def run(command, **_kwargs):
+        captured["command"] = command
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"token": new}), stderr="")
+
+    monkeypatch.setattr("gateway.cloudera.subprocess.run", run)
+    catalog.renew_token(connection["id"], force=True)
+
+    assert connection["tls_verification"] == "custom_ca"
+    assert connection["has_tls_ca"] is True
+    assert "tls_ca_pem" not in connection
+    assert captured["command"][1] == "--ca-bundle"
+    bundle = captured["command"][2]
+    assert bundle.endswith(f"{connection['id']}.pem")
+    assert Path(bundle).read_text(encoding="utf-8") == ca_pem
+
+
+def test_private_iam_can_explicitly_disable_tls_only_when_configured(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    executable = tmp_path / ".venv" / "bin" / "cdp"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    catalog = ClouderaCatalog(runtime)
+    new = jwt_with_exp(int(datetime.now(timezone.utc).timestamp()) + 3600)
+    connection = catalog.save_connection(
+        "Private insecure", "inference", "https://ml.private", "",
+        platform="onpremise", cdp_access_key_id="machine-access",
+        cdp_private_key="machine-private",
+        renewal_url="https://console-cdp.apps.private.example",
+        onpremise_version="7.3.2", cai_version="1.5.5_sp3",
+        onpremise_auth_mode="ums_auto", tls_verification="disabled",
+    )
+    captured = {}
+
+    def run(command, **_kwargs):
+        captured["command"] = command
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"token": new}), stderr="")
+
+    monkeypatch.setattr("gateway.cloudera.subprocess.run", run)
+    catalog.renew_token(connection["id"], force=True)
+
+    assert "--no-verify-tls" in captured["command"]
+
+
+def test_custom_ca_rejects_missing_or_invalid_pem(tmp_path):
+    catalog = ClouderaCatalog(tmp_path / "runtime")
+
+    with pytest.raises(RuntimeError, match="certificado raíz/intermedio"):
+        catalog.save_connection(
+            "Private TLS", "inference", "https://ml.private", "",
+            platform="onpremise", cdp_access_key_id="machine-access",
+            cdp_private_key="machine-private",
+            renewal_url="https://console-cdp.apps.private.example",
+            onpremise_version="7.3.2", cai_version="1.5.5_sp3",
+            onpremise_auth_mode="ums_auto", tls_verification="custom_ca",
+        )
 
 
 def test_expiring_manual_token_is_reported_without_claiming_renewal(tmp_path):

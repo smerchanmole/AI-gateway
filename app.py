@@ -632,6 +632,8 @@ class ClouderaConnection(BaseModel):
     cai_version: str = "1.5.5_sp3"
     onpremise_auth_mode: str = ""
     credential_type: str = "cdp_token"
+    tls_verification: str = "system"
+    tls_ca_pem: str = ""
 
 
 class ClouderaTokenRenewal(BaseModel):
@@ -1020,7 +1022,8 @@ def save_cloudera_connection(connection: ClouderaConnection):
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
             connection.renewal_url, connection.workload_name, connection.onpremise_version,
             connection.credential_expires_at, connection.cai_version,
-            connection.onpremise_auth_mode, connection.credential_type)
+            connection.onpremise_auth_mode, connection.credential_type,
+            connection.tls_verification, connection.tls_ca_pem)
         result = generate_initial_cloudera_token(result)
         if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
@@ -1039,7 +1042,8 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
             connection.workload_password, connection.cdp_access_key_id, connection.cdp_private_key,
             connection.renewal_url, connection.workload_name, connection.onpremise_version,
             connection.credential_expires_at, connection.cai_version,
-            connection.onpremise_auth_mode, connection.credential_type)
+            connection.onpremise_auth_mode, connection.credential_type,
+            connection.tls_verification, connection.tls_ca_pem)
         result = generate_initial_cloudera_token(result)
         if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
