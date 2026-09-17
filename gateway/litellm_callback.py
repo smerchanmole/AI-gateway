@@ -1,4 +1,4 @@
-"""Callback de observabilidad ejecutado dentro del proceso LiteLLM.
+"""Observability callback executed inside the LiteLLM process.
 
 Un callback debe ser tolerante a fallos: observar nunca puede impedir que el
 modelo responda. Las funciones auxiliares aceptan datos incompletos porque cada
@@ -26,13 +26,13 @@ from gateway.log_store import daily_log_path, insert_log
 
 
 def _root() -> Path:
-    """Recupera la raíz que el proceso padre inyectó al arrancar LiteLLM."""
+    """Recover the project root injected by the parent process at startup."""
 
     return Path(os.environ.get("IA_GATEWAY_ROOT", Path.cwd()))
 
 
 def _configure_private_ca() -> None:
-    """Hace que el cliente OpenAI/aiohttp de LiteLLM confíe en las CA privadas.
+    """Make LiteLLM's OpenAI/aiohttp client trust private certificate authorities.
 
     LiteLLM 1.83 crea el cliente OpenAI compartido sin trasladar el
     ``ssl_verify`` del deployment. Instalar aquí un contexto global conserva
@@ -64,14 +64,14 @@ _configure_private_ca()
 
 
 def _log_path(start: Any) -> Path:
-    """Asigna la llamada al fichero diario correspondiente a su inicio."""
+    """Assign the call to the daily file corresponding to its start time."""
 
     day = start.astimezone(ZoneInfo("Europe/Madrid")).date() if isinstance(start, datetime) else None
     return daily_log_path(_root() / "runtime", day)
 
 
 def _model(kwargs: dict[str, Any]) -> str:
-    """Prefiere el alias público (`model_group`) al identificador del proveedor."""
+    """Prefer the public alias (``model_group``) to the provider identifier."""
     metadata = (kwargs.get("litellm_params") or {}).get("metadata") or {}
     return str(
         metadata.get("dashboard_model_alias")
@@ -83,7 +83,7 @@ def _model(kwargs: dict[str, Any]) -> str:
 
 
 def _duration_ms(start: Any, end: Any) -> int | None:
-    """Devuelve milisegundos enteros o ``None`` si faltan relojes válidos."""
+    """Return whole milliseconds or ``None`` when valid clocks are unavailable."""
 
     if isinstance(start, datetime) and isinstance(end, datetime):
         return round((end - start).total_seconds() * 1000)
@@ -91,7 +91,7 @@ def _duration_ms(start: Any, end: Any) -> int | None:
 
 
 def _metadata(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Fusiona metadatos de llamada y payload estándar con prioridad al estándar."""
+    """Merge call metadata and the standard payload, giving the latter priority."""
     params_metadata = (kwargs.get("litellm_params") or {}).get("metadata") or {}
     standard = kwargs.get("standard_logging_object") or {}
     if hasattr(standard, "model_dump"):
@@ -101,7 +101,7 @@ def _metadata(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _origin_ip(kwargs: dict[str, Any]) -> str | None:
-    """Prefiere la IP preservada por nuestro proxy al salto local de LiteLLM."""
+    """Prefer the IP preserved by our proxy over LiteLLM's local hop."""
     metadata = _metadata(kwargs)
     raw_headers = metadata.get("headers") or {}
     headers = {str(key).lower(): value for key, value in raw_headers.items()}
@@ -114,7 +114,7 @@ def _origin_ip(kwargs: dict[str, Any]) -> str | None:
 
 
 def _provider_ip(kwargs: dict[str, Any]) -> str | None:
-    """Resuelve la IPv4 efectiva del endpoint; puede variar por balanceo DNS."""
+    """Resolve the endpoint's effective IPv4 address; DNS balancing may change it."""
     params = kwargs.get("litellm_params") or {}
     api_base = params.get("api_base") or kwargs.get("api_base")
     model = str(kwargs.get("model") or "")
@@ -133,19 +133,19 @@ def _provider_ip(kwargs: dict[str, Any]) -> str | None:
 
 
 def _started_at(start: Any) -> str | None:
-    """Serializa la fecha conservando zona horaria para análisis posteriores."""
+    """Serialize the date while retaining its timezone for later analysis."""
 
     return start.isoformat() if isinstance(start, datetime) else None
 
 
 def _ttft_ms(kwargs: dict[str, Any], start: Any, end: Any) -> int | None:
-    """Calcula time-to-first-token; en no streaming puede coincidir con el total."""
+    """Calculate time to first token; for non-streaming it may equal total time."""
     first = kwargs.get("completion_start_time") or end
     return _duration_ms(start, first)
 
 
 def _details(kwargs: dict[str, Any], start: Any, end: Any) -> dict[str, Any]:
-    """Agrupa metadatos comunes para que éxito y error compartan esquema."""
+    """Group common metadata so successful and failed calls share one schema."""
 
     guardrail = _metadata(kwargs).get("dashboard_guardrail") or {}
     return {
@@ -160,7 +160,7 @@ def _details(kwargs: dict[str, Any], start: Any, end: Any) -> dict[str, Any]:
 
 
 def _guardrail_settings() -> dict[str, Any]:
-    """Lee la copia runtime; un fichero inválido desactiva el filtro con seguridad."""
+    """Read the runtime copy; an invalid file safely disables the filter."""
 
     try:
         return json.loads((_root() / "runtime" / "dashboard_settings.json").read_text(encoding="utf-8")).get("guardrail", {})
@@ -169,7 +169,7 @@ def _guardrail_settings() -> dict[str, Any]:
 
 
 def _runtime_settings() -> dict[str, Any]:
-    """Lee las reglas dinámicas; un fallo nunca debe impedir la inferencia."""
+    """Read dynamic rules; a failure must never prevent inference."""
 
     try:
         value = json.loads((_root() / "runtime" / "dashboard_settings.json").read_text(encoding="utf-8"))
@@ -185,7 +185,7 @@ _NON_LOGGED_PARAMETERS = {
 
 
 def _merge_parameters(target: dict[str, Any], configured: dict[str, Any], overwrite: bool) -> None:
-    """Fusiona parámetros incluyendo diccionarios como ``extra_body``."""
+    """Merge parameters, including nested dictionaries such as ``extra_body``."""
 
     for key, value in configured.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
@@ -195,7 +195,7 @@ def _merge_parameters(target: dict[str, Any], configured: dict[str, Any], overwr
 
 
 def _effective_parameters(data: dict[str, Any]) -> dict[str, Any]:
-    """Devuelve sólo opciones de inferencia, nunca contenido ni credenciales."""
+    """Return inference options only, never content or credentials."""
 
     return {
         str(key): value for key, value in data.items()
@@ -204,7 +204,7 @@ def _effective_parameters(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _provider_model(alias: str) -> str | None:
-    """Resuelve el alias público al identificador estricto de Cloudera."""
+    """Resolve a public alias to Cloudera's strict model identifier."""
     try:
         settings = json.loads((_root() / "runtime" / "dashboard_settings.json").read_text(encoding="utf-8"))
         value = (settings.get("provider_models") or {}).get(alias)
@@ -214,7 +214,7 @@ def _provider_model(alias: str) -> str | None:
 
 
 def _provider_api_key(alias: str) -> str | None:
-    """Obtiene desde SQLite el token más reciente asociado al alias Cloudera."""
+    """Read the latest token associated with a Cloudera alias from SQLite."""
 
     try:
         settings = json.loads(
@@ -231,7 +231,7 @@ def _provider_api_key(alias: str) -> str | None:
 
 
 def _classify_with_guardrail(settings: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, str]:
-    """Clasifica mediante un guardrail Ollama u OpenAI-compatible.
+    """Classify content through an Ollama or OpenAI-compatible guardrail.
 
     El adaptador llama directamente al endpoint para evitar recursión a través
     del propio proxy. Las credenciales Cloudera se leen de SQLite en cada
@@ -271,10 +271,10 @@ def _classify_with_guardrail(settings: dict[str, Any], messages: list[dict[str, 
 
 
 class DashboardLogger(CustomLogger):
-    """Adaptador LiteLLM → SQLite para éxitos y errores con el mismo esquema."""
+    """LiteLLM-to-SQLite adapter with one schema for successes and failures."""
 
     async def async_pre_call_hook(self, user_api_key_dict, cache, data: dict, call_type):
-        """Clasifica la entrada y adapta aliases Cloudera antes del proveedor.
+        """Classify input and adapt Cloudera aliases before calling the provider.
 
         En modo permisivo el veredicto se adjunta a metadatos y la llamada
         continúa. En modo restringido un resultado inseguro o no disponible
@@ -330,14 +330,14 @@ class DashboardLogger(CustomLogger):
         return data
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
-        """Normaliza y persiste una respuesta correcta sin bloquear al cliente."""
+        """Normalize and persist a successful response without blocking the client."""
 
         insert_log(_log_path(start_time), _model(kwargs), "success",
                    _duration_ms(start_time, end_time), {"messages": kwargs.get("messages"), "input": kwargs.get("input")},
                    response_obj, **_details(kwargs, start_time, end_time))
 
     async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
-        """Conserva el mismo esquema en fallos para facilitar KPIs comparables."""
+        """Keep the same failure schema so KPIs remain directly comparable."""
 
         error = str(kwargs.get("exception") or response_obj or "Error desconocido")
         insert_log(_log_path(start_time), _model(kwargs), "error",
@@ -345,5 +345,5 @@ class DashboardLogger(CustomLogger):
                    response_obj, error, **_details(kwargs, start_time, end_time))
 
 
-# LiteLLM importa esta instancia por el nombre configurado en active_config.yaml.
+# LiteLLM imports this instance by the name configured in active_config.yaml.
 dashboard_logger = DashboardLogger()

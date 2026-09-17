@@ -1,4 +1,4 @@
-"""Capa HTTP del panel de control.
+"""HTTP layer for the control plane.
 
 Piensa en este módulo como el *adaptador de entrada* de la arquitectura: traduce
 acciones humanas y peticiones HTTP a operaciones del dominio (`GatewayManager`).
@@ -8,19 +8,19 @@ mantiene los endpoints pequeños, comprobables y fáciles de leer.
 
 from __future__ import annotations
 
-# Este bloque de arranque usa exclusivamente la biblioteca estándar. Cloudera
-# puede ejecutar directamente ``python app.py`` sobre una sesión nueva, sin una
-# fase previa de construcción; por eso materializamos primero las dependencias
-# declaradas y sólo después importamos FastAPI, LiteLLM y el código del gateway.
+# This bootstrap block uses only the standard library. Cloudera can execute
+# ``python app.py`` directly in a fresh session without a build phase, so it
+# materializes declared dependencies before importing FastAPI, LiteLLM, and the
+# gateway code.
 import os
 from pathlib import Path
 import subprocess
 import sys
 
 
-# Un script normal dispone de ``__file__``; una Cloudera Session que evalúa el
-# código como celda no. En ese segundo caso, Cloudera sitúa el proceso en el
-# directorio del proyecto, de modo que ``cwd`` es la referencia correcta.
+# A normal script has ``__file__``; a Cloudera Session evaluating code as a cell
+# does not. In that case Cloudera starts the process in the project directory,
+# making ``cwd`` the correct reference.
 SOURCE_FILE = globals().get("__file__")
 BOOTSTRAP_ROOT = (
     Path(SOURCE_FILE).resolve().parent
@@ -33,14 +33,14 @@ VENV_PYTHON = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/pyth
 
 
 def bootstrap_log(message: str) -> None:
-    """Escribe hitos visibles incluso en el visor de engines de Cloudera."""
+    """Write milestones that remain visible in Cloudera's engine viewer."""
     print(f"[IA Gateway · bootstrap] {message}", flush=True)
 
 
 def run_visible_command(
     command: list[str], *, cwd: Path, environment: dict[str, str], label: str
 ) -> None:
-    """Ejecuta un comando mostrando su salida y conservando contexto al fallar."""
+    """Run a command while streaming output and retaining context on failure."""
     bootstrap_log(f"Ejecutando {label}: {' '.join(command)}")
     try:
         process = subprocess.Popen(
@@ -71,7 +71,7 @@ def run_visible_command(
 
 
 def install_runtime_requirements(python: Path) -> None:
-    """Instala el contrato de dependencias con el intérprete privado indicado.
+    """Install the dependency contract with the specified private interpreter.
 
     La lista de argumentos evita tanto el shell como preguntas interactivas.
     Ante cualquier fallo se aborta: arrancar un panel parcialmente instalado
@@ -80,10 +80,10 @@ def install_runtime_requirements(python: Path) -> None:
     if not REQUIREMENTS_FILE.is_file():
         raise RuntimeError(f"No se encuentra el fichero de dependencias: {REQUIREMENTS_FILE}")
     pip_environment = os.environ.copy()
-    # Algunas imágenes CML exportan rutas, constraints y PIP_USER=1 para
-    # proteger/cohesionar su Python base. Dentro de nuestro venv provocarían
-    # que pip viera MLflow como instalado o intentara respetar sus versiones.
-    # Conservamos las variables de índice/proxy que dan acceso al repositorio.
+    # Some CML images export paths, constraints, and PIP_USER=1 to protect their
+    # base Python. Inside our venv those values would make pip see MLflow as
+    # installed or obey its pinned versions. Keep index/proxy variables that
+    # provide repository access.
     for inherited_name in (
         "PYTHONHOME",
         "PYTHONPATH",
@@ -95,9 +95,9 @@ def install_runtime_requirements(python: Path) -> None:
         "PIP_USER",
     ):
         pip_environment.pop(inherited_name, None)
-    # Un pip.conf del runtime está imponiendo `user = true` aunque el proyecto
-    # no lo solicite. /dev/null (o NUL en Windows) desactiva esos ficheros sólo
-    # para este hijo y deja intacta la configuración del sistema Cloudera.
+    # A runtime pip.conf may force `user = true` even when this project does not
+    # request it. /dev/null (or NUL on Windows) disables those files for this
+    # child only and leaves Cloudera's system configuration untouched.
     pip_environment["PIP_CONFIG_FILE"] = os.devnull
     pip_environment["PYTHONNOUSERSITE"] = "1"
     pip_environment["VIRTUAL_ENV"] = str(VENV_DIR)
@@ -138,7 +138,7 @@ def install_runtime_requirements(python: Path) -> None:
 
 
 def bootstrap_private_environment() -> None:
-    """Aísla la aplicación del Python administrado por Cloudera.
+    """Isolate the application from Cloudera-managed Python.
 
     Las imágenes de Cloudera incluyen MLflow y versiones fijadas de bibliotecas
     comunes. Instalar LiteLLM sobre ese entorno puede dejar, por ejemplo,
@@ -187,8 +187,8 @@ def bootstrap_private_environment() -> None:
             "Cloudera ejecutó el código como celda, pero no se encuentra app.py "
             f"en el directorio del proyecto: {BOOTSTRAP_ROOT}"
         )
-    # Cloudera puede inyectar rutas del runtime base. No deben adelantarse a las
-    # del venv recién creado, pues reproducirían la mezcla que queremos evitar.
+    # Cloudera may inject base-runtime paths. They must not precede paths from
+    # the new venv, or they would recreate the environment mixing being avoided.
     runtime_environment = os.environ.copy()
     runtime_environment.pop("PYTHONHOME", None)
     runtime_environment.pop("PYTHONPATH", None)
@@ -201,13 +201,13 @@ def bootstrap_private_environment() -> None:
     )
     command = [str(VENV_PYTHON), str(application_file)]
     if SOURCE_FILE:
-        # En un script normal, sustituir el proceso conserva señales y código.
+        # For a normal script, replacing the process preserves signals and exit codes.
         bootstrap_log(f"Relanzando el script con: {VENV_PYTHON}")
         os.execve(str(VENV_PYTHON), command, runtime_environment)
 
-    # Una Cloudera Application evalúa el fichero dentro de su engine. Sustituir
-    # ese proceso mata el kernel y la plataforma sólo muestra "Engine exited".
-    # Mantenerlo como padre permite ver todos los logs del servidor hijo.
+    # A Cloudera Application evaluates the file inside its engine. Replacing
+    # that process kills the kernel and the platform only reports "Engine
+    # exited". Keeping it as the parent exposes all child server logs.
     bootstrap_log(f"Iniciando IA Gateway como proceso hijo: {VENV_PYTHON}")
     try:
         completed = subprocess.run(
@@ -257,7 +257,7 @@ from gateway.tls import ensure_self_signed_certificate
 
 
 ROOT = BOOTSTRAP_ROOT
-# Las claves permanecen fuera del YAML y de Git, pero se heredan al proxy hijo.
+# Keys stay outside YAML and Git but are inherited by the child proxy.
 load_dotenv(ROOT / ".env")
 PUBLIC_GATEWAY_PORT = public_gateway_port()
 INTERNAL_DASHBOARD_PORT = environment_port("IA_GATEWAY_DASHBOARD_PORT", 18080)
@@ -267,8 +267,8 @@ auth = AuthStore(ROOT / "runtime")
 benchmarks = BenchmarkRunner()
 _MODEL_VALIDATIONS: dict[str, tuple[str, float]] = {}
 
-# En local el proxy de borde también termina TLS; dentro de Cloudera esa función pertenece
-# al proxy de la plataforma y nuestro listener recibe HTTP sobre loopback.
+# Locally, the edge proxy also terminates TLS. Inside Cloudera that responsibility
+# belongs to the platform proxy, and our listener receives HTTP over loopback.
 _behind_cloudera = bool(os.environ.get("CDSW_DOMAIN", "").strip())
 _edge_certificate: Path | None = None
 _edge_private_key: Path | None = None
@@ -286,14 +286,14 @@ edge = EdgeProxy(
 
 
 def refresh_cloudera_tokens() -> None:
-    """Renueva secretos y los inyecta dinámicamente en LiteLLM."""
+    """Renew secrets and inject them dynamically into LiteLLM."""
     results = cloudera.renew_due_tokens()
     if any(item.get("renewed") for item in results) and manager.process_alive():
         apply_cloudera_credential_changes()
 
 
 def apply_cloudera_credential_changes() -> dict[str, bool]:
-    """Confirma cambios en SQLite; el callback los leerá sin reiniciar LiteLLM."""
+    """Commit changes to SQLite; the callback reads them without restarting LiteLLM."""
 
     if not manager.process_alive():
         return {"litellm_credentials_updated": False, "litellm_restarted": False}
@@ -302,7 +302,7 @@ def apply_cloudera_credential_changes() -> dict[str, bool]:
 
 
 def generate_initial_cloudera_token(connection: dict[str, Any]) -> dict[str, Any]:
-    """Obtiene la credencial inicial al guardar una renovación ya configurada."""
+    """Obtain the initial credential when saving a configured renewal profile."""
 
     if connection.get("has_token") or not connection.get("renewal_ready"):
         return connection
@@ -322,23 +322,23 @@ def generate_initial_cloudera_token(connection: dict[str, Any]) -> dict[str, Any
 
 
 async def cloudera_token_supervisor() -> None:
-    """Reintenta cada minuto; una incidencia aislada no detiene el supervisor."""
+    """Retry every minute; an isolated incident must not stop the supervisor."""
     while True:
         try:
             await asyncio.to_thread(refresh_cloudera_tokens)
         except Exception:
-            # El detalle queda persistido por ClouderaCatalog y visible en UI.
+            # ClouderaCatalog persists the details and exposes them to the UI.
             pass
         await asyncio.sleep(60)
 
 
 def gateway_auth_headers() -> dict[str, str]:
-    """LiteLLM se ejecuta sin autenticación interna en esta aplicación."""
+    """LiteLLM runs without its own inbound authentication in this application."""
     return {}
 
 
 def client_origin_ip(request: Request) -> str:
-    """Recupera la IP fijada por el proxy de borde para llamadas internas."""
+    """Recover the client IP fixed by the edge proxy for internal calls."""
 
     for name in ("x-ia-gateway-client-ip", "x-envoy-external-address", "x-forwarded-for", "x-real-ip"):
         value = request.headers.get(name, "").split(",", 1)[0].strip()
@@ -349,7 +349,7 @@ def client_origin_ip(request: Request) -> str:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Supervisa el proxy, la renovación de tokens, el panel y LiteLLM."""
+    """Supervise the proxy, token renewal, dashboard, and LiteLLM."""
     edge.start()
     public_scheme = "http" if _behind_cloudera else "https"
     print(
@@ -370,7 +370,7 @@ async def lifespan(_app: FastAPI):
         with suppress(asyncio.CancelledError):
             await supervisor
         await benchmarks.shutdown()
-        # El proxy es hijo del panel y no debe quedar huérfano al cerrar la app.
+        # The proxy is a dashboard child and must not be orphaned at shutdown.
         manager.stop()
         edge.stop()
 
@@ -380,7 +380,7 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
 def _security_headers(response: Response) -> Response:
-    """Aplica las mismas defensas incluso a respuestas 401/403 tempranas."""
+    """Apply the same defensive headers even to early 401/403 responses."""
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; img-src 'self' data:; style-src 'self'; "
         "script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
@@ -395,7 +395,7 @@ def _security_headers(response: Response) -> Response:
 
 @app.middleware("http")
 async def secure_dashboard(request: Request, call_next):
-    """Protege la API, valida CSRF y añade cabeceras defensivas al navegador."""
+    """Protect the API, validate CSRF, and add defensive browser headers."""
     path = request.url.path
     public_api = path in {"/api/auth/status", "/api/auth/login"}
     if path.startswith("/api/") and not public_api:
@@ -407,9 +407,9 @@ async def secure_dashboard(request: Request, call_next):
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             supplied = request.headers.get("X-CSRF-Token", "")
             if not supplied and request.headers.get("content-type", "").split(";", 1)[0] == "application/json":
-                # Algunos proxies administrados eliminan cabeceras X-* no
-                # registradas. El mismo token sincronizado puede viajar en el
-                # cuerpo JSON sin aparecer en URLs ni logs de acceso.
+                # Some managed proxies remove unregistered X-* headers. The same
+                # synchronized token can travel in JSON without appearing in
+                # URLs or access logs.
                 try:
                     payload = await request.json()
                 except ValueError:
@@ -427,21 +427,21 @@ async def secure_dashboard(request: Request, call_next):
 
 
 class LoginRequest(BaseModel):
-    """Credenciales efímeras recibidas exclusivamente a través de HTTPS."""
+    """Ephemeral credentials received exclusively through HTTPS."""
 
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
 
 
 class PasswordChange(BaseModel):
-    """Cambio autenticado: exige conocer la contraseña vigente."""
+    """Authenticated change that requires knowledge of the current password."""
 
     current_password: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=12, max_length=256)
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
-    """La cookie no es visible a JavaScript ni viaja nunca por HTTP."""
+    """The cookie is invisible to JavaScript and never travels over plain HTTP."""
     response.set_cookie(
         auth.cookie_name, token, max_age=auth.session_seconds, secure=True,
         httponly=True, samesite="strict", path="/",
@@ -450,13 +450,13 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 @app.get("/api/auth/status")
 def authentication_status(request: Request):
-    """Permite a la SPA decidir entre login y panel sin exponer la cookie."""
+    """Let the SPA choose login or dashboard without exposing the cookie."""
     return auth.public_status(auth.session(request.cookies.get(auth.cookie_name)))
 
 
 @app.post("/api/auth/login")
 def login(credentials: LoginRequest, request: Request):
-    """Abre una sesión opaca y limita intentos repetidos por dirección origen."""
+    """Open an opaque session and rate-limit repeated attempts by source address."""
     address = request.client.host if request.client else "unknown"
     try:
         token, status = auth.login(credentials.username, credentials.password, address)
@@ -471,7 +471,7 @@ def login(credentials: LoginRequest, request: Request):
 
 @app.post("/api/auth/change-password")
 def change_password(update: PasswordChange, request: Request):
-    """Rota contraseña, versión de credenciales, sesión y token CSRF."""
+    """Rotate the password, credential version, session, and CSRF token."""
     session = request.state.auth_session
     try:
         auth.change_password(session, update.current_password, update.new_password)
@@ -486,7 +486,7 @@ def change_password(update: PasswordChange, request: Request):
 
 @app.post("/api/auth/logout", status_code=204)
 def logout(request: Request):
-    """Revoca la sesión en servidor y elimina la cookie del navegador."""
+    """Revoke the server-side session and remove the browser cookie."""
     auth.logout(request.cookies.get(auth.cookie_name))
     response = Response(status_code=204)
     response.delete_cookie(auth.cookie_name, path="/", secure=True, httponly=True, samesite="strict")
@@ -494,45 +494,45 @@ def logout(request: Request):
 
 
 class ModelState(BaseModel):
-    """Contrato mínimo para activar o desactivar un alias desde la interfaz."""
+    """Minimum contract for enabling or disabling an alias from the UI."""
 
     enabled: bool
 
 
 class TestCall(BaseModel):
-    """Texto introducido en «Prueba rápida»; el backend decide chat o embedding."""
+    """Text entered in Quick test; the backend chooses chat or embeddings."""
 
     prompt: str
 
 
 class BenchmarkTarget(BaseModel):
-    """Modelo y techo de concurrencia que recorrerá de 1 hasta N."""
+    """Model and concurrency ceiling to traverse from 1 through N."""
 
     model: str = Field(min_length=1, max_length=128)
     max_concurrency: int = Field(ge=1, le=32)
 
 
 class BenchmarkRequest(BaseModel):
-    """Configuración acotada de una campaña comparable y cancelable."""
+    """Bounded configuration for a comparable, cancellable campaign."""
 
     targets: list[BenchmarkTarget] = Field(min_length=1, max_length=8)
     limit_mode: str = "requests"
     requests_per_model: int = Field(default=50, ge=1, le=10_000)
-    duration_seconds: int = Field(default=60, ge=5, le=3_600)
+    duration_seconds: int = Field(default=60, ge=5, le=100_000)
     strategy: str = "parallel"
     request_timeout_seconds: int = Field(default=120, ge=5, le=300)
     warmup: bool = True
 
 
 class ConfigUpdate(BaseModel):
-    """Edición completa del YAML y decisión de aplicarla inmediatamente."""
+    """Complete YAML edit and a decision whether to apply it immediately."""
 
     content: str
     restart: bool = True
 
 
 class ModelCreate(BaseModel):
-    """Representación segura del formulario CRUD de modelos.
+    """Safe representation of the model CRUD form.
 
     ``api_key_env`` contiene el *nombre* de una variable, nunca el secreto. Los
     campos vacíos se omiten al serializar para no imponer opciones innecesarias
@@ -581,7 +581,7 @@ class ModelCreate(BaseModel):
 
 
 class GuardrailUpdate(BaseModel):
-    """Política transversal: avisar y continuar (`warn`) o bloquear (`block`)."""
+    """Cross-cutting policy: warn and continue (``warn``) or block (``block``)."""
 
     enabled: bool
     model: str = ""
@@ -591,7 +591,7 @@ class GuardrailUpdate(BaseModel):
 
 
 class AdvisorUpdate(BaseModel):
-    """Modelo que propone parámetros; nunca los aplica sin confirmación."""
+    """Model that suggests parameters but never applies them without confirmation."""
 
     enabled: bool
     model: str = ""
@@ -599,14 +599,14 @@ class AdvisorUpdate(BaseModel):
 
 
 class ModelAdviceRequest(BaseModel):
-    """Caso de uso que el asesor convierte en una propuesta estructurada."""
+    """Use case that the advisor turns into a structured proposal."""
 
     model_name: str
     use_case: str
 
 
 def _advisor_json(content: str) -> dict[str, Any]:
-    """Acepta JSON puro o un objeto rodeado por Markdown/thinking del modelo."""
+    """Accept raw JSON or an object surrounded by model Markdown/thinking text."""
 
     cleaned = content.strip()
     if cleaned.startswith("```"):
@@ -631,7 +631,7 @@ def _advisor_json(content: str) -> dict[str, Any]:
 
 
 class ClouderaConnection(BaseModel):
-    """Datos de conexión y renovación para una instalación Cloudera.
+    """Connection and renewal data for a Cloudera installation.
 
     El modelo admite Public Cloud y Private Cloud/on-premise. Los campos de
     contraseña, clave privada y token sólo viajan navegador→servidor y jamás se
@@ -660,19 +660,19 @@ class ClouderaConnection(BaseModel):
 
 
 class ClouderaTokenRenewal(BaseModel):
-    """Permite forzar una renovación aunque todavía queden más de diez minutos."""
+    """Allow forced renewal even when more than ten minutes remain."""
 
     force: bool = False
 
 
 class ClouderaModelToken(BaseModel):
-    """Credencial opcional y específica de un endpoint descubierto."""
+    """Optional credential dedicated to one discovered endpoint."""
 
     token: str
 
 
 class ClouderaModelProbe(BaseModel):
-    """Metadatos necesarios para reproducir el contrato publicado por Cloudera."""
+    """Metadata required to reproduce the contract published by Cloudera."""
 
     external_id: str
     url: str
@@ -685,13 +685,13 @@ class ClouderaModelProbe(BaseModel):
 
 
 def _model_entry(model: ModelCreate) -> dict[str, object]:
-    """Traduce el formulario a YAML sin aceptar claves secretas en claro."""
+    """Translate the form to YAML without accepting plaintext secret keys."""
     name = model.model_name.strip()
     provider_model = model.model.strip()
     if model.source == "cloudera" and model.cloudera_kind != "workbench":
-        # El primer prefijo selecciona el proveedor LiteLLM y el identificador
-        # remoto de CAI puede empezar también por `openai/`. Sólo reducimos
-        # prefijos triples accidentales; dos son correctos para esos modelos.
+        # The first prefix selects the LiteLLM provider, while the remote CAI
+        # identifier may also begin with `openai/`. Collapse only accidental
+        # triple prefixes; two prefixes are correct for these models.
         while provider_model.lower().startswith("openai/openai/openai/"):
             provider_model = provider_model[len("openai/"):]
         remote_model = model.remote_model.strip()
@@ -782,8 +782,8 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
     params: dict[str, object] = {"model": provider_model, "drop_params": model.drop_params}
     if (model.source == "cloudera" and model.serving_engine == "nim"
             and "embed" in model.task.lower()):
-        # LiteLLM 1.83.9 convierte la ausencia de este campo en JSON null. Los
-        # NIM de embeddings validan estrictamente el enum float|base64.
+        # LiteLLM 1.83.9 turns omission of this field into JSON null. Embedding
+        # NIMs strictly validate the float|base64 enumeration.
         params["encoding_format"] = "float"
     if model.api_base.strip(): params["api_base"] = model.api_base.strip()
     if model.api_key_env.strip(): params["api_key"] = f"os.environ/{model.api_key_env.strip()}"
@@ -857,14 +857,14 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
             model_info["dashboard_remote_model"] = model.remote_model.strip()
     if model_info:
         entry["model_info"] = model_info
-    # El gestor retira esta marca antes de escribir YAML. Sirve para distinguir
-    # el formulario completo de consumidores antiguos que envían parches mínimos.
+    # The manager removes this marker before writing YAML. It distinguishes the
+    # complete form from legacy clients that send minimal patches.
     entry["_dashboard_managed_parameters"] = True
     return entry
 
 
 def _model_fingerprint(entry: dict[str, object]) -> str:
-    """Identifica exactamente la configuración que superó la prueba real."""
+    """Identify exactly which configuration passed the live probe."""
 
     clean = json.loads(json.dumps(
         {key: value for key, value in entry.items() if not key.startswith("_dashboard_")},
@@ -898,7 +898,7 @@ def _resolved_model_api_key(params: dict[str, Any]) -> str:
 
 
 def _candidate_parameters(entry: dict[str, Any]) -> dict[str, Any]:
-    """Reproduce la mezcla del callback para que la prueba use los mismos valores."""
+    """Reproduce callback merging so the probe uses identical values."""
 
     params = dict(entry.get("litellm_params") or {})
     configured = {
@@ -916,7 +916,7 @@ def _candidate_parameters(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _probe_model_candidate(model: ModelCreate, entry: dict[str, Any]) -> dict[str, Any]:
-    """Ejecuta una inferencia mínima directamente contra el deployment candidato."""
+    """Run minimal inference directly against the candidate deployment."""
 
     params = dict(entry.get("litellm_params") or {})
     info = dict(entry.get("model_info") or {})
@@ -998,20 +998,20 @@ async def _probe_model_candidate(model: ModelCreate, entry: dict[str, Any]) -> d
 
 @app.get("/", include_in_schema=False)
 def home():
-    """Entrega la SPA estática; el resto de recursos cuelgan de ``/static``."""
+    """Serve the static SPA; all remaining assets live under ``/static``."""
 
     return FileResponse(ROOT / "static" / "index.html")
 
 
 @app.get("/api/status")
 def status():
-    """Devuelve salud real y telemetría; un PID por sí solo no implica servicio."""
+    """Return real health and telemetry; a PID alone does not imply service."""
     return {**manager.status(), "public_port": PUBLIC_GATEWAY_PORT}
 
 
 @app.get("/api/models")
 def models():
-    """Expone la vista segura de modelos, nunca las API keys del YAML."""
+    """Expose the safe model view, never API keys from YAML."""
     try:
         return manager.models()
     except RuntimeError as exc:
@@ -1020,13 +1020,13 @@ def models():
 
 @app.get("/api/model-resources")
 def model_resources():
-    """Separa métricas locales de proveedores remotos no observables."""
+    """Separate local metrics from unobservable remote providers."""
     return manager.model_resources()
 
 
 @app.post("/api/benchmarks")
 async def start_benchmark(request: BenchmarkRequest):
-    """Inicia carga escalonada contra los alias activos del propio gateway."""
+    """Start stepped load against the gateway's own active aliases."""
 
     if request.limit_mode not in {"requests", "duration"}:
         raise HTTPException(422, "El límite debe ser por peticiones o por tiempo")
@@ -1074,14 +1074,14 @@ async def start_benchmark(request: BenchmarkRequest):
 
 @app.get("/api/benchmarks/current")
 async def current_benchmark():
-    """Entrega agregados y series acotadas para refresco en tiempo real."""
+    """Return aggregates and bounded series for live refresh."""
 
     return benchmarks.snapshot()
 
 
 @app.post("/api/benchmarks/current/cancel")
 async def cancel_benchmark():
-    """Solicita parada cooperativa; las peticiones en vuelo pueden terminar."""
+    """Request cooperative shutdown; in-flight requests may complete."""
 
     try:
         return benchmarks.cancel()
@@ -1091,7 +1091,7 @@ async def cancel_benchmark():
 
 @app.get("/api/benchmarks/current/report")
 async def download_benchmark_report():
-    """Descarga el estado completo visible como evidencia reproducible."""
+    """Download the complete visible state as reproducible evidence."""
 
     report = benchmarks.snapshot()
     if report.get("status") == "idle":
@@ -1106,13 +1106,13 @@ async def download_benchmark_report():
 
 @app.get("/api/config")
 def get_config():
-    """Entrega el YAML fuente; nunca expande variables de entorno ni secretos."""
+    """Return source YAML without expanding environment variables or secrets."""
     return {"content": manager.config_text(), "dashboard_settings": manager.dashboard_settings()}
 
 
 @app.get("/api/config/backup")
 def download_config_backup():
-    """Descarga una copia exacta del YAML sin expandir variables ni secretos."""
+    """Download an exact YAML copy without expanding variables or secrets."""
 
     filename = time.strftime("ia-gateway-config-%Y%m%d-%H%M%S.yaml")
     return Response(
@@ -1127,14 +1127,14 @@ def download_config_backup():
 
 @app.get("/api/cloudera/connections")
 def cloudera_connections():
-    """Lista conexiones saneadas: muestra presencia/caducidad, nunca secretos."""
+    """List sanitized connections: expose presence/expiry, never secrets."""
 
     return cloudera.connections()
 
 
 @app.post("/api/cloudera/connections")
 def save_cloudera_connection(connection: ClouderaConnection):
-    """Valida, normaliza y persiste una nueva conexión Cloudera."""
+    """Validate, normalize, and persist a new Cloudera connection."""
 
     try:
         result = cloudera.save_connection(connection.name, connection.kind, connection.url, connection.token,
@@ -1154,7 +1154,7 @@ def save_cloudera_connection(connection: ClouderaConnection):
 
 @app.put("/api/cloudera/connections/{connection_id}")
 def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection):
-    """Actualiza una conexión conservando los secretos cuyos campos estén vacíos."""
+    """Update a connection while retaining secrets for fields left blank."""
 
     try:
         result = cloudera.update_connection(connection_id, connection.name, connection.kind, connection.url, connection.token,
@@ -1176,7 +1176,7 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
 
 @app.post("/api/cloudera/connections/{connection_id}/renew-token")
 def renew_cloudera_token(connection_id: str, request: ClouderaTokenRenewal):
-    """Genera o renueva un CDP token y lo aplica sin reiniciar LiteLLM."""
+    """Generate or renew a CDP token and apply it without restarting LiteLLM."""
 
     try:
         result = cloudera.renew_token(connection_id, force=request.force)
@@ -1192,14 +1192,14 @@ def renew_cloudera_token(connection_id: str, request: ClouderaTokenRenewal):
 
 @app.delete("/api/cloudera/connections/{connection_id}", status_code=204)
 def delete_cloudera_connection(connection_id: str):
-    """Elimina conexión y tokens por-modelo asociados a su identificador."""
+    """Delete a connection and per-model tokens associated with its identifier."""
 
     cloudera.delete_connection(connection_id)
 
 
 @app.post("/api/cloudera/connections/{connection_id}/discover")
 def discover_cloudera(connection_id: str):
-    """Consulta APIs Cloudera y normaliza endpoints heterogéneos para la UI."""
+    """Query Cloudera APIs and normalize heterogeneous endpoints for the UI."""
 
     try:
         return cloudera.discover(connection_id)
@@ -1211,7 +1211,7 @@ def discover_cloudera(connection_id: str):
 
 @app.put("/api/cloudera/connections/{connection_id}/models/{external_id}/token")
 def save_cloudera_model_token(connection_id: str, external_id: str, credential: ClouderaModelToken):
-    """Guarda una credencial particular cuando el CDP token general no basta."""
+    """Save a dedicated credential when the shared CDP token is insufficient."""
 
     if not credential.token.strip(): raise HTTPException(422, "El token del modelo está vacío")
     try:
@@ -1229,7 +1229,7 @@ def save_cloudera_model_token(connection_id: str, external_id: str, credential: 
 
 @app.post("/api/cloudera/connections/{connection_id}/probe-model")
 def probe_cloudera_model(connection_id: str, model: ClouderaModelProbe):
-    """Realiza una prueba mínima con la URL y el tipo de tarea descubiertos."""
+    """Run a minimal probe with the discovered URL and task type."""
 
     try:
         return cloudera.probe_model(connection_id, model.external_id, model.url, model.protocol,
@@ -1243,7 +1243,7 @@ def probe_cloudera_model(connection_id: str, model: ClouderaModelProbe):
 
 @app.put("/api/config/guardrail")
 def update_guardrail(update: GuardrailUpdate):
-    """Cambia el clasificador global y su política, con reinicio transaccional."""
+    """Change the global classifier and policy through a transactional restart."""
 
     try:
         return manager.set_guardrail(
@@ -1256,7 +1256,7 @@ def update_guardrail(update: GuardrailUpdate):
 
 @app.put("/api/config/advisor")
 def update_advisor(update: AdvisorUpdate):
-    """Selecciona el asesor de configuración, igual que el guardrail global."""
+    """Select the configuration advisor using the same global pattern as the guardrail."""
 
     try:
         return manager.set_advisor(update.enabled, update.model.strip(), restart=update.restart)
@@ -1266,7 +1266,7 @@ def update_advisor(update: AdvisorUpdate):
 
 @app.post("/api/config/advisor/recommend")
 async def recommend_model_parameters(advice: ModelAdviceRequest):
-    """Pide JSON al asesor y filtra su salida antes de mostrarla o aplicarla."""
+    """Request JSON from the advisor and filter it before display or application."""
 
     use_case = advice.use_case.strip()
     if not use_case or len(use_case) > 8_000:
@@ -1349,7 +1349,7 @@ async def recommend_model_parameters(advice: ModelAdviceRequest):
 
 @app.put("/api/config")
 def update_config(update: ConfigUpdate):
-    """Valida y aplica la edición completa con reinicio transaccional."""
+    """Validate and apply a complete edit through a transactional restart."""
     try:
         manager.validate_model_activation_changes(update.content)
         return manager.update_config(update.content, restart=update.restart)
@@ -1359,7 +1359,7 @@ def update_config(update: ConfigUpdate):
 
 @app.post("/api/config/validate")
 def validate_config(update: ConfigUpdate):
-    """Valida sin escribir ni reiniciar, útil para el editor avanzado."""
+    """Validate without writing or restarting, for the advanced editor."""
     try:
         result = manager.validate_config_text(update.content)
         manager.validate_model_activation_changes(update.content)
@@ -1370,7 +1370,7 @@ def validate_config(update: ConfigUpdate):
 
 @app.post("/api/config/apply")
 def apply_config():
-    """Aplica una configuración que se guardó posponiendo el reinicio."""
+    """Apply a configuration whose restart was previously deferred."""
     try:
         return manager.apply_pending_config()
     except RuntimeError as exc:
@@ -1379,7 +1379,7 @@ def apply_config():
 
 @app.post("/api/config/models/validate")
 async def validate_model_candidate(model: ModelCreate):
-    """Prueba el deployment y todos los parámetros antes de permitir guardarlo."""
+    """Probe the deployment and every parameter before allowing it to be saved."""
 
     try:
         entry = _model_entry(model)
@@ -1391,7 +1391,7 @@ async def validate_model_candidate(model: ModelCreate):
 
 @app.post("/api/config/models")
 def create_model(model: ModelCreate):
-    """Construye una entrada LiteLLM sin aceptar secretos en claro."""
+    """Build a LiteLLM entry without accepting plaintext secrets."""
     try:
         entry = _model_entry(model)
         _consume_model_validation(entry, model.validation_id)
@@ -1408,7 +1408,7 @@ def create_model(model: ModelCreate):
 
 @app.put("/api/config/models/{name}")
 def edit_model(name: str, model: ModelCreate):
-    """Edita campos conocidos conservando parámetros avanzados ajenos al formulario."""
+    """Edit known fields while preserving advanced parameters outside the form."""
     try:
         entry = _model_entry(model)
         _consume_model_validation(entry, model.validation_id)
@@ -1424,7 +1424,7 @@ def edit_model(name: str, model: ModelCreate):
 
 @app.delete("/api/config/models/{name}")
 def remove_model(name: str, restart: bool = Query(True)):
-    """Borra un alias y limpia fallbacks, estado y referencias de guardrail."""
+    """Delete an alias and clear fallbacks, state, and guardrail references."""
 
     try:
         return manager.delete_model(name, restart=restart)
@@ -1436,7 +1436,7 @@ def remove_model(name: str, restart: bool = Query(True)):
 
 @app.post("/api/gateway/start")
 def start():
-    """Arranca el gateway sólo después de validar configuración y secretos."""
+    """Start the gateway only after validating configuration and secrets."""
     try:
         return manager.start()
     except RuntimeError as exc:
@@ -1445,13 +1445,13 @@ def start():
 
 @app.post("/api/gateway/stop")
 def stop():
-    """Detiene LiteLLM y sus procesos descendientes."""
+    """Stop LiteLLM and its descendant processes."""
     return manager.stop()
 
 
 @app.put("/api/models/{name}/state")
 def set_model_state(name: str, state: ModelState):
-    """Cambia el estado efectivo de un alias sin editar `config.yaml`."""
+    """Change the effective alias state without editing ``config.yaml``."""
     try:
         return manager.set_model(name, state.enabled)
     except KeyError as exc:
@@ -1462,7 +1462,7 @@ def set_model_state(name: str, state: ModelState):
 
 @app.post("/api/models/{name}/test")
 async def test_model(name: str, test: TestCall, request: Request):
-    """Ejecuta una prueba extremo a extremo por el mismo gateway que usa producción."""
+    """Run an end-to-end test through the same gateway path used in production."""
     prompt = test.prompt.strip()
     if not prompt:
         raise HTTPException(422, "Escribe un texto para realizar la prueba")
@@ -1482,8 +1482,8 @@ async def test_model(name: str, test: TestCall, request: Request):
             "Pulsa «Aplicar cambios pendientes» para reiniciar LiteLLM y cargarlo.",
         )
 
-    # Un embedding no es un chat: elegir el endpoint según la capacidad evita
-    # pruebas engañosas y permite mantener una única interfaz en el navegador.
+    # An embedding is not chat. Choosing the endpoint by capability prevents
+    # misleading tests while retaining one browser interface.
     endpoint = "embeddings" if model["mode"] == "embedding" else "chat/completions"
     payload = (
         {"model": name, "input": prompt, "encoding_format": "float"}
@@ -1516,7 +1516,7 @@ async def test_model(name: str, test: TestCall, request: Request):
 
 @app.post("/api/models/{name}/latency")
 async def model_latency(name: str):
-    """Realiza una única sonda generativa y devuelve su latencia extremo a extremo."""
+    """Run one generative probe and return its end-to-end latency."""
     model = next((item for item in manager.models() if item["name"] == name), None)
     if model is None:
         raise HTTPException(404, f"Modelo no encontrado: {name}")
@@ -1554,7 +1554,7 @@ async def model_latency(name: str):
 
 
 def read_model_day_logs(name: str, selected, limit: int) -> list[dict]:
-    """Incluye filas antiguas guardadas con el identificador del proveedor."""
+    """Include legacy rows stored under the provider identifier."""
 
     model_names = [name]
     try:
@@ -1578,7 +1578,7 @@ def read_model_day_logs(name: str, selected, limit: int) -> list[dict]:
 
 @app.get("/api/models/{name}/logs")
 def logs(name: str, day: Optional[str] = None, limit: int = Query(500, ge=1, le=5000)):
-    """Consulta eventos estructurados con un límite defensivo de filas."""
+    """Query structured events with a defensive row limit."""
     try:
         selected = parse_day(day)
     except ValueError as exc:
@@ -1589,14 +1589,14 @@ def logs(name: str, day: Optional[str] = None, limit: int = Query(500, ge=1, le=
 
 @app.get("/api/models/{name}/log-days")
 def log_days(name: str):
-    """Enumera jornadas disponibles para un alias, de más reciente a más antigua."""
+    """List available days for an alias from newest to oldest."""
 
     return {"days": available_days(ROOT / "runtime", name)}
 
 
 @app.get("/api/models/{name}/logs.xlsx")
 def export_logs(name: str, day: Optional[str] = None):
-    """Genera en memoria el Excel operativo de una jornada y un modelo."""
+    """Generate the operational workbook for one day and model in memory."""
 
     try:
         selected = parse_day(day)
@@ -1611,7 +1611,7 @@ def export_logs(name: str, day: Optional[str] = None):
 
 @app.get("/api/process-log", response_class=PlainTextResponse)
 def process_log(day: Optional[str] = None):
-    """Muestra stdout/stderr de LiteLLM para diagnosticar fallos de arranque."""
+    """Expose LiteLLM stdout/stderr for startup diagnostics."""
     try:
         return manager.process_log(500, parse_day(day))
     except ValueError as exc:
@@ -1620,14 +1620,14 @@ def process_log(day: Optional[str] = None):
 
 @app.get("/api/process-log-days")
 def process_log_days():
-    """Enumera ficheros diarios de stdout/stderr del proceso LiteLLM."""
+    """List daily stdout/stderr files from the LiteLLM process."""
 
     return {"days": manager.process_log_days()}
 
 
 @app.delete("/api/process-log", status_code=204)
 def clear_process_log(day: Optional[str] = None):
-    """Vacía sólo el log técnico elegido; no borra trazas estructuradas."""
+    """Clear only the selected technical log, not structured traces."""
 
     try:
         manager.clear_process_log(parse_day(day))
@@ -1644,7 +1644,7 @@ if __name__ == "__main__":
             "IA_GATEWAY_PORT, IA_GATEWAY_DASHBOARD_PORT e IA_GATEWAY_LITELLM_PORT "
             "deben usar puertos distintos"
         )
-    # Uvicorn queda oculto. El proxy de borde es el único listener publicado y separa
-    # /v1 (LiteLLM) del panel y su /api administrativa.
-    # Pasar el objeto evita que Uvicorn vuelva a importar app.py y repita el bootstrap.
+    # Uvicorn remains private. The edge proxy is the only published listener and
+    # separates /v1 (LiteLLM) from the dashboard and its administrative /api.
+    # Passing the object prevents Uvicorn from importing app.py and bootstrapping twice.
     uvicorn.run(app, host="127.0.0.1", port=INTERNAL_DASHBOARD_PORT, reload=False)

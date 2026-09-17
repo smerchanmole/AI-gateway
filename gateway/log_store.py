@@ -1,8 +1,9 @@
-"""Repositorio SQLite para eventos de inferencia.
+"""SQLite repository for inference events.
 
-Este módulo no sabe nada de HTTP ni de LiteLLM. Recibe valores ya extraídos,
-redacta secretos y ofrece operaciones pequeñas de escritura/lectura. Esa frontera
-hace posible probar privacidad y migraciones sin arrancar ningún modelo.
+This module deliberately knows nothing about HTTP or LiteLLM. It accepts
+already-extracted values, redacts secrets, and exposes small read/write
+operations. This boundary makes privacy and migration tests possible without
+starting any model.
 """
 
 from __future__ import annotations
@@ -23,13 +24,13 @@ MADRID = ZoneInfo("Europe/Madrid")
 
 
 def daily_log_path(runtime_dir: Path, day: date | None = None) -> Path:
-    """Separa físicamente cada jornada según el calendario de Madrid."""
+    """Store each day separately according to the Europe/Madrid calendar."""
     selected = day or datetime.now(MADRID).date()
     return runtime_dir / "logs" / f"{selected.isoformat()}.sqlite3"
 
 
 def parse_day(value: str | None) -> date:
-    """Valida ``AAAA-MM-DD`` o elige hoy según Europe/Madrid."""
+    """Validate ``YYYY-MM-DD`` or select today in Europe/Madrid."""
 
     try:
         return date.fromisoformat(value) if value else datetime.now(MADRID).date()
@@ -38,7 +39,7 @@ def parse_day(value: str | None) -> date:
 
 
 def safe_value(value: Any, depth: int = 0) -> Any:
-    """Convierte objetos complejos a JSON y oculta secretos por nombre de campo."""
+    """Convert complex objects to JSON and redact fields whose names imply secrets."""
     if depth > 8:
         return "[profundidad limitada]"
     if hasattr(value, "model_dump"):
@@ -58,7 +59,7 @@ def safe_value(value: Any, depth: int = 0) -> Any:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    """Abre SQLite, activa WAL y aplica migraciones aditivas idempotentes."""
+    """Open SQLite, enable WAL, and apply idempotent additive migrations."""
     connection = sqlite3.connect(db_path, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
@@ -70,8 +71,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
         request_json TEXT, response_json TEXT, error TEXT
         )"""
     )
-    # No usamos un framework de migración para cuatro columnas, pero mantenemos
-    # la propiedad esencial de una migración: ejecutarla N veces equivale a una.
+    # Four columns do not justify a migration framework, but the essential
+    # migration property remains: running it N times is equivalent to once.
     existing = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
     for name, column_type in {
         "started_at": "TEXT", "origin_ip": "TEXT", "provider_ip": "TEXT", "ttft_ms": "INTEGER",
@@ -90,7 +91,7 @@ def insert_log(db_path: Path, model: str, status: str, duration_ms: int | None,
                provider_ip: str | None = None, ttft_ms: int | None = None,
                guardrail_status: str | None = None, guardrail_reason: str | None = None,
                parameters: Any = None) -> None:
-    """Inserta un evento en una transacción corta para no bloquear el callback."""
+    """Insert an event in a short transaction so the callback is not blocked."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as connection:
         connection.execute(
@@ -107,7 +108,7 @@ def insert_log(db_path: Path, model: str, status: str, duration_ms: int | None,
 
 
 def read_logs(db_path: Path, model: str, limit: int = 100) -> list[dict[str, Any]]:
-    """Hidrata JSON y devuelve primero las llamadas más recientes."""
+    """Hydrate JSON columns and return the most recent calls first."""
     if not db_path.exists():
         return []
     with connect(db_path) as connection:
@@ -125,7 +126,7 @@ def read_logs(db_path: Path, model: str, limit: int = 100) -> list[dict[str, Any
 
 
 def _madrid_day(timestamp: str | None) -> date | None:
-    """Convierte un ISO timestamp al día civil usado por el dashboard."""
+    """Convert an ISO timestamp to the civil day used by the dashboard."""
 
     if not timestamp:
         return None
@@ -139,7 +140,7 @@ def _madrid_day(timestamp: str | None) -> date | None:
 
 
 def read_day_logs(runtime_dir: Path, model: str, day: date, limit: int = 5000) -> list[dict[str, Any]]:
-    """Lee el fichero diario y suma registros del antiguo fichero monolítico."""
+    """Read the daily file and include rows from the legacy monolithic database."""
     rows = read_logs(daily_log_path(runtime_dir, day), model, limit)
     legacy = runtime_dir / "requests.sqlite3"
     if legacy.exists():
@@ -150,7 +151,7 @@ def read_day_logs(runtime_dir: Path, model: str, day: date, limit: int = 5000) -
 
 
 def available_days(runtime_dir: Path, model: str) -> list[str]:
-    """Descubre jornadas con datos para el alias, incluyendo formato legado."""
+    """Discover days containing data for an alias, including the legacy format."""
 
     days = {path.stem for path in (runtime_dir / "logs").glob("????-??-??.sqlite3")}
     legacy = runtime_dir / "requests.sqlite3"
@@ -161,7 +162,7 @@ def available_days(runtime_dir: Path, model: str) -> list[str]:
 
 
 def log_kpis(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Resume volumen, éxito, latencia, tokens y distribución por hora."""
+    """Summarize volume, success, latency, tokens, and hourly distribution."""
 
     durations = sorted(int(row["duration_ms"]) for row in rows if row.get("duration_ms") is not None)
     ttfts = [int(row["ttft_ms"]) for row in rows if row.get("ttft_ms") is not None]

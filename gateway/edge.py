@@ -1,4 +1,4 @@
-"""Publicación de panel y LiteLLM detrás de un único puerto HTTP."""
+"""Publish the dashboard and LiteLLM behind one HTTP entry point."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from gateway.core import environment_port
 
 
 def public_gateway_port() -> int:
-    """Elige el único puerto que publica el runtime, con 8090 en local."""
+    """Select the runtime's single public port, defaulting to 8090 locally."""
 
     if os.environ.get("IA_GATEWAY_PORT", "").strip():
         return environment_port("IA_GATEWAY_PORT", 8090)
@@ -24,7 +24,7 @@ def public_gateway_port() -> int:
 
 
 class EdgeProxy:
-    """Gestiona el proxy streaming que publica la única entrada HTTP."""
+    """Manage the streaming proxy that exposes the single HTTP entry point."""
 
     def __init__(
         self,
@@ -71,7 +71,7 @@ class EdgeProxy:
         return command
 
     def start(self) -> None:
-        """Mantiene el proxy Python como proceso hijo independiente."""
+        """Run the Python proxy as an independently managed child process."""
 
         if self.process is not None and self.process.poll() is None:
             return
@@ -98,7 +98,7 @@ class EdgeProxy:
         raise RuntimeError(f"El proxy HTTP no abrió el puerto público {self.listen_port}")
 
     def stop(self) -> None:
-        """Detiene únicamente el proceso proxy creado por esta aplicación."""
+        """Stop only the proxy process created by this application."""
 
         process = self.process
         if not process:

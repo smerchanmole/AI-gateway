@@ -1,4 +1,4 @@
-# Latest stable release verified on 2026-09-13.
-vllm==0.29.0
-# Required by the Qwen3.8 multimodal processor configuration.
-transformers>=5.8.0
+# vLLM 0.29.0+cu129 is installed explicitly by cdsw-build.sh because the
+# standard PyPI wheel targets CUDA 13.0, newer than Cloudera's current driver.
+# Qwen3.8 and vLLM 0.29 require the current multimodal processor stack.
+transformers>=5.15.0

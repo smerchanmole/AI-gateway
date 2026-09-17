@@ -12,7 +12,7 @@ from gateway.tls import ensure_self_signed_certificate
 
 
 def test_dependency_bootstrap_runs_before_external_imports():
-    """Cloudera debe preparar el entorno incluso si ejecuta el código como celda."""
+    """Cloudera must prepare the environment even when executing code as a cell."""
     source = (dashboard.ROOT / "app.py").read_text(encoding="utf-8")
 
     bootstrap_call = source.index("\nbootstrap_private_environment()\n")
@@ -37,7 +37,7 @@ def test_dependency_bootstrap_runs_before_external_imports():
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    """Cliente HTTPS autenticado; replica el contrato real de navegador."""
+    """Authenticated HTTPS client that mirrors the real browser contract."""
     store = AuthStore(tmp_path / "runtime")
     monkeypatch.setattr(dashboard, "auth", store)
     browser = TestClient(dashboard.app, base_url="https://testserver")
@@ -252,6 +252,22 @@ def test_benchmark_rejects_too_few_requests_for_concurrency(monkeypatch, client)
     assert "al menos 15 peticiones" in response.json()["detail"]
 
 
+def test_benchmark_duration_accepts_up_to_one_hundred_thousand_seconds():
+    request = dashboard.BenchmarkRequest(
+        targets=[{"model": "modelo", "max_concurrency": 1}],
+        limit_mode="duration",
+        duration_seconds=100_000,
+    )
+
+    assert request.duration_seconds == 100_000
+    with pytest.raises(ValueError):
+        dashboard.BenchmarkRequest(
+            targets=[{"model": "modelo", "max_concurrency": 1}],
+            limit_mode="duration",
+            duration_seconds=100_001,
+        )
+
+
 def test_benchmark_starts_against_internal_gateway(monkeypatch, client):
     captured = {}
 
@@ -311,7 +327,7 @@ def test_dashboard_explains_sqlite_dynamic_token_mode():
 
 
 def test_browser_reads_an_error_response_body_only_once():
-    """Una respuesta no JSON no debe provocar 'body stream already read'."""
+    """A non-JSON response must not cause a 'body stream already read' error."""
     javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "const rawBody = await response.text();" in javascript
@@ -320,7 +336,7 @@ def test_browser_reads_an_error_response_body_only_once():
 
 
 def test_dashboard_exposes_architecture_infographic(client):
-    """La portada no debe apuntar a una imagen que el servidor no publique."""
+    """The landing page must not reference an image the server does not publish."""
     dashboard_response = client.get("/")
     image_response = client.get("/static/ia-gateway-architecture.svg")
 
@@ -345,10 +361,14 @@ def test_dashboard_offers_persistent_spanish_english_and_italian_localization(cl
     assert 'localStorage.getItem("ia-gateway-language")' in javascript_response.text
     assert 'document.documentElement.lang = language' in javascript_response.text
     assert 'new MutationObserver' in javascript_response.text
+    assert '"Split across all levels · maximum 100,000 s."' in javascript_response.text
+    assert '"Suddiviso tra tutti i livelli · massimo 100.000 s."' in javascript_response.text
+    assert '"The connection will be vulnerable to impersonation.' in javascript_response.text
+    assert '"La connessione sarà vulnerabile all\'impersonificazione.' in javascript_response.text
 
 
 def test_model_metrics_use_vertical_rows_and_accessible_statuses():
-    """Los semáforos complementan al texto y no sustituyen su significado."""
+    """Traffic-light indicators complement text rather than replacing its meaning."""
     javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
     stylesheet = (dashboard.ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
@@ -865,7 +885,7 @@ def test_api_requires_login_and_rejects_csrf(tmp_path, monkeypatch):
 
 
 def test_csrf_json_fallback_survives_proxy_header_filter(monkeypatch, client):
-    """El proxy puede retirar X-CSRF-Token sin inutilizar operaciones seguras."""
+    """The proxy may strip X-CSRF-Token without breaking protected operations."""
     csrf_token = client.headers.pop("X-CSRF-Token")
     monkeypatch.setattr(dashboard.manager, "stop", lambda: {"process_alive": False})
 
@@ -892,7 +912,7 @@ def test_dashboard_exposes_secure_login_and_password_change():
 
 
 def test_hourly_chart_does_not_depend_on_inline_styles_blocked_by_csp():
-    """La CSP style-src self debe ser compatible con la altura de las barras."""
+    """The style-src self CSP must remain compatible with dynamic bar heights."""
 
     javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
     assert 'style="height:' not in javascript
@@ -920,4 +940,4 @@ def test_cloudera_log_reader_includes_historical_provider_model_rows(tmp_path, m
     monkeypatch.setattr(dashboard, "ROOT", tmp_path)
     rows = dashboard.read_model_day_logs("nemotron-publico", selected, 500)
     assert len(rows) == 1
-"""Pruebas del contrato HTTP y de los elementos esenciales del dashboard."""
+"""Tests for the HTTP contract and essential dashboard elements."""

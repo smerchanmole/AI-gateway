@@ -15,6 +15,10 @@ from typing import Any
 # vLLM must see these settings before it is imported.
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# Cloudera's nvcc rejects FlashInfer 0.6.18's --compress-mode=size JIT flag.
+# Attention already uses Triton; this disables FlashInfer's separate top-k /
+# top-p sampler and falls back to vLLM's native implementation.
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
 from vllm import LLM, SamplingParams
 
@@ -47,14 +51,29 @@ def _env_float(name: str, default: float, minimum: float, maximum: float) -> flo
     return value
 
 
-TENSOR_PARALLEL_SIZE = _env_int("VLLM_TENSOR_PARALLEL_SIZE", 2, 1, 8)
-MAX_MODEL_LEN = _env_int("VLLM_MAX_MODEL_LEN", 16384, 2048, 262144)
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name, "true" if default else "false").strip().lower()
+    if value not in {"1", "0", "true", "false", "yes", "no", "on", "off"}:
+        raise ValueError(f"{name} must be a boolean")
+    return value in {"1", "true", "yes", "on"}
+
+
+# One A100 is deliberately TP=1: the complete FP8 checkpoint fits and avoiding
+# worker-to-worker IPC removes the Model Deployment /dev/shm failure mode.
+TENSOR_PARALLEL_SIZE = _env_int("VLLM_TENSOR_PARALLEL_SIZE", 1, 1, 8)
+MAX_MODEL_LEN = _env_int("VLLM_MAX_MODEL_LEN", 262144, 2048, 262144)
 GPU_MEMORY_UTILIZATION = _env_float(
-    "VLLM_GPU_MEMORY_UTILIZATION", 0.92, 0.50, 0.98
+    "VLLM_GPU_MEMORY_UTILIZATION", 0.90, 0.50, 0.98
 )
-MAX_NUM_SEQS = _env_int("VLLM_MAX_NUM_SEQS", 4, 1, 64)
+MAX_NUM_SEQS = _env_int("VLLM_MAX_NUM_SEQS", 1, 1, 64)
+MAX_NUM_BATCHED_TOKENS = _env_int(
+    "VLLM_MAX_NUM_BATCHED_TOKENS", 8192, 2048, 131072
+)
 CPU_OFFLOAD_GB = _env_float("VLLM_CPU_OFFLOAD_GB", 0.0, 0.0, 128.0)
-KV_CACHE_DTYPE = os.getenv("VLLM_KV_CACHE_DTYPE", "fp8")
+# A100 is SM80. vLLM's Triton attention backend requires SM89+ for native FP8
+# KV cache, but supports BF16 natively on A100.
+KV_CACHE_DTYPE = os.getenv("VLLM_KV_CACHE_DTYPE", "bfloat16")
+ENFORCE_EAGER = _env_bool("VLLM_ENFORCE_EAGER", True)
 # Cloudera's CUDA compiler rejects a FlashInfer 0.6.18 JIT flag
 # (--compress-mode=size). Pass the backend through the Python API because the
 # legacy VLLM_ATTENTION_BACKEND environment variable is no longer authoritative.
@@ -68,12 +87,36 @@ _allowed_domains = [
 
 
 def _load_engine() -> LLM:
-    shm = os.statvfs("/dev/shm")
-    shm_total_mb = shm.f_blocks * shm.f_frsize / 1024**2
-    shm_free_mb = shm.f_bavail * shm.f_frsize / 1024**2
+    try:
+        shm = os.statvfs("/dev/shm")
+        shm_total_mb = shm.f_blocks * shm.f_frsize / 1024**2
+        shm_free_mb = shm.f_bavail * shm.f_frsize / 1024**2
+        print(
+            f"SHM_DIAGNOSTIC total={shm_total_mb:.0f} MiB "
+            f"free={shm_free_mb:.0f} MiB"
+        )
+    except OSError as exc:
+        print(f"SHM_DIAGNOSTIC unavailable={exc!r}")
+    try:
+        import torch
+
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_total_gib = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        print(
+            f"GPU_DIAGNOSTIC name={gpu_name} memory={gpu_total_gib:.1f} GiB "
+            f"torch={torch.__version__} torch_cuda={torch.version.cuda}"
+        )
+    except Exception as exc:  # vLLM will emit the definitive CUDA error next.
+        print(f"GPU_DIAGNOSTIC unavailable={exc!r}")
+
     print(
-        f"SHM_DIAGNOSTIC total={shm_total_mb:.0f} MiB "
-        f"free={shm_free_mb:.0f} MiB"
+        "VLLM_CONFIG "
+        f"model={MODEL_ID} tp={TENSOR_PARALLEL_SIZE} "
+        f"max_model_len={MAX_MODEL_LEN} max_num_seqs={MAX_NUM_SEQS} "
+        f"max_num_batched_tokens={MAX_NUM_BATCHED_TOKENS} "
+        f"gpu_memory_utilization={GPU_MEMORY_UTILIZATION} "
+        f"kv_cache_dtype={KV_CACHE_DTYPE} attention_backend={ATTENTION_BACKEND} "
+        f"enforce_eager={ENFORCE_EAGER}"
     )
 
     return LLM(
@@ -89,6 +132,11 @@ def _load_engine() -> LLM:
         max_model_len=MAX_MODEL_LEN,
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         max_num_seqs=MAX_NUM_SEQS,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        # CUDA graph capture has been observed to hang or OOM with this hybrid
+        # Qwen architecture on Ampere. Eager mode costs some throughput but is
+        # the safer deployment default on A100.
+        enforce_eager=ENFORCE_EAGER,
         enable_prefix_caching=True,
         trust_remote_code=False,
         hf_token=os.getenv("HF_TOKEN") or None,
@@ -153,9 +201,9 @@ def predict(args: dict[str, Any]) -> dict[str, Any]:
     default_top_p = 0.95 if thinking else 0.80
     default_presence_penalty = 0.0 if thinking else 1.5
     sampling = SamplingParams(
-        # Model Service corta normalmente las peticiones largas antes de que
-        # el motor termine. El límite evita que una generación huérfana retenga
-        # _GENERATION_LOCK y encadene timeouts en las peticiones siguientes.
+        # Model Service normally terminates long requests before the engine
+        # finishes. This limit prevents an orphaned generation from retaining
+        # _GENERATION_LOCK and causing cascading timeouts on later requests.
         max_tokens=int(_number(args, "max_tokens", 128, 1, 512)),
         temperature=_number(args, "temperature", default_temperature, 0.0, 2.0),
         top_p=_number(args, "top_p", default_top_p, 0.0, 1.0),

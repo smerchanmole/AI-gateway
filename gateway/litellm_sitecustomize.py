@@ -1,4 +1,4 @@
-"""Inicialización TLS temprana y exclusiva del proceso hijo LiteLLM.
+"""Early TLS initialization scoped exclusively to the LiteLLM child process.
 
 Python importa automáticamente un módulo llamado ``sitecustomize`` al arrancar.
 GatewayManager copia este fichero con ese nombre al directorio runtime y lo
@@ -32,13 +32,13 @@ _insecure_hosts = {
 
 
 def _is_insecure_host(url: Any) -> bool:
-    """Limita el modo de laboratorio a los hosts configurados explícitamente."""
+    """Restrict laboratory mode to explicitly configured hosts."""
 
     return (urlparse(str(url)).hostname or "").lower() in _insecure_hosts
 
 
 def _gateway_create_default_context(*args: Any, **kwargs: Any) -> ssl.SSLContext:
-    """Conserva las raíces públicas y añade las CA internas de Cloudera."""
+    """Retain public roots and add internal Cloudera certificate authorities."""
 
     context = _original_create_default_context(*args, **kwargs)
     loaded = False
@@ -49,9 +49,9 @@ def _gateway_create_default_context(*args: Any, **kwargs: Any) -> ssl.SSLContext
         except (OSError, ssl.SSLError):
             continue
     if loaded:
-        # Algunas PKI corporativas antiguas no incluyen Authority Key Identifier.
-        # Se conserva CERT_REQUIRED y check_hostname; sólo se evita el modo X.509
-        # estricto que Python 3.13 activa en determinados clientes.
+        # Some older corporate PKIs omit the Authority Key Identifier. Keep
+        # CERT_REQUIRED and hostname checks; only bypass the strict X.509 mode
+        # that Python 3.13 enables in selected clients.
         strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
         if strict:
             context.verify_flags &= ~strict
@@ -63,9 +63,9 @@ if _bundles:
 
 
 if _insecure_hosts:
-    # LiteLLM 1.83 usa aiohttp como transporte OpenAI por defecto y pierde el
-    # ssl_verify del deployment al reutilizar la sesión. La decisión se aplica
-    # en el último punto previo a abrir la conexión, donde aún conocemos el host.
+    # LiteLLM 1.83 uses aiohttp as its default OpenAI transport and loses the
+    # deployment's ssl_verify value when reusing the session. Apply the choice
+    # at the final point before connecting, where the destination host is known.
     try:
         import aiohttp
 

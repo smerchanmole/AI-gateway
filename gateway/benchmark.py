@@ -1,9 +1,9 @@
-"""Motor de pruebas de carga controladas para modelos servidos por LiteLLM.
+"""Controlled load-test engine for models served through LiteLLM.
 
-La batería usa exclusivamente el endpoint interno del gateway. Así mide el
-recorrido real (LiteLLM, callbacks, guardrails y proveedor) sin exponer claves
-al navegador. Cada modelo recorre niveles 1..N y conserva sólo agregados,
-errores recientes y una serie temporal acotada.
+The test suite uses only the gateway's internal endpoint. It therefore measures
+the real path through LiteLLM, callbacks, guardrails, and the provider without
+exposing credentials to the browser. Each model traverses concurrency levels
+1..N and retains only aggregates, recent errors, and a bounded time series.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import httpx
 
 
 def percentile(values: list[float], percentile_value: float) -> float | None:
-    """Percentil lineal estable; devuelve ``None`` cuando no hay muestras."""
+    """Return a stable linear percentile, or ``None`` when no samples exist."""
 
     if not values:
         return None
@@ -43,7 +43,7 @@ def _normalise_answer(value: str) -> str:
 
 
 def _prompt(seed: str, sequence: int) -> tuple[str, str, str]:
-    """Crea casos deterministas y autocorregibles sin datos externos."""
+    """Create deterministic, self-scoring cases that need no external data."""
 
     rng = random.Random(f"{seed}:{sequence}")
     kind = sequence % 5
@@ -65,7 +65,7 @@ def _prompt(seed: str, sequence: int) -> tuple[str, str, str]:
 
 
 class BenchmarkRunner:
-    """Mantiene una única campaña activa para evitar cargas accidentales."""
+    """Keep only one active campaign to prevent accidental overlapping loads."""
 
     def __init__(self) -> None:
         self._state: dict[str, Any] | None = None
@@ -132,7 +132,7 @@ class BenchmarkRunner:
         return self.snapshot()
 
     async def shutdown(self) -> None:
-        """Interrumpe inmediatamente la campaña al cerrar el panel."""
+        """Stop the campaign immediately when the control plane shuts down."""
 
         if self._task and not self._task.done():
             if self._cancel:

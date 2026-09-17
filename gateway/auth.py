@@ -1,9 +1,9 @@
-"""Autenticación local del panel sin almacenar contraseñas ni sesiones en claro.
+"""Local dashboard authentication without storing plaintext passwords or sessions.
 
-El navegador recibe un identificador de sesión aleatorio. En disco sólo se
-conserva su huella SHA-256; por tanto, copiar el fichero de sesiones no permite
-reutilizarlas. La contraseña se deriva con Argon2id, una función deliberadamente
-costosa en CPU y memoria que dificulta ataques de fuerza bruta fuera de línea.
+The browser receives a random session identifier. Only its SHA-256 digest is
+stored on disk, so copying the session file does not make sessions reusable.
+Passwords are derived with Argon2id, a deliberately CPU- and memory-intensive
+function that makes offline brute-force attacks significantly harder.
 """
 
 from __future__ import annotations
@@ -24,15 +24,15 @@ from argon2.exceptions import VerificationError
 
 
 class AuthenticationError(RuntimeError):
-    """Error de credenciales que no revela qué parte era incorrecta."""
+    """Credential error that does not reveal which value was incorrect."""
 
 
 class LoginRateLimited(AuthenticationError):
-    """Demasiados intentos recientes desde una misma dirección."""
+    """Too many recent attempts from the same address."""
 
 
 class AuthStore:
-    """Gestiona el único usuario ``admin``, sus sesiones y el control CSRF."""
+    """Manage the single ``admin`` account, its sessions, and CSRF protection."""
 
     username = "admin"
     cookie_name = "ia_gateway_session"
@@ -102,7 +102,7 @@ class AuthStore:
         return recent
 
     def login(self, username: str, password: str, address: str) -> tuple[str, dict[str, Any]]:
-        """Valida con respuesta constante y crea una sesión de ocho horas."""
+        """Validate credentials with a uniform response and create an eight-hour session."""
         with self._lock:
             now = time.time()
             attempts = self._prune_attempts(address, now)
@@ -113,7 +113,7 @@ class AuthStore:
             valid = self._verify_password(password, credentials["password_hash"]) and valid
             if not valid:
                 attempts.append(now)
-                # Una derivación real se ejecuta incluso si el usuario era erróneo.
+                # A real password derivation runs even when the username is wrong.
                 raise AuthenticationError("Usuario o contraseña incorrectos")
             self._attempts.pop(address, None)
             token = secrets.token_urlsafe(32)
@@ -166,7 +166,7 @@ class AuthStore:
 
     @staticmethod
     def validate_new_password(password: str) -> None:
-        """Exige una frase robusta sin imponer una longitud poco práctica."""
+        """Require a strong passphrase without imposing an impractical length."""
         if len(password) < 12 or len(password) > 256:
             raise AuthenticationError("La nueva contraseña debe tener entre 12 y 256 caracteres")
         checks = [r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]"]
@@ -188,14 +188,14 @@ class AuthStore:
                 "password_version": version,
                 "must_change_password": False,
             })
-            # Invalidar todas las demás sesiones reduce el impacto de una cookie robada.
+            # Invalidating every other session limits the impact of a stolen cookie.
             session["password_version"] = version
-            # La sesión actual se reemitirá con un token nuevo desde el endpoint.
+            # The endpoint will reissue the current session with a fresh token.
             self._write_json(self.sessions_file, {})
             return session
 
     def replace_session_after_password_change(self, session: dict[str, Any]) -> str:
-        """Asigna un token nuevo y deja como válida únicamente la sesión actual."""
+        """Assign a fresh token and keep only the current session valid."""
         with self._lock:
             token = secrets.token_urlsafe(32)
             self._write_json(self.sessions_file, {self._session_key(token): session})

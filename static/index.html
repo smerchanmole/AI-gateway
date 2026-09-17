@@ -15,13 +15,13 @@
   </form>
 </section>
 <main id="dashboard" hidden>
-  <!-- Cabecera operativa: proceso, puerto, PID y recursos del gateway. -->
+  <!-- Operational header: process, port, PID, and gateway resources. -->
   <header>
     <div><p class="eyebrow">CONTROL LOCAL</p><h1>IA Gateway</h1><p class="subtitle">Panel de LiteLLM · <code id="gateway-address">127.0.0.1:8090</code></p></div>
     <div class="gateway-control"><div class="status-wrap"><span id="status" class="status"><i></i><span>Comprobando…</span></span><span id="resources" class="resources">CPU — · RAM —</span><span id="persistence" class="persistence" role="status">SQLite · tokens sin reinicio · modelos con reinicio</span><span class="account-actions"><label class="language-picker"><span>Idioma</span><select class="language-select" aria-label="Idioma de la interfaz"><option value="es">ES</option><option value="en">EN</option><option value="it">IT</option></select></label><button id="change-password-button" type="button">Cambiar password</button><button id="logout-button" type="button">Salir</button></span></div><button id="apply-config-button" class="secondary pending-button" hidden>Aplicar cambios pendientes</button><button id="gateway-button" class="primary" disabled>Arrancar</button></div>
   </header>
 
-  <!-- Las áreas son vistas de una sola SPA; JavaScript conserva ?tab=. -->
+  <!-- These areas are views within one SPA; JavaScript preserves ?tab=. -->
   <nav class="primary-tabs" aria-label="Secciones principales">
     <button class="primary-tab active" data-view="models" aria-pressed="true">Modelos</button>
     <button class="primary-tab" data-view="config" aria-pressed="false">Configuración</button>
@@ -29,13 +29,13 @@
     <button class="primary-tab" data-view="logs" aria-pressed="false">Logs</button>
   </nav>
 
-  <!-- MODELOS: inventario, recursos y prueba real a través del gateway. -->
+  <!-- MODELS: inventory, resources, and a live request through the gateway. -->
   <div id="view-models" class="page-view">
     <section><div class="section-title"><div><h2>Modelos</h2><p>Inventario y estado operativo</p></div><span id="model-count"></span></div><div id="models" class="model-grid"><p class="empty">Cargando modelos…</p></div></section>
     <section class="test-section"><div class="section-title"><div><h2>Prueba rápida</h2><p>Envía una llamada sencilla a cualquiera de los modelos activos</p></div></div><div class="test-panel"><nav id="test-tabs" class="tabs test-tabs"></nav><textarea id="test-prompt" rows="4" placeholder="Escribe aquí el mensaje de prueba…"></textarea><div class="test-actions"><div class="test-hint"><span id="test-mode" class="mode-badge"></span><span id="test-help"></span></div><button id="test-button" class="primary">Enviar prueba</button></div><div id="test-result" class="test-result" hidden><div class="result-head"><span>Resultado</span><span id="test-time"></span></div><pre></pre></div></div></section>
   </div>
 
-  <!-- CONFIGURACIÓN: CRUD guiado, guardrail, Cloudera y YAML avanzado. -->
+  <!-- CONFIGURATION: guided CRUD, guardrail, Cloudera, and advanced YAML. -->
   <div id="view-config" class="page-view" hidden>
     <section><div class="section-title"><div><h2>Configuración YAML</h2><p>Gestiona modelos, resiliencia y seguridad sin editar archivos a mano</p></div></div>
       <div class="config-panel configured-panel"><div class="panel-heading"><h3>Modelos existentes</h3><span>Los secretos sólo muestran su referencia</span></div><div id="configured-models" class="config-model-list"></div></div>
@@ -150,7 +150,7 @@
     </section>
   </div>
 
-  <!-- BATERÍA: carga escalonada, corrección objetiva y telemetría en vivo. -->
+  <!-- LOAD TESTING: stepped load, objective scoring, and live telemetry. -->
   <div id="view-benchmark" class="page-view" hidden>
     <section class="benchmark-section">
       <div class="section-title benchmark-title"><div><p class="eyebrow">CAPACIDAD · EXTREMO A EXTREMO</p><h2>Batería de pruebas</h2><p>Encuentra el punto de saturación del gateway y de cada modelo con carga escalonada y respuestas autocorregibles.</p></div><span id="benchmark-state" class="benchmark-state idle">Sin ejecutar</span></div>
@@ -158,7 +158,7 @@
         <form id="benchmark-form" class="benchmark-config">
           <div class="panel-heading"><div><h3>Diseño de la prueba</h3><p>La concurrencia sube nivel a nivel, nunca empieza directamente en el máximo.</p></div><span>Control de carga</span></div>
           <fieldset class="benchmark-fieldset"><legend>1 · Modelos y techo de concurrencia</legend><div id="benchmark-models" class="benchmark-model-picker"><p class="empty compact">Cargando modelos…</p></div><small>Selecciona hasta 8 modelos. La suma de concurrencias no puede superar 64.</small></fieldset>
-          <fieldset class="benchmark-fieldset"><legend>2 · Cuándo termina</legend><div class="choice-cards"><label><input type="radio" name="benchmark-limit" value="requests" checked><span><b>Número de peticiones</b><small>Misma cantidad por modelo</small></span></label><label><input type="radio" name="benchmark-limit" value="duration"><span><b>Tiempo total</b><small>Misma duración por modelo</small></span></label></div><div class="benchmark-two-cols"><label id="benchmark-requests-field">Peticiones por modelo<input id="benchmark-requests" type="number" min="1" max="10000" value="50"><small id="benchmark-minimum-hint">Mínimo según la concurrencia elegida.</small></label><label id="benchmark-duration-field" hidden>Segundos por modelo<input id="benchmark-duration" type="number" min="5" max="3600" value="60"><small>Se reparte entre todos los niveles.</small></label><label>Timeout por petición <span>(s)</span><input id="benchmark-timeout" type="number" min="5" max="300" value="120"></label></div></fieldset>
+          <fieldset class="benchmark-fieldset"><legend>2 · Cuándo termina</legend><div class="choice-cards"><label><input type="radio" name="benchmark-limit" value="requests" checked><span><b>Número de peticiones</b><small>Misma cantidad por modelo</small></span></label><label><input type="radio" name="benchmark-limit" value="duration"><span><b>Tiempo total</b><small>Misma duración por modelo</small></span></label></div><div class="benchmark-two-cols"><label id="benchmark-requests-field">Peticiones por modelo<input id="benchmark-requests" type="number" min="1" max="10000" value="50"><small id="benchmark-minimum-hint">Mínimo según la concurrencia elegida.</small></label><label id="benchmark-duration-field" hidden>Segundos por modelo<input id="benchmark-duration" type="number" min="5" max="100000" value="60"><small>Se reparte entre todos los niveles · máximo 100.000 s.</small></label><label>Timeout por petición <span>(s)</span><input id="benchmark-timeout" type="number" min="5" max="300" value="120"></label></div></fieldset>
           <fieldset class="benchmark-fieldset"><legend>3 · Qué quieres medir</legend><label>Estrategia<select id="benchmark-strategy"><option value="parallel">Gateway completo · modelos en paralelo</option><option value="sequential">Capacidad por modelo · uno tras otro</option></select><small id="benchmark-strategy-help">Mide la presión agregada sobre IA Gateway.</small></label><label class="check-field"><input id="benchmark-warmup" type="checkbox" checked> Calentar cada modelo con una petición no contabilizada</label></fieldset>
           <div class="benchmark-estimate" aria-live="polite"><span>Carga prevista</span><strong id="benchmark-estimate">—</strong><small id="benchmark-estimate-detail">Selecciona al menos un modelo.</small></div>
           <p id="benchmark-form-status" class="inline-status" role="status" aria-live="polite"></p>

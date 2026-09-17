@@ -4,7 +4,27 @@ IA Gateway is a lightweight control plane for [LiteLLM](https://docs.litellm.ai/
 
 The same Python application runs locally and as a Cloudera AI Workbench application. It does not require Docker, Nginx, PostgreSQL, or an external database.
 
+> **One URL. Every model. No silent token expiry.** IA Gateway combines model routing, renewable Cloudera credentials, pre-flight validation, controlled load testing, and operational evidence in a single self-contained service.
+
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](#local-installation)
+[![LiteLLM](https://img.shields.io/badge/Router-LiteLLM-00BFA6)](https://docs.litellm.ai/)
+[![UI languages](https://img.shields.io/badge/UI-ES%20%7C%20EN%20%7C%20IT-8A5CF6)](#interface-languages)
+[![Storage](https://img.shields.io/badge/Storage-SQLite-003B57?logo=sqlite&logoColor=white)](#persistence-and-restart-rules)
+[![Tests](https://img.shields.io/badge/Tested-pytest-0A9EDC?logo=pytest&logoColor=white)](#run-tests)
+
 ![IA Gateway single-port architecture](static/ia-gateway-architecture.svg)
+
+## Documentation map
+
+| If you want to… | Start here |
+|---|---|
+| Run the project for the first time | [Five-minute start](#five-minute-start) |
+| Understand every dashboard section | [User manual](#1-user-manual) |
+| Install it in Cloudera | [Cloudera AI installation](#cloudera-ai-installation) |
+| Understand processes, data, and files | [Architecture](#2-architecture) |
+| Compare Cloudera, OpenAI, Ollama, NIM, vLLM, Triton, and Workbench | [Provider and environment differences](#3-provider-and-environment-differences) |
+| Diagnose a failure | [Troubleshooting playbook](#troubleshooting-playbook) |
+| Operate or extend the code | [Operations](#operations) and [Source map](#source-map) |
 
 ## What it provides
 
@@ -22,7 +42,91 @@ The same Python application runs locally and as a Cloudera AI Workbench applicat
 - Spanish, English, and Italian dashboard languages, persisted per browser.
 - Built-in administrator login with forced password change on first access.
 
-## Architecture
+## 1. User manual
+
+### Five-minute start
+
+1. Start the application with `python3 app.py` locally, or configure `app.py` as the Cloudera application launcher.
+2. Open the published URL. Locally, use `https://127.0.0.1:8090`.
+3. Sign in with `admin` / `admin` and replace the initial password immediately.
+4. Open **Configuration** and add a provider connection or model.
+5. Run the model's real parameter test. IA Gateway will not mark a new or changed model ready until its exact configuration has passed.
+6. Apply the pending LiteLLM restart, open **Models**, and send a Quick test.
+7. Use **Load testing** to find an initial sustainable concurrency level, then use **Logs** to review latency, TTFT, errors, tokens, effective parameters, and guardrail decisions.
+
+![English sign-in screen](docs/screenshots/sign-in-en.jpg)
+
+The screenshot above is generated from the running application. The language selector is available before authentication, so every administrator can choose a language before entering credentials.
+
+### Dashboard tour
+
+| Section | What it answers | Main actions |
+|---|---|---|
+| **Models** | Which aliases are active and healthy? What capacity is visible? | Start/stop LiteLLM, enable/disable aliases, inspect health and memory, run chat or embedding probes |
+| **Configuration** | How is every route, credential, guardrail, fallback, and parameter defined? | Guided CRUD, Cloudera discovery, TLS policy, credential renewal, advisor, backup/restore, advanced YAML |
+| **Load testing** | How much concurrent traffic can the gateway and each backend sustain? | Select up to eight models, ramp concurrency from 1 to N, choose request/time budget, warm up, monitor live charts, export JSON |
+| **Logs** | What happened on every request and how did the service behave over a day? | View KPIs and request detail, inspect sanitized effective parameters and IPs, export Excel, inspect LiteLLM technical logs |
+
+### Models
+
+The inventory is the operational home page. A model card distinguishes the public alias from the provider model, displays whether it is chat or embeddings, and separates process state from endpoint health. Remote CPU or VRAM values are never fabricated: unavailable remote metrics are labelled as such.
+
+Use **Quick test** for a real end-to-end request through the same public alias used by clients. Chat aliases receive a user message; embedding aliases receive text and must return a non-empty vector. This is different from the pre-save contract test: Quick test verifies the currently loaded router, while the contract test validates a candidate configuration before it is allowed into that router.
+
+Disabling an alias changes runtime state without deleting its YAML definition. Adding, editing, deleting, or changing topology requires a LiteLLM restart; credential renewal does not.
+
+### Configuration
+
+The guided editor groups values by responsibility:
+
+- **Identity and transport:** alias, provider model, API base, and environment-variable reference.
+- **Capacity:** context window, maximum output capacity, request timeout, retries, and router concurrency.
+- **Generation:** temperature, Top P, Top K, Min P, penalties, seed, stop sequences, and reasoning controls.
+- **Precedence:** either caller values override model defaults, or the model enforces its configured values on every call.
+- **Extras:** typed `VARIABLE=VALUE` entries for provider-specific fields, including dotted nested keys.
+- **Resilience and safety:** fallbacks, optional guardrail, per-model guardrail exclusions, and the optional configuration advisor.
+
+Every new or materially changed model must pass a live parameter test before it can be saved. The proof is bound to the exact configuration, expires quickly, and cannot be reused after a parameter changes. This prevents a syntactically valid YAML file from advertising a model that the provider will reject.
+
+The advanced editor remains the source-of-truth escape hatch. It validates structure, duplicate aliases, references, and environment variables, and it preserves manual YAML formatting. Backup download never expands secrets. Import validates first and replaces atomically only after approval.
+
+### Cloudera connection workflow
+
+```mermaid
+flowchart LR
+    A["Create connection"] --> B["Select service, platform, version, and TLS policy"]
+    B --> C["Save existing credential or generate UMS CDP_TOKEN"]
+    C --> D["Discover catalog"]
+    D --> E["Probe exact endpoint"]
+    E --> F["Prepare model draft"]
+    F --> G["Run full parameter contract test"]
+    G --> H["Save and reload LiteLLM"]
+    H --> I["Background renewal updates SQLite without restart"]
+```
+
+The endpoint/catalog URL and IAM/Control Plane URL are different concepts. The first discovers and calls models; the second generates renewable UMS workload tokens. TLS trust is connection-scoped and is reused consistently by IAM calls, catalog discovery, model probes, validation, and the live LiteLLM client.
+
+### Guardrail and advisor
+
+The guardrail is an optional request-time classifier. In permissive mode it records risk and continues; in restricted mode it blocks unsafe input. Embedding models are excluded automatically, and any chat alias can also be excluded explicitly. The guardrail model itself is selected globally in Configuration.
+
+The advisor is separate: it asks a selected chat model to recommend capacity and generation values for a described use case. Its response is treated as untrusted input. A user must review and apply it, save the model, and still pass the real provider test. A model that works as an OpenAI advisor may fail through a Workbench wrapper when that wrapper rejects the generated request shape; the error is surfaced rather than silently changing the requested parameters.
+
+### Load testing
+
+Concurrency always ramps through every level from `1` to the selected maximum. A maximum of `5` therefore measures five distinct stages, not five permanent workers. Choose either a request budget or a time budget—up to `100,000` seconds per model—and either run models in parallel to stress the whole gateway or sequentially to isolate backend capacity.
+
+The live view reports in-flight requests, throughput, error rate, correctness, TTFT and total latency percentiles, per-stage degradation, and an estimated sustainable concurrency. Chat cases are deterministic and automatically scored; embedding cases verify numeric vectors. Reports can be stopped cooperatively and downloaded as JSON.
+
+### Logs
+
+Structured logs are stored per day and model. They include timestamps, public alias, origin/provider IP, status, TTFT, total duration, token usage, guardrail result, and sanitized effective parameters after precedence rules. API keys, authorization headers, and routing secrets are redacted. The daily view provides KPIs, an hourly histogram, request detail, and Excel export. A separate LiteLLM tab exposes stdout/stderr for startup and provider diagnostics.
+
+### Interface languages
+
+The dashboard is available in Spanish, English, and Italian. The choice is stored locally in the browser and applies to static labels, accessibility attributes, modal content, and dynamic status messages. Backend/provider payloads are preserved verbatim inside diagnostic details so that vendor support can recognize the original error.
+
+## 2. Architecture
 
 ```mermaid
 flowchart LR
@@ -65,6 +169,72 @@ In Cloudera, the platform terminates TLS and forwards traffic to its assigned ap
 | Effective LiteLLM configuration | `runtime/active_config.yaml` | Generated automatically; do not edit |
 
 SQLite is part of the Python standard library. There is no database server to install or operate.
+
+### Logical request lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as OpenAI-compatible client
+    participant E as Edge proxy
+    participant L as LiteLLM
+    participant X as IA Gateway callback
+    participant G as Optional guardrail
+    participant P as Model provider
+    participant S as Daily SQLite log
+    C->>E: POST /v1/chat/completions
+    E->>L: Stream request + trusted origin IP
+    L->>X: Pre-call hook
+    X->>X: Resolve current Cloudera token
+    X->>X: Merge defaults, caller values, and enforced extras
+    opt Guardrail enabled and model not excluded
+        X->>G: Classify conversation
+        G-->>X: safe / unsafe / unavailable
+    end
+    X->>P: Provider-specific request
+    P-->>L: Streaming or non-streaming response
+    L-->>E: OpenAI-compatible response
+    E-->>C: Stream response
+    L->>X: Success/failure hook
+    X->>S: Sanitized event, TTFT, duration, tokens, parameters
+```
+
+### File and ownership architecture
+
+```text
+ia-gateway/
+├── app.py                         # Bootstrap, FastAPI API, schemas, lifecycle
+├── config.yaml                    # Versionable source of truth for model topology
+├── gateway/
+│   ├── auth.py                    # Argon2id admin credentials, sessions, CSRF
+│   ├── benchmark.py               # Bounded stepped-concurrency engine
+│   ├── cloudera.py                # Discovery, TLS policy, SQLite secrets, renewal
+│   ├── core.py                    # YAML transactions and LiteLLM supervision
+│   ├── edge.py                    # Public proxy process lifecycle
+│   ├── edge_server.py             # Streaming path router and trusted client IP
+│   ├── excel_export.py            # Dependency-free XLSX generation
+│   ├── litellm_callback.py        # Dynamic credentials, guardrail, observability
+│   ├── litellm_sitecustomize.py   # Early host-scoped TLS setup for LiteLLM
+│   ├── log_store.py               # Daily SQLite request logs and KPIs
+│   ├── tls.py                     # Local development certificate generation
+│   └── workbench_provider.py      # LiteLLM adapter for Workbench /model wrappers
+├── static/
+│   ├── index.html                 # Accessible SPA structure
+│   ├── app.js                     # Dashboard state, rendering, and API calls
+│   ├── i18n.js                    # ES/EN/IT static and dynamic translations
+│   └── style.css                  # Responsive design system
+├── deployments/                   # Example Cloudera model deployment code
+├── tests/                         # Unit and HTTP contract tests
+├── docs/screenshots/              # README captures from the running UI
+└── runtime/                       # Generated/private state; ignored by Git
+    ├── active_config.yaml         # Sanitized effective LiteLLM configuration
+    ├── cloudera.sqlite3           # Connections, secrets, lifecycle state
+    ├── logs/YYYY-MM-DD.sqlite3    # Structured request events
+    ├── edge/edge.log              # Public proxy technical log
+    └── tls/                       # Local certificate and private key
+```
+
+Ownership is intentional: `config.yaml` describes stable routing, SQLite holds mutable private state, and `runtime/active_config.yaml` is generated. Editing generated runtime files bypasses validation and is unsupported.
 
 ## Cloudera AI installation
 
@@ -401,7 +571,7 @@ An optional **configuration advisor** can be selected next to the guardrail. Fro
 
 ## Load testing
 
-Open **Batería de pruebas** after LiteLLM and the selected models are active. For each model choose its maximum concurrency. A value of 5 executes five separate stages—1, 2, 3, 4, and 5 simultaneous sessions—so the result shows where latency or errors begin to degrade instead of reporting only one arbitrary load point.
+Open **Load testing** after LiteLLM and the selected models are active. For each model choose its maximum concurrency. A value of 5 executes five separate stages—1, 2, 3, 4, and 5 simultaneous sessions—so the result shows where latency or errors begin to degrade instead of reporting only one arbitrary load point.
 
 Choose exactly one stopping rule:
 
@@ -432,6 +602,47 @@ The dashboard login is not currently an API key for `/v1/*`. If the Cloudera app
 Each model has structured daily logs containing request/response summaries, the effective sanitized provider parameters, status, origin IP, provider IP, TTFT, total duration, token counts, and guardrail outcome. This records the final OpenAI/vLLM/NIM/Workbench/Triton-compatible options after precedence rules have run, without logging API keys, authorization headers, messages as parameters, or routing secrets. The dashboard shows KPIs and an hourly histogram and can export the selected day to Excel.
 
 The edge trusts Cloudera/Istio forwarding metadata at the application boundary, preferring `X-Envoy-External-Address`, then the first non-loopback value in `X-Forwarded-For`, then `X-Real-IP`. If Cloudera removes the external address before the application, the only observable address will be the platform sidecar (`127.0.0.x`); application code cannot reconstruct information the ingress did not forward.
+
+## 3. Provider and environment differences
+
+The phrase “OpenAI-compatible” describes an HTTP contract, not identical behaviour. IA Gateway keeps transport, serving engine, model identifier, credential lifecycle, and TLS policy separate so that one label does not hide important differences.
+
+| Environment | Endpoint shape | Authentication | Renewal | Parameters and notable behaviour |
+|---|---|---|---|---|
+| **OpenAI** | Public `/v1` API | Provider API key in an environment variable | Rotate according to provider policy | Standard OpenAI parameters; provider rejects unsupported fields. The advisor works well when the selected model reliably returns structured JSON. |
+| **Ollama** | Usually `http://host:11434` | Commonly none on a trusted local network | Not applicable | LiteLLM translates supported controls. `keep_alive` affects how long a model remains loaded. Local CPU/RAM/process metrics are available only when Ollama is on the same machine. |
+| **Cloudera AI Inference Cloud** | Model domain plus `/namespaces/.../endpoints/.../v1` | CDP token or endpoint credential | UMS token can be generated from public IAM using an access key/private key | Discovery URL is the model origin, never the central console. Public CA trust is expected. |
+| **Cloudera AI Inference on-premises** | Private inference origin plus `/namespaces/.../endpoints/<endpoint>/v1/chat/completions` | Existing UMS CDP_TOKEN, supported Knox API key, or automatically generated UMS token | Automatic mode signs private Control Plane IAM with access key/private key | Private CA chains are common. The remote JSON `model` must be the strict published identifier, for example `openai/gpt-oss-20b`, not merely the endpoint name. |
+| **Cloudera AI Workbench** | Deployment URL using `POST /model?accessKey=...` | Workbench access key in its published URL/API credential | Administrative rotation; not a UMS renewal flow | Payload is wrapped under `request`. Defaults cap output at 512 tokens and disable long thinking for basic probes. Zero retries avoids overlapping orphaned generations. |
+| **NVIDIA NIM** | OpenAI-compatible `/v1` endpoint | Deployment-specific bearer credential | Provider-specific | Top K, Min P, repetition, and reasoning options may travel via `extra_body`. Embedding NIMs may require distinct query and passage input roles. |
+| **vLLM** | OpenAI-compatible `/v1` endpoint | Deployment-specific | Provider-specific | Provider extras are supported, but request-time context settings cannot exceed deployment-time `--max-model-len`. Chat-template reasoning support is model-specific. |
+| **Triton / KServe v2 OIP** | `/v2/models/<model>/infer` and readiness routes | Deployment-specific | Provider-specific | Tensor names, types, and shapes are model-specific. Generic OpenAI chat parameters do not apply; supply a real inference JSON or use readiness-only validation. |
+
+### Cloudera URL rules that prevent most 404 errors
+
+- **Cloud discovery:** use the model endpoint origin such as `https://ml-....cloudera.site`, not `console.cdp.cloudera.com`.
+- **On-premises discovery:** use the AI Inference origin such as `https://ares-inference.apps.company.example`, not the Control Plane console.
+- **On-premises token generation:** use the Management Console/Control Plane origin such as `https://console-cdp.apps.company.example`. The CDP CLI appends the private IAM API path.
+- **Runtime inference:** retain the namespace and endpoint path published by Cloudera. Cloud and on-premises URLs are not interchangeable.
+- **Strict model ID:** the endpoint name selects the deployed endpoint; the JSON `model` selects the engine's internal model. For GPT-OSS, the latter may be `openai/gpt-oss-20b`. IA Gateway preserves the nested LiteLLM/provider prefixes required to send that exact value.
+
+### TLS in private environments
+
+Installing a self-signed root certificate in a laptop browser does not install it inside the Cloudera application container. Configure one of the following per connection:
+
+1. **System trust** for publicly trusted or platform-installed corporate roots.
+2. **Private CA bundle** with root and intermediate PEM certificates. This is the production-safe choice for a private PKI.
+3. **Do not verify** only for a short-lived laboratory environment. The exception is scoped to explicitly configured model hosts rather than disabling TLS globally.
+
+The same policy is applied to token generation, discovery, endpoint probes, pre-save validation, and live inference. This consistency prevents the common failure where discovery succeeds but adding or calling the model fails later with `CERTIFICATE_VERIFY_FAILED`.
+
+### RAG retrieval is not chat generation
+
+If a RAG request can answer questions about one document but cannot summarize or compare four documents, the likely bottleneck is retrieval breadth rather than the chat model's `top_k` sampling parameter. Increase the retriever/vector-store `top_k`, verify that all documents finished indexing, inspect chunk size and overlap, and ensure the combined retrieved context fits the model window. The chat model's generation `top_k` controls token sampling and does not select knowledge-base chunks.
+
+For asymmetric embedding models, index document chunks with the **passage** alias and encode questions with the **query** alias. Mixing those roles can reduce recall even when indexing reports success.
+
+## 4. Operations, troubleshooting, and reference
 
 ## Operations
 
@@ -492,6 +703,35 @@ For CDP Public Cloud in `us-west-1`, use `https://iamapi.us-west-1.altus.clouder
 **Ports are reported as identical**
 
 Set only the public Cloudera application port or `IA_GATEWAY_PORT`. Keep the internal defaults `18080` and `14000`, or assign three distinct values.
+
+### Troubleshooting playbook
+
+| Symptom | Most likely cause | What to verify |
+|---|---|---|
+| `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate` | The application container does not trust the private root/intermediate CA | Select Private CA, paste the complete PEM chain, and test token generation, discovery, model probe, and live call |
+| `Missing Authority Key Identifier` | A legacy corporate certificate conflicts with strict X.509 checks | Use the connection CA bundle; IA Gateway preserves certificate and hostname verification while applying compatible strictness for that host |
+| Model probe returns 404 “model does not exist” | Endpoint name was used as the JSON model identifier | Compare Cloudera's example `curl`; preserve the exact `model`, including `openai/` or `nvidia/` prefixes |
+| Advisor works with OpenAI but fails with a Workbench model | The Workbench wrapper rejected roles, parameters, size, or reasoning behaviour | Inspect the returned diagnostic roles/parameter list; use the Workbench compatibility profile and a short non-thinking response |
+| RAG answers one document but not a comparison | Too few chunks retrieved, incomplete indexing, or context overflow | Wait for indexing, raise retriever `top_k`, check chunking and query/passage roles, then inspect the final context size |
+| First request times out and later calls remain blocked | Model load or an orphaned long generation occupies the replica | Warm the model, shorten output, disable retries for Workbench, and check replica logs/capacity |
+| Token works now but later expires | An opaque credential was saved without automatic IAM generation | Configure UMS automatic renewal, or enter an administrative expiry date and rotate the opaque API key before it |
+| Load test has high correctness errors but few HTTP errors | The backend is available but answers deteriorate under load | Reduce sustainable concurrency, inspect TTFT/latency by stage, and repeat with representative prompt/output lengths |
+
+When escalating a provider problem, export the load-test JSON or daily Excel, capture the LiteLLM technical error, and include the sanitized effective parameters. Do not include tokens, private keys, or raw authorization headers.
+
+### Operational checklist
+
+- Back up `config.yaml` and `runtime/cloudera.sqlite3` according to the environment's recovery policy.
+- Monitor token renewal state and opaque-key rotation dates before they become incidents.
+- Re-run contract tests after provider, model, Cloudera AI, LiteLLM, NIM, or vLLM upgrades.
+- Establish load baselines per model, replica count, guardrail policy, and representative prompt profile.
+- Restrict the public `/v1/*` URL with workspace/ingress controls until an explicit client API-key policy is enabled.
+- Treat prompt and response logs as potentially sensitive data and define retention accordingly.
+- Use a trusted ingress certificate in production; reserve the generated self-signed certificate for local development.
+
+### Extension guide
+
+Add a provider by keeping four concerns independent: discovery metadata, runtime transport, secret lifecycle, and UI presentation. Implement provider calls in a focused adapter, normalize safe metadata for the browser, store mutable secrets outside YAML, and add a real contract test plus observability coverage. New UI text must include Spanish, English, and Italian entries in `static/i18n.js`; developer comments and documentation remain in English.
 
 ## Source map
 

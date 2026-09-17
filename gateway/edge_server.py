@@ -1,4 +1,4 @@
-"""Proxy HTTP streaming que publica panel y LiteLLM en un único puerto."""
+"""Streaming HTTP proxy that publishes the dashboard and LiteLLM on one port."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ HOP_BY_HOP_HEADERS = {
 
 
 def _client_ip(request: web.Request) -> str:
-    """Conserva la IP anunciada por el ingress sin quedarse con el loopback.
+    """Preserve the client IP announced by the ingress instead of its loopback.
 
     ``X-Envoy-External-Address`` es preferente en Cloudera/Istio. Como respaldo
     recorremos ``X-Forwarded-For`` de izquierda a derecha y descartamos sólo
@@ -60,7 +60,7 @@ def _client_ip(request: web.Request) -> str:
 
 
 def upstream_port(path: str, dashboard_port: int, litellm_port: int) -> int:
-    """Envía únicamente /v1 y sus descendientes directamente a LiteLLM."""
+    """Route only ``/v1`` and its descendants directly to LiteLLM."""
 
     return litellm_port if path == "/v1" or path.startswith("/v1/") else dashboard_port
 
@@ -77,13 +77,13 @@ def forwarded_headers(
         if name.lower() not in blocked
     )
     peer = request.remote or ""
-    # Este proceso es la frontera de confianza del servicio. Entrega al
-    # downstream una única IP normalizada para que Uvicorn no seleccione como
-    # cliente el último sidecar 127.0.0.6 de una cadena X-Forwarded-For.
+    # This process is the service trust boundary. It gives the downstream a
+    # single normalized address so Uvicorn cannot select the final 127.0.0.6
+    # sidecar in an X-Forwarded-For chain as the client.
     client_ip = _client_ip(request)
     headers["X-Forwarded-For"] = client_ip or peer
-    # Siempre sobrescribimos nuestra cabecera interna: el logger no consume
-    # directamente un valor X-IA-Gateway-Client-IP aportado desde Internet.
+    # Always overwrite our private header: the logger must never consume an
+    # X-IA-Gateway-Client-IP value supplied directly by an Internet client.
     if client_ip:
         headers["X-IA-Gateway-Client-IP"] = client_ip
     headers["X-Forwarded-Proto"] = request.headers.get("X-Forwarded-Proto", request.scheme)

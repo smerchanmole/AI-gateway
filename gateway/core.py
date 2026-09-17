@@ -1,4 +1,4 @@
-"""Dominio operativo del gateway: configuración, procesos, salud y métricas.
+"""Gateway operational domain: configuration, processes, health, and metrics.
 
 La idea pedagógica importante es separar *estar ejecutándose* de *estar listo*.
 Un proceso puede conservar un PID después de que su servidor haya fallado. Por
@@ -30,7 +30,7 @@ import psutil
 
 
 def environment_port(name: str, default: int) -> int:
-    """Lee un puerto de entorno con validación explícita y fallback local."""
+    """Read an environment port with explicit validation and a local fallback."""
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -44,10 +44,10 @@ def environment_port(name: str, default: int) -> int:
 
 
 class GatewayManager:
-    """Orquesta LiteLLM conservando `config.yaml` como fuente de verdad inmutable."""
+    """Orchestrate LiteLLM while keeping ``config.yaml`` as the immutable source of truth."""
 
     def __init__(self, root: Path) -> None:
-        """Centraliza todas las rutas generadas bajo `runtime/`."""
+        """Centralize every generated path under ``runtime/``."""
         self.root = root.resolve()
         self.source_config = self.root / "config.yaml"
         self.runtime_dir = self.root / "runtime"
@@ -58,8 +58,8 @@ class GatewayManager:
         self.dashboard_settings_file = self.runtime_dir / "dashboard_settings.json"
         self.restart_pending_file = self.runtime_dir / "config-restart-pending"
         self.host = "127.0.0.1"
-        # LiteLLM nunca ocupa el puerto publicado por Cloudera. El proxy atiende
-        # ese puerto único y reenvía /v1 directamente a este upstream interno.
+        # LiteLLM never binds the port published by Cloudera. The proxy owns
+        # that single port and forwards /v1 directly to this internal upstream.
         self.port = environment_port("IA_GATEWAY_LITELLM_PORT", 14000)
         self._metric_processes: dict[int, psutil.Process] = {}
         self._ollama_metric_processes: dict[int, psutil.Process] = {}
@@ -67,7 +67,7 @@ class GatewayManager:
         self.runtime_dir.mkdir(exist_ok=True)
 
     def process_log_path(self, day: date | None = None) -> Path:
-        """Calcula el fichero técnico diario usando el calendario de Madrid."""
+        """Select the daily technical log using the Europe/Madrid calendar."""
 
         selected = day or datetime.now(ZoneInfo("Europe/Madrid")).date()
         path = self.runtime_dir / "logs" / f"litellm-{selected.isoformat()}.log"
@@ -75,11 +75,11 @@ class GatewayManager:
         return path
 
     def clear_process_log(self, day: date | None = None) -> None:
-        """Vacía únicamente la jornada elegida, sin tocar logs de modelos."""
+        """Clear only the selected day without touching model request logs."""
         self.process_log_path(day).write_text("", encoding="utf-8")
 
     def _capture_process_output(self, process: subprocess.Popen) -> None:
-        """Añade hora Madrid a cada línea emitida por LiteLLM."""
+        """Prefix every LiteLLM line with its Europe/Madrid time."""
         if process.stdout is None:
             return
         with self.process_log_path().open("a", encoding="utf-8") as output:
@@ -89,7 +89,7 @@ class GatewayManager:
                 output.flush()
 
     def _source(self) -> dict[str, Any]:
-        """Carga y valida la forma mínima del contrato YAML del usuario."""
+        """Load and validate the minimum shape of the user-editable YAML contract."""
         if not self.source_config.exists():
             raise RuntimeError(f"No existe {self.source_config}")
         data = yaml.safe_load(self.source_config.read_text(encoding="utf-8")) or {}
@@ -99,7 +99,7 @@ class GatewayManager:
 
     @staticmethod
     def _validate_config(data: Any) -> dict[str, Any]:
-        """Valida el contrato editable antes de tocar la fuente de verdad."""
+        """Validate the editable contract before changing the source of truth."""
         if not isinstance(data, dict):
             raise RuntimeError("El YAML debe contener un objeto en el nivel raíz")
         model_list = data.get("model_list")
@@ -144,7 +144,7 @@ class GatewayManager:
         return data
 
     def validate_config_text(self, content: str) -> dict[str, Any]:
-        """Analiza el YAML sin modificarlo y resume lo que se aplicaría."""
+        """Analyze YAML without changing it and summarize what would be applied."""
         if len(content.encode("utf-8")) > 1_000_000:
             raise RuntimeError("El YAML no puede superar 1 MB")
         try:
@@ -155,7 +155,7 @@ class GatewayManager:
         referenced: set[str] = set()
 
         def visit(value: Any) -> None:
-            """Recorre contenedores YAML y acumula referencias de entorno."""
+            """Walk YAML containers and collect environment references."""
 
             if isinstance(value, dict):
                 for child in value.values():
@@ -175,7 +175,7 @@ class GatewayManager:
 
     @staticmethod
     def _activation_fingerprint(entry: dict[str, Any]) -> str:
-        """Firma estable de todo lo que puede modificar una inferencia."""
+        """Build a stable signature of everything that can alter inference."""
 
         clean = json.loads(json.dumps(entry, ensure_ascii=False, default=str))
         info = clean.get("model_info") or {}
@@ -185,7 +185,7 @@ class GatewayManager:
         return hashlib.sha256(encoded).hexdigest()
 
     def validate_model_activation_changes(self, content: str) -> None:
-        """Impide que el editor YAML active modelos nuevos o alterados sin sonda."""
+        """Prevent the YAML editor from activating new or changed models without a probe."""
 
         try:
             candidate = self._validate_config(yaml.safe_load(content))
@@ -206,18 +206,18 @@ class GatewayManager:
                 )
 
     def config_text(self) -> str:
-        """Devuelve el YAML fuente, incluidos comentarios y formato manual."""
+        """Return source YAML, preserving comments and manual formatting."""
         return self.source_config.read_text(encoding="utf-8")
 
     def dashboard_settings(self) -> dict[str, Any]:
-        """Expone sólo opciones propias del panel conservadas en el YAML fuente."""
+        """Expose only dashboard-specific options retained in the source YAML."""
 
         return dict(self._source().get("dashboard_settings") or {})
 
     def set_guardrail(self, enabled: bool, model: str, policy: str = "warn",
                       excluded_models: list[str] | None = None,
                       restart: bool = True) -> dict[str, Any]:
-        """Configura el filtro global y reutiliza la actualización transaccional."""
+        """Configure the global filter through the same transactional update path."""
 
         with self._config_lock:
             config = self._source()
@@ -245,7 +245,7 @@ class GatewayManager:
             return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
 
     def set_advisor(self, enabled: bool, model: str, restart: bool = True) -> dict[str, Any]:
-        """Selecciona el modelo que recomienda parámetros en el panel."""
+        """Select the model that recommends parameters in the dashboard."""
 
         with self._config_lock:
             config = self._source()
@@ -261,7 +261,7 @@ class GatewayManager:
             return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
 
     def update_config(self, content: str, restart: bool = True) -> dict[str, Any]:
-        """Valida, sustituye atómicamente y reinicia con rollback ante error."""
+        """Validate, replace atomically, and restart with rollback on failure."""
         self.validate_config_text(content)
 
         with self._config_lock:
@@ -292,7 +292,7 @@ class GatewayManager:
                     "restart_pending": self.restart_pending_file.exists()}
 
     def add_model(self, entry: dict[str, Any], fallback_model: str = "", restart: bool = True) -> dict[str, Any]:
-        """Añade un modelo mediante el mismo camino transaccional del editor."""
+        """Add a model through the editor's same transactional path."""
         with self._config_lock:
             config = self._source()
             entry = dict(entry)
@@ -311,7 +311,7 @@ class GatewayManager:
 
     @staticmethod
     def _set_fallback(config: dict[str, Any], source: str, target: str) -> None:
-        """Sustituye el fallback de un alias sin alterar los de otros modelos."""
+        """Replace one alias fallback without changing other models."""
         router = config.setdefault("router_settings", {})
         existing = router.get("fallbacks", [])
         router["fallbacks"] = [item for item in existing if not (isinstance(item, dict) and source in item)]
@@ -324,7 +324,7 @@ class GatewayManager:
 
     def update_model(self, current_name: str, entry: dict[str, Any], fallback_model: str = "",
                      restart: bool = True) -> dict[str, Any]:
-        """Modifica un modelo y repara todas las referencias si cambia el alias."""
+        """Update a model and repair every reference when its alias changes."""
         with self._config_lock:
             entry = dict(entry)
             managed_update = bool(entry.pop("_dashboard_managed_parameters", False))
@@ -390,7 +390,7 @@ class GatewayManager:
             return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
 
     def delete_model(self, name: str, restart: bool = True) -> dict[str, Any]:
-        """Elimina el alias y limpia fallbacks, guardrail y estado asociados."""
+        """Delete an alias and clear associated fallbacks, guardrail, and state."""
         with self._config_lock:
             config = self._source()
             before = len(config.get("model_list", []))
@@ -422,7 +422,7 @@ class GatewayManager:
             return self.update_config(yaml.safe_dump(config, sort_keys=False, allow_unicode=True), restart=restart)
 
     def apply_pending_config(self) -> dict[str, Any]:
-        """Reinicia explícitamente una configuración guardada sin aplicar."""
+        """Explicitly restart a saved configuration that has not been applied."""
         with self._config_lock:
             if self.process_alive():
                 self.stop()
@@ -431,7 +431,7 @@ class GatewayManager:
             return self.status()
 
     def _state(self) -> dict[str, Any]:
-        """Lee estado efímero; ante corrupción vuelve a un estado seguro vacío."""
+        """Read ephemeral state; corruption falls back to a safe empty state."""
         if not self.state_file.exists():
             return {"disabled_models": []}
         try:
@@ -441,20 +441,20 @@ class GatewayManager:
             return {"disabled_models": []}
 
     def models(self) -> list[dict[str, Any]]:
-        """Proyecta el YAML en datos de UI sin exponer parámetros sensibles."""
+        """Project YAML into UI data without exposing sensitive parameters."""
         disabled = set(self._state().get("disabled_models", []))
         source = self._source()
         fallback_map: dict[str, list[str]] = {}
         for mapping in (source.get("router_settings") or {}).get("fallbacks", []):
             if isinstance(mapping, dict):
                 fallback_map.update({str(k): [str(v) for v in values] for k, values in mapping.items() if isinstance(values, list)})
-        # Relacionamos cada API base con su conexión Cloudera para que el
-        # inventario no pierda el origen al convertir un endpoint a LiteLLM.
+        # Link each API base to its Cloudera connection so the inventory retains
+        # provenance when an endpoint is converted into a LiteLLM deployment.
         from gateway.cloudera import ClouderaCatalog
         try:
             connections = ClouderaCatalog(self.runtime_dir).connections()
         except RuntimeError:
-            # Un catálogo opcional dañado no debe ocultar el inventario YAML.
+            # A damaged optional catalog must not hide the YAML inventory.
             connections = []
         cloudera_origins = []
         for connection in connections:
@@ -467,8 +467,8 @@ class GatewayManager:
             params = entry.get("litellm_params") or {}
             model_info = entry.get("model_info") or {}
             provider_model = str(params.get("model", ""))
-            # LiteLLM soporta muchos endpoints. Para esta UI basta una heurística
-            # explícita que distingue los embeddings locales conocidos del chat.
+            # LiteLLM supports many endpoints. This UI needs only an explicit
+            # heuristic that separates known local embeddings from chat models.
             searchable_name = f"{name} {provider_model} {model_info.get('dashboard_task', '')}".lower()
             api_base = str(params.get("api_base", ""))
             api_hostname = (urlparse(api_base).hostname or "").lower()
@@ -526,7 +526,7 @@ class GatewayManager:
         return result
 
     def _ollama_cpu_percent(self) -> float | None:
-        """Mide CPU compartida de Ollama como porcentaje de la máquina completa."""
+        """Measure shared Ollama CPU as a percentage of the entire machine."""
         try:
             candidates = []
             for process in psutil.process_iter(["pid", "name"]):
@@ -548,7 +548,7 @@ class GatewayManager:
             return None
 
     def model_resources(self) -> list[dict[str, Any]]:
-        """Combina procesos locales con `/api/ps` sin fingir métricas remotas."""
+        """Combine local processes with ``/api/ps`` without inventing remote metrics."""
         models = self.models()
         ollama_cpu = self._ollama_cpu_percent()
         bases = {model["api_base"].rstrip("/") for model in models if model["provider_model"].startswith("ollama/")}
@@ -589,7 +589,7 @@ class GatewayManager:
 
     @staticmethod
     def _host_memory_free_percent(api_base: str) -> float | None:
-        """Devuelve RAM libre sólo cuando Ollama reside en esta máquina.
+        """Return free RAM only when Ollama runs on this machine.
 
         `/api/ps` informa del tamaño de los modelos, pero no de la RAM total del
         host. Para un servidor remoto no debemos presentar la memoria del panel
@@ -602,18 +602,18 @@ class GatewayManager:
         return round(memory.available / memory.total * 100, 1) if memory.total else None
 
     def _write_state(self, disabled: set[str]) -> None:
-        """Persiste la lista de aliases apagados mediante sustitución atómica."""
+        """Persist disabled aliases through atomic replacement."""
 
         temp = self.state_file.with_suffix(".tmp")
         temp.write_text(json.dumps({"disabled_models": sorted(disabled)}, indent=2), encoding="utf-8")
         temp.replace(self.state_file)
 
     def missing_environment_variables(self) -> list[str]:
-        """Descubre referencias `os.environ/VAR` antes de lanzar LiteLLM."""
+        """Discover ``os.environ/VAR`` references before starting LiteLLM."""
         referenced: set[str] = set()
 
         def visit(value: Any) -> None:
-            """Busca referencias ``os.environ`` dentro de estructuras anidadas."""
+            """Find ``os.environ`` references inside nested structures."""
 
             if isinstance(value, dict):
                 for child in value.values():
@@ -626,8 +626,8 @@ class GatewayManager:
 
         source = self._source()
         disabled = set(self._state().get("disabled_models", []))
-        # Un proveedor desactivado no participa en la configuración activa y
-        # no debe impedir el arranque por una credencial que nunca se usará.
+        # A disabled provider is absent from the active configuration and must
+        # not block startup because of a credential that will never be used.
         source["model_list"] = [
             item for item in source.get("model_list", [])
             if item.get("model_name") not in disabled
@@ -635,8 +635,8 @@ class GatewayManager:
         visit(source)
         from gateway.cloudera import ClouderaCatalog
         local_credentials = ClouderaCatalog(self.runtime_dir).environment()
-        # Son opciones heredadas de LiteLLM que IA Gateway desactiva: la única
-        # persistencia admitida es el SQLite local gestionado por la aplicación.
+        # IA Gateway disables these inherited LiteLLM options: the only allowed
+        # persistence is the application-managed local SQLite database.
         optional = {"LITELLM_MASTER_KEY", "DATABASE_URL"}
         return sorted(
             name for name in referenced
@@ -644,7 +644,7 @@ class GatewayManager:
         )
 
     def _write_active_config(self) -> None:
-        """Genera una configuración filtrada y carga el callback junto a ella."""
+        """Generate a filtered configuration and load the callback beside it."""
         config = self._source()
         from gateway.cloudera import ClouderaCatalog
         cloudera_catalog = ClouderaCatalog(self.runtime_dir)
@@ -654,10 +654,9 @@ class GatewayManager:
             item for item in config.get("model_list", [])
             if item.get("model_name") not in disabled
         ]
-        # Los endpoints OpenAI-compatible de Cloudera validan estrictamente el
-        # identificador interno del modelo. Conservamos aquí la traducción para
-        # que el callback sustituya el alias sólo después de que el router haya
-        # elegido el deployment correcto.
+        # Cloudera OpenAI-compatible endpoints strictly validate the internal
+        # model identifier. Keep the mapping here so the callback replaces the
+        # alias only after the router has selected the correct deployment.
         provider_models: dict[str, str] = {}
         provider_api_key_env: dict[str, str] = {}
         model_parameters: dict[str, dict[str, Any]] = {}
@@ -677,9 +676,9 @@ class GatewayManager:
                     provider_model = f"openai/{remote_model}"
                 elif (model_info.get("dashboard_cloudera_kind") == "inference"
                       and provider_model.lower().startswith("openai/gpt-oss")):
-                    # Migra los borradores creados por la normalización antigua:
-                    # CAI exige `openai/gpt-oss-*` dentro del JSON, además del
-                    # prefijo exterior que LiteLLM usa para elegir proveedor.
+                    # Migrate drafts created by the former normalization logic:
+                    # CAI requires `openai/gpt-oss-*` inside the JSON in addition
+                    # to LiteLLM's outer provider-selection prefix.
                     provider_model = f"openai/{provider_model}"
                 params["model"] = provider_model
             tls_verify = cloudera_catalog.tls_verification_for(
@@ -720,17 +719,16 @@ class GatewayManager:
             ) or bool(re.search(r"(?:nv-embedqa|retriever).*(?:-query|-passage)$", provider_model,
                                 flags=re.IGNORECASE))
             if is_nim_embedding:
-                # LiteLLM 1.83.9 envía encoding_format=null cuando el cliente
-                # lo omite; NVIDIA NIM sólo admite float o base64.
+                # LiteLLM 1.83.9 sends encoding_format=null when omitted by the
+                # client; NVIDIA NIM accepts only float or base64.
                 params.setdefault("encoding_format", "float")
             if is_workbench:
                 has_workbench_models = True
-                # Model Service suele imponer un deadline cercano a 30 s. Una
-                # repetición automática deja varias generaciones vivas en la
-                # misma réplica y puede bloquear las llamadas posteriores.
+                # Model Service commonly imposes a deadline near 30 seconds. An
+                # automatic retry leaves multiple generations alive on the same
+                # replica and can block later calls.
                 params["num_retries"] = 0
-                # Compatibilidad con borradores antiguos, que se guardaban como
-                # custom/<modelo> antes de existir este adaptador.
+                # Support old drafts saved as custom/<model> before this adapter existed.
                 if provider_model.startswith("custom/"):
                     params["model"] = f"cloudera_workbench/{provider_model.removeprefix('custom/')}"
             if provider_model.startswith("openai/") and api_key.startswith("os.environ/CLOUDERA_"):
@@ -738,9 +736,9 @@ class GatewayManager:
                 if public_alias:
                     provider_models[public_alias] = provider_model
                     provider_api_key_env[public_alias] = api_key.removeprefix("os.environ/")
-                # `extra_body.model` no sustituye el campo superior que genera
-                # el SDK OpenAI y puede producir dos valores contradictorios.
-                # Conservamos el resto: vLLM/NIM reciben aquí muestreo y thinking.
+                # `extra_body.model` does not replace the top-level field emitted
+                # by the OpenAI SDK and may create two contradictory values. Keep
+                # everything else: vLLM/NIM receive sampling and thinking here.
                 extra_body = dict(params.get("extra_body") or {})
                 extra_body.pop("model", None)
                 if extra_body:
@@ -751,7 +749,7 @@ class GatewayManager:
         current_callbacks = settings.get("callbacks", [])
         if isinstance(current_callbacks, str):
             current_callbacks = [current_callbacks]
-        # LiteLLM resuelve callbacks Python desde el directorio del config activo.
+        # LiteLLM resolves Python callbacks from the active config directory.
         callback = "litellm_callback.dashboard_logger"
         settings["callbacks"] = list(dict.fromkeys([*current_callbacks, callback]))
         if has_workbench_models:
@@ -769,9 +767,9 @@ class GatewayManager:
             settings["custom_provider_map"] = custom_providers
         config["litellm_settings"] = settings
         general_settings = dict(config.get("general_settings") or {})
-        # La autenticación de entrada pertenece a la WebApp Cloudera y la
-        # persistencia a nuestro SQLite. Eliminamos opciones heredadas para que
-        # ni una master key ni una BBDD externa puedan activarse accidentalmente.
+        # Inbound authentication belongs to the Cloudera WebApp and persistence
+        # belongs to our SQLite database. Remove inherited options so neither a
+        # master key nor an external database can be enabled accidentally.
         general_settings.pop("master_key", None)
         general_settings.pop("database_url", None)
         if general_settings:
@@ -813,9 +811,9 @@ class GatewayManager:
             encoding="utf-8",
         )
         shutil.copy2(Path(__file__).with_name("litellm_callback.py"), self.runtime_dir / "litellm_callback.py")
-        # Se carga al iniciar el intérprete hijo, antes de que LiteLLM cree y
-        # cachee el transporte OpenAI/aiohttp. El callback por sí solo llega
-        # demasiado tarde en algunas versiones de LiteLLM.
+        # Load this when the child interpreter starts, before LiteLLM creates and
+        # caches its OpenAI/aiohttp transport. In some LiteLLM versions, loading
+        # it from the callback alone is too late.
         shutil.copy2(
             Path(__file__).with_name("litellm_sitecustomize.py"),
             self.runtime_dir / "sitecustomize.py",
@@ -827,7 +825,7 @@ class GatewayManager:
         )
 
     def _process_environment(self) -> dict[str, str]:
-        """Construye el entorno de LiteLLM respetando la política del YAML.
+        """Build the LiteLLM environment while respecting YAML policy.
 
         Una cadena vacía no desactiva la autenticación en LiteLLM: se interpreta
         como una master key válida y obliga a enviar ``Authorization``. Quitamos
@@ -841,10 +839,10 @@ class GatewayManager:
         env.pop("DATABASE_URL", None)
         env["LITELLM_MODE"] = "PRODUCTION"
         env["IA_GATEWAY_ROOT"] = str(self.root)
-        # LiteLLM 1.83 no propaga siempre `ssl_verify: false` del deployment a
-        # su cliente OpenAI/aiohttp compartido. Comunicamos sólo los hosts de
-        # modelos que lo han solicitado expresamente; nunca se desactiva TLS
-        # para proveedores Cloud u otros destinos del mismo gateway.
+        # LiteLLM 1.83 does not always propagate a deployment's `ssl_verify:
+        # false` to its shared OpenAI/aiohttp client. Communicate only hosts that
+        # explicitly requested it; TLS verification is never disabled for Cloud
+        # providers or other destinations served by the same gateway.
         try:
             active = yaml.safe_load(self.active_config.read_text(encoding="utf-8")) or {}
             insecure_hosts = sorted({
@@ -867,12 +865,12 @@ class GatewayManager:
         return env
 
     def sync_cloudera_credentials(self) -> bool:
-        """Confirma el modo dinámico: el callback lee SQLite en cada petición."""
+        """Confirm dynamic mode: the callback reads SQLite on every request."""
 
         return True
 
     def _pid(self) -> int | None:
-        """Lee el PID gestionado; un valor ausente o corrupto equivale a parado."""
+        """Read the managed PID; a missing or corrupt value means stopped."""
 
         try:
             return int(self.pid_file.read_text(encoding="utf-8").strip())
@@ -881,7 +879,7 @@ class GatewayManager:
 
     @staticmethod
     def _alive(pid: int) -> bool:
-        """Comprueba existencia del proceso sin enviarle una señal destructiva."""
+        """Check process existence without sending a destructive signal."""
 
         try:
             os.kill(pid, 0)
@@ -890,11 +888,11 @@ class GatewayManager:
             return False
 
     def is_running(self) -> bool:
-        """Sólo es verdadero si el supervisor vive y el socket está listo."""
+        """Return true only when the supervisor lives and the socket is ready."""
         return self.process_alive() and self._port_ready()
 
     def process_alive(self) -> bool:
-        """Comprueba el PID guardado y elimina referencias obsoletas."""
+        """Check the saved PID and remove stale references."""
         pid = self._pid()
         if pid and self._alive(pid):
             return True
@@ -902,7 +900,7 @@ class GatewayManager:
         return False
 
     def _port_ready(self, timeout: float = 0.25) -> bool:
-        """Usa una conexión TCP corta como prueba de disponibilidad objetiva."""
+        """Use a short TCP connection as an objective availability check."""
         try:
             with socket.create_connection((self.host, self.port), timeout=timeout):
                 return True
@@ -910,7 +908,7 @@ class GatewayManager:
             return False
 
     def _metrics(self, pid: int | None) -> dict[str, float | int | None]:
-        """Agrega CPU y RSS del árbol, con degradación segura ante permisos."""
+        """Aggregate CPU and RSS for the process tree, degrading safely on permission errors."""
         if not pid:
             self._metric_processes.clear()
             return {"cpu_percent": None, "memory_gb": None, "cores": psutil.cpu_count() or 1}
@@ -944,7 +942,7 @@ class GatewayManager:
             return {"cpu_percent": None, "memory_gb": None, "cores": psutil.cpu_count() or 1}
 
     def status(self) -> dict[str, Any]:
-        """Construye el snapshot que la interfaz renueva cada tres segundos."""
+        """Build the snapshot refreshed by the UI every three seconds."""
         process_alive = self.process_alive()
         pid = self._pid() if process_alive else None
         port_ready = self._port_ready()
@@ -962,7 +960,7 @@ class GatewayManager:
         }
 
     def persistence_status(self) -> dict[str, Any]:
-        """Publica el único modo soportado: SQLite local y tokens dinámicos."""
+        """Report the sole supported mode: local SQLite and dynamic tokens."""
 
         dynamic_tokens = self.sync_cloudera_credentials()
         return {
@@ -972,7 +970,7 @@ class GatewayManager:
         }
 
     def active_model_names(self) -> list[str]:
-        """Lee los alias cargados, diferenciándolos de cambios YAML pendientes."""
+        """Read loaded aliases while distinguishing pending YAML changes."""
 
         try:
             config = yaml.safe_load(self.active_config.read_text(encoding="utf-8")) or {}
@@ -985,7 +983,7 @@ class GatewayManager:
         ]
 
     def start(self) -> dict[str, Any]:
-        """Arranca el CLI del `.venv` y espera activamente a que abra el puerto."""
+        """Start the ``.venv`` CLI and actively wait for it to open the port."""
         if self.process_alive():
             if self.is_running():
                 return self.status()
@@ -1033,8 +1031,8 @@ class GatewayManager:
         )
         threading.Thread(target=self._capture_process_output, args=(process,), daemon=True).start()
         self.pid_file.write_text(str(process.pid), encoding="utf-8")
-        # `monotonic()` no cambia si el reloj del sistema se sincroniza durante
-        # el arranque, por eso es preferible a comparar timestamps de pared.
+        # `monotonic()` is unaffected if the system clock synchronizes during
+        # startup, so it is safer than comparing wall-clock timestamps.
         deadline = time.monotonic() + 30
         credential_error: RuntimeError | None = None
         while time.monotonic() < deadline:
@@ -1045,8 +1043,8 @@ class GatewayManager:
                     self.sync_cloudera_credentials()
                     return self.status()
                 except RuntimeError as exc:
-                    # Uvicorn puede abrir el socket antes de que LiteLLM termine
-                    # de registrar sus rutas y callbacks.
+                    # Uvicorn may open the socket before LiteLLM finishes
+                    # registering its routes and callbacks.
                     credential_error = exc
             time.sleep(0.25)
         self.stop()
@@ -1056,7 +1054,7 @@ class GatewayManager:
         raise RuntimeError(f"LiteLLM no pudo abrir el puerto {self.port}. Últimas líneas:\n{tail}")
 
     def stop(self) -> dict[str, Any]:
-        """Aplica terminación amable y escala a SIGKILL sólo como último recurso."""
+        """Attempt graceful termination and escalate to SIGKILL only as a last resort."""
         pid = self._pid()
         if not pid or not self._alive(pid):
             self.pid_file.unlink(missing_ok=True)
@@ -1084,7 +1082,7 @@ class GatewayManager:
         return self.status()
 
     def set_model(self, name: str, enabled: bool) -> dict[str, Any]:
-        """Persiste el override y reinicia para aplicar la topología nueva."""
+        """Persist the override and restart to apply the new topology."""
         names = {model["name"] for model in self.models()}
         if name not in names:
             raise KeyError(name)
@@ -1098,7 +1096,7 @@ class GatewayManager:
         return next(model for model in self.models() if model["name"] == name)
 
     def process_log(self, lines: int = 100, day: date | None = None) -> str:
-        """Devuelve la cola del log sin códigos ANSI propios de terminal."""
+        """Return the log tail without terminal-specific ANSI codes."""
         path = self.process_log_path(day)
         if not path.exists() and (day is None or day == datetime.now(ZoneInfo("Europe/Madrid")).date()):
             path = self.output_log
@@ -1107,7 +1105,7 @@ class GatewayManager:
         return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", content)
 
     def process_log_days(self) -> list[str]:
-        """Lista las jornadas técnicas existentes, incluida la fecha de hoy."""
+        """List existing technical log days, including today."""
 
         days = {path.stem.removeprefix("litellm-") for path in (self.runtime_dir / "logs").glob("litellm-????-??-??.log")}
         if self.output_log.exists(): days.add(datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat())

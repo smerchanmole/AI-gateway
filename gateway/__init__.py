@@ -1,6 +1,5 @@
-"""Panel de control local para LiteLLM."""
-"""Componentes de dominio de IA Gateway.
+"""Domain components for the IA Gateway local LiteLLM control plane.
 
-El paquete permite que FastAPI y el callback cargado por LiteLLM compartan las
-mismas reglas sin duplicar código ni mezclar interfaz con infraestructura.
+The package lets FastAPI and the callback loaded by LiteLLM share the same
+rules without duplicating code or mixing presentation and infrastructure.
 """

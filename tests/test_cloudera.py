@@ -70,7 +70,7 @@ def test_stale_edit_can_recreate_connection_with_new_credential(tmp_path):
 
 def test_expired_jwt_is_reported_before_discovery(tmp_path):
     catalog = ClouderaCatalog(tmp_path)
-    # JWT sintético sin firma: sólo probamos la lectura informativa de `exp`.
+    # Unsigned synthetic JWT: this test covers only informative `exp` parsing.
     expired = "e30.eyJleHAiOjF9.signature"
     try:
         catalog.save_connection("Caducada", "inference", "https://ml.example", expired)
@@ -794,4 +794,4 @@ def test_cloud_renewal_timeout_becomes_controlled_runtime_error(tmp_path, monkey
         raise AssertionError("El timeout del CDP CLI debe convertirse en un error controlado")
 
 
-"""Pruebas aisladas del CRUD, descubrimiento, autenticación y renovación CDP."""
+"""Isolated tests for CRUD, discovery, authentication, and CDP renewal."""

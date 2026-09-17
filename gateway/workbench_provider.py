@@ -1,8 +1,8 @@
-"""Adaptador LiteLLM para el contrato HTTP de Cloudera AI Workbench.
+"""LiteLLM adapter for the Cloudera AI Workbench HTTP contract.
 
-Workbench publica modelos como ``POST /model`` y envuelve la entrada OpenAI
-bajo ``request``. Este adaptador conserva hacia fuera la API OpenAI de
-LiteLLM, pero traduce ese único salto de protocolo.
+Workbench publishes models as ``POST /model`` and wraps OpenAI input under
+``request``. This adapter preserves LiteLLM's outward-facing OpenAI API while
+translating that single protocol hop.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ _RESERVED_EXTRA_PARAMETERS = {"api_base", "api_key", "authorization", "headers",
 
 
 def _normalize_api_base(value: str) -> str:
-    """Normaliza espacios de copia/pegado sin registrar el accessKey secreto."""
+    """Normalize copy/paste whitespace without logging the secret access key."""
 
     parsed = urllib.parse.urlsplit(value.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -63,7 +63,7 @@ def _normalize_api_base(value: str) -> str:
 
 
 def _timeout_seconds(value: Any) -> float:
-    """Normaliza float/httpx.Timeout sin acoplar el adaptador a su internals."""
+    """Normalize float/httpx.Timeout values without coupling to its internals."""
 
     if isinstance(value, (int, float)):
         return float(value)
@@ -91,8 +91,8 @@ def _request_body(messages: list, optional_params: dict[str, Any]) -> dict[str, 
         request["max_tokens"] = min(max_tokens, _MAX_MAX_TOKENS)
     else:
         request["max_tokens"] = _DEFAULT_MAX_TOKENS
-    # Son los valores del ejemplo generado por Workbench y evitan que Qwen
-    # active razonamiento largo en una prueba básica del gateway.
+    # These match the Workbench-generated example and prevent Qwen from
+    # enabling long reasoning during a basic gateway probe.
     request.setdefault("enable_thinking", False)
     request.setdefault("reasoning_effort", "low")
     return {"request": request}
@@ -131,7 +131,7 @@ def _unwrap(payload: Any, status_code: int) -> dict[str, Any]:
 
 
 class ClouderaWorkbenchLLM(CustomLLM):
-    """Traduce chat completions entre LiteLLM y Model Service."""
+    """Translate chat completions between LiteLLM and Model Service."""
 
     def completion(self, model: str, messages: list, api_base: str, model_response: ModelResponse,
                    optional_params: dict, api_key: str | None = None, headers: dict | None = None,

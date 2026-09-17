@@ -1,4 +1,4 @@
-"""Exportación XLSX sin dependencias externas.
+"""Dependency-free XLSX export.
 
 XLSX es un conjunto de documentos XML dentro de un ZIP. Este escritor pequeño
 genera una hoja ejecutiva con KPIs arriba y el detalle auditable debajo.
@@ -15,7 +15,7 @@ from xml.sax.saxutils import escape
 
 
 def _cell(ref: str, value: Any, style: int = 0) -> str:
-    """Genera una celda OOXML escapada y conserva números como números."""
+    """Generate an escaped OOXML cell while preserving numeric values."""
 
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return f'<c r="{ref}" s="{style}"><v>{value}</v></c>'
@@ -24,7 +24,7 @@ def _cell(ref: str, value: Any, style: int = 0) -> str:
 
 
 def _column(index: int) -> str:
-    """Convierte índices humanos (1, 27) en columnas Excel (A, AA)."""
+    """Convert human indices (1, 27) to Excel columns (A, AA)."""
 
     result = ""
     while index:
@@ -34,7 +34,7 @@ def _column(index: int) -> str:
 
 
 def build_logs_xlsx(model: str, day: str, rows: list[dict[str, Any]], kpis: dict[str, Any]) -> bytes:
-    """Construye un XLSX autocontenido sin depender de una suite ofimática.
+    """Build a self-contained XLSX file without requiring an office suite.
 
     Un fichero ``.xlsx`` es un ZIP de piezas XML relacionadas. Generarlo aquí
     mantiene la instalación ligera y permite controlar cabeceras, filtros,

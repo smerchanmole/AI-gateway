@@ -245,7 +245,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 #gateway-button.stop:hover { background: #fb8a9d; }
 
 section { padding-top: 48px; }
-/* 2. Navegación principal: una única barra para las tres vistas de la SPA. */
+/* 2. Main navigation: one bar shared by all three SPA views. */
 .primary-tabs { display: flex; gap: 8px; margin-top: 24px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 16px; background: rgba(7,17,31,.9); box-shadow: var(--shadow); }
 .primary-tab { min-width: 0; flex: 1; color: #d8e5f3; background: transparent; }
 .primary-tab.active { color: white; background: var(--orange-600); }
@@ -263,7 +263,7 @@ section { padding-top: 48px; }
   backdrop-filter: blur(10px);
 }
 
-/* 3. Modelos y recursos: tarjetas adaptables con semántica de semáforo. */
+/* 3. Models and resources: responsive cards with traffic-light semantics. */
 .model-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
 .model-card {
   position: relative;
@@ -428,7 +428,7 @@ textarea:focus, select:focus { outline: 2px solid var(--cyan); border-color: tra
 .test-result pre { padding: 15px; }
 
 .config-grid { display: grid; grid-template-columns: minmax(320px, 0.82fr) minmax(420px, 1.18fr); gap: 16px; }
-/* 4. Configuración: CRUD, guardrail, integración Cloudera y YAML avanzado. */
+/* 4. Configuration: CRUD, guardrail, Cloudera integration, and advanced YAML. */
 .config-panel {
   min-width: 0;
   padding: 20px;
@@ -573,7 +573,7 @@ dialog::backdrop { background: rgba(3,8,18,.72); backdrop-filter: blur(3px); }
 .backup-file input::file-selector-button { margin-right: 10px; padding: 7px 10px; border: 0; border-radius: 7px; color: #dbeafe; background: var(--ink-800); cursor: pointer; }
 .backup-hint { margin: 12px 0 7px; color: #91a8bd; font-size: 10px; }
 
-/* 5. Batería: configuración compacta y telemetría de carga en tiempo real. */
+/* 5. Load testing: compact controls and live load telemetry. */
 .benchmark-section { margin-top: 18px; }
 .benchmark-title { align-items: flex-end; }
 .benchmark-title .eyebrow { color: var(--navy-on-orange); }
@@ -657,7 +657,7 @@ dialog::backdrop { background: rgba(3,8,18,.72); backdrop-filter: blur(3px); }
 .benchmark-levels th:first-child, .benchmark-levels td:first-child { text-align: left; }
 .benchmark-errors { margin: 0; padding: 9px 14px 12px 30px; color: #fecdd3; font-size: 9px; }
 
-/* 6. Observabilidad: pestañas, KPIs, histograma horario y tabla auditable. */
+/* 6. Observability: tabs, KPIs, hourly histogram, and auditable table. */
 .logs-section { margin-top: 18px; }
 .log-toolbar { display: flex; align-items: flex-end; gap: 9px; }
 .log-toolbar label { display: grid; gap: 4px; color: var(--navy-on-orange); font-size: 10px; font-weight: 800; }

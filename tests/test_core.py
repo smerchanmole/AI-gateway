@@ -305,7 +305,7 @@ def test_workbench_model_loads_custom_provider_and_migrates_old_prefix(tmp_path)
 
 
 def test_cloudera_callback_logs_with_public_alias_after_provider_rewrite(tmp_path, monkeypatch):
-    """El modelo estricto enviado a CDP no debe convertirse en la clave del log."""
+    """The strict model sent to CDP must not become the public log key."""
 
     runtime = tmp_path / "runtime"
     runtime.mkdir()
@@ -906,4 +906,4 @@ def test_delete_model_cleans_references_and_disables_guardrail(tmp_path):
     assert [item["model_name"] for item in updated["model_list"]] == ["uno"]
     assert updated["router_settings"].get("fallbacks") is None
     assert updated["dashboard_settings"]["guardrail"]["enabled"] is False
-"""Pruebas unitarias de configuración, procesos, observabilidad y exportación."""
+"""Unit tests for configuration, processes, observability, and export."""

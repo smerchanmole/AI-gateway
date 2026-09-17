@@ -37,21 +37,21 @@ let currentBenchmark = null;
  * `escapeHtml`. Estas dos reglas reducen errores de red y riesgos XSS.
  */
 
-/** Escapar texto antes de insertarlo como HTML evita XSS desde prompts o logs. */
+/** Escaping text before HTML insertion prevents XSS from prompts or logs. */
 const escapeHtml = (value) => String(value ?? "").replace(
   /[&<>'"]/g,
   (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character],
 );
 
-/** Único punto de acceso HTTP: normaliza tanto errores JSON como texto plano. */
+/** Single HTTP access point: normalize both JSON errors and plain text. */
 async function api(url, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   const headers = { "Content-Type": "application/json", "Accept-Language": window.IAGatewayI18n?.language || "es", ...(options.headers || {}) };
   let body = options.body;
   if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
     headers["X-CSRF-Token"] = csrfToken;
-    // Redundancia deliberada para proxies Cloudera que retiren cabeceras X-*.
-    // El token permanece en el cuerpo y nunca se incorpora a la URL.
+    // Deliberate redundancy for Cloudera proxies that strip X-* headers.
+    // The token remains in the body and is never added to the URL.
     if (headers["Content-Type"].startsWith("application/json")) {
       let payload = {};
       if (typeof body === "string" && body.length) payload = JSON.parse(body);
@@ -67,19 +67,19 @@ async function api(url, options = {}) {
     credentials: "same-origin",
   });
   if (!response.ok) {
-    // El cuerpo de una Response es un stream y sólo puede consumirse una vez.
-    // Leemos texto primero y, si procede, interpretamos esa misma copia como JSON.
+    // A Response body is a stream and can be consumed only once. Read text
+    // first and, when appropriate, parse that same copy as JSON.
     const rawBody = await response.text();
     let detail = rawBody || `HTTP ${response.status}`;
     try {
       const payload = JSON.parse(rawBody);
       detail = payload.detail ?? payload.message ?? payload.error ?? payload;
-    } catch { /* La respuesta era texto plano; conservamos rawBody. */ }
+    } catch { /* The response was plain text; retain rawBody. */ }
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
-  // DELETE suele responder 204 o 200 con cuerpo vacío. Intentar response.json()
-  // en esos casos producía "Unexpected end of JSON input" aunque el borrado
-  // ya se hubiera completado correctamente.
+  // DELETE commonly returns 204 or 200 with an empty body. Calling
+  // response.json() in those cases produced "Unexpected end of JSON input"
+  // even though the deletion had completed successfully.
   if (response.status === 204) return null;
   const rawBody = await response.text();
   if (!rawBody) return null;
@@ -112,7 +112,7 @@ function setInlineStatus(selector, message, kind = "") {
  */
 
 function updateClouderaFormContext() {
-  /** Revela sólo los campos compatibles y explica la matriz certificada. */
+  /** Reveal only compatible fields and explain the certified matrix. */
   const platform = $("#cloudera-platform").value;
   const kind = $("#cloudera-kind").value;
   const onpremise = platform === "onpremise";
@@ -203,7 +203,7 @@ function clouderaLifecycleLabel(item) {
 }
 
 function clouderaCredentialSnapshot(connections) {
-  /** Compara sólo estado de credenciales; evita repintados periódicos inútiles. */
+  /** Compare credential state only, avoiding unnecessary periodic repaints. */
   return JSON.stringify(connections.map((item) => ({
     id: item.id,
     has_token: item.has_token,
@@ -243,7 +243,7 @@ async function loadClouderaConnections({onlyIfChanged = false} = {}) {
 }
 
 async function refreshClouderaConnections() {
-  /** Sincroniza la vista con SQLite sin solapar peticiones ni recargar la SPA. */
+  /** Synchronize the view with SQLite without overlapping requests or reloading the SPA. */
   if (clouderaRefreshInProgress) return;
   clouderaRefreshInProgress = true;
   try {
@@ -566,9 +566,9 @@ function prepareClouderaModel(index, inputType = "") {
       .replace(/-(query|passage)$/i, ""),
   };
   const roleSuffix = inputType ? `-${inputType}` : "";
-  // El primer `openai/` selecciona el proveedor LiteLLM. Si CAI publica un
-  // identificador que también empieza por `openai/`, el segundo pertenece al
-  // payload remoto y debe conservarse: LiteLLM retirará únicamente el primero.
+  // The first `openai/` selects the LiteLLM provider. If CAI publishes an
+  // identifier that also begins with `openai/`, the second prefix belongs to
+  // the remote payload and must remain: LiteLLM removes only the first one.
   const canonicalModel = String(model.canonical_model_name || model.model_name || model.name)
     .replace(/-(query|passage)$/i, "");
   $("#config-name").value = `${model.name}${roleSuffix}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -593,9 +593,9 @@ function prepareClouderaModel(index, inputType = "") {
   $("#model-form").scrollIntoView({behavior: "smooth", block: "start"});
 }
 
-/** Salud y proceso son conceptos distintos: la UI conserva esa distinción. */
+/** Health and process state are separate concepts; the UI preserves that distinction. */
 async function loadStatus() {
-  /** Refresca salud del proceso; se ejecuta cada tres segundos al final. */
+  /** Refresh process health; scheduled every three seconds after initialization. */
   const status = await api("/api/status");
   gatewayProcessAlive = status.process_alive;
   $("#gateway-address").textContent = `${status.host}:${status.public_port || status.port}`;
@@ -656,7 +656,7 @@ function modelUsageExamples(model, index) {
 }
 
 function modelCard(model, index) {
-  /** Proyecta un modelo seguro del backend a una tarjeta puramente visual. */
+  /** Project a safe backend model into a purely presentational card. */
   const sourceBadge = model.source === "cloudera"
     ? `<span class="source-badge cloudera">CLOUDERA · ${model.cloudera_kind === "workbench" ? "WORKBENCH" : "AI INFERENCE"}</span>`
     : "";
@@ -689,7 +689,7 @@ function modelCard(model, index) {
 }
 
 async function loadModels() {
-  /** Recarga inventario, pestañas y formularios tras cualquier cambio YAML. */
+  /** Reload inventory, tabs, and forms after any YAML change. */
   models = await api("/api/models");
   $("#model-count").textContent = `${models.filter((model) => model.enabled).length} activos / ${models.length}`;
   $("#models").innerHTML = models.map(modelCard).join("");
@@ -734,9 +734,9 @@ async function loadModels() {
   await Promise.all([loadLogs(), loadModelResources()]);
 }
 
-/** Las métricas remotas se etiquetan, nunca se simulan con datos locales. */
+/** Remote metrics are labelled explicitly and never simulated with local data. */
 function metricStatus(kind, value) {
-  /** Traduce una cifra a semáforo; el texto sigue siendo la fuente accesible. */
+  /** Map a value to a traffic-light state; text remains the accessible source. */
   if (value === null || value === undefined) return { level: "unknown", label: "Sin datos" };
   if (kind === "cpu") {
     if (value >= 80) return { level: "danger", label: "Uso crítico" };
@@ -768,7 +768,7 @@ function metricRow(label, value, status = null) {
 }
 
 async function loadModelResources() {
-  /** Fusiona métricas de proceso Ollama y sondas de latencia de proveedores. */
+  /** Merge Ollama process metrics with provider latency probes. */
   const resources = await api("/api/model-resources");
   for (const item of resources) {
     const target = [...document.querySelectorAll(".model-resources")]
@@ -819,7 +819,7 @@ async function loadModelResources() {
 }
 
 async function loadConfig() {
-  /** Sincroniza formulario, guardrail y editor avanzado con la fuente YAML. */
+  /** Synchronize the form, guardrail, and advanced editor with the YAML source. */
   const config = await api("/api/config");
   $("#yaml-editor").value = config.content;
   const guardrail = config.dashboard_settings?.guardrail ?? {};
@@ -1047,7 +1047,7 @@ async function refreshAfterConfigChange(result) {
 }
 
 async function addConfiguredModel(event) {
-  /** Comparte el mismo formulario para CREATE y UPDATE y pregunta por reinicio. */
+  /** Share one form for CREATE and UPDATE, then ask whether to restart. */
   event.preventDefault();
   const form = event.currentTarget;
   const button = form.querySelector('button[type="submit"]');
@@ -1135,7 +1135,7 @@ async function addConfiguredModel(event) {
 }
 
 async function saveYaml() {
-  /** Valida en servidor y sólo después ofrece sustitución transaccional. */
+  /** Validate on the server before offering a transactional replacement. */
   const button = $("#save-yaml");
   button.disabled = true;
   setInlineStatus("#yaml-status", "Validando y guardando…");
@@ -1157,7 +1157,7 @@ async function saveYaml() {
 }
 
 async function importYamlBackup() {
-  /** Restaura sólo tras validar; el servidor conserva rollback y política de reinicio. */
+  /** Restore only after validation; the server retains rollback and restart policy. */
   const input = $("#yaml-import-file");
   const button = $("#import-yaml-backup");
   const file = input.files?.[0];
@@ -1333,7 +1333,7 @@ function applyAdvisorRecommendation() {
   $("#model-form").scrollIntoView({behavior: "smooth", block: "start"});
 }
 
-/** Una sola llamada mínima por modelo remoto y carga completa de la página. */
+/** Make one minimal call per remote model and one full page load. */
 async function loadRemoteLatencies() {
   const remoteModels = models.filter((model) => (
     model.enabled && !model.provider_model.startsWith("ollama/")
@@ -1352,7 +1352,7 @@ async function loadRemoteLatencies() {
 }
 
 function renderTestTabs() {
-  /** Evita un selector opaco: cada alias activo queda visible como pestaña. */
+  /** Avoid an opaque selector: expose every active alias as a visible tab. */
   if (!models.some((model) => model.name === selectedTestModel && model.enabled)) {
     selectedTestModel = models.find((model) => model.enabled)?.name ?? null;
   }
@@ -1386,7 +1386,7 @@ function updateTestHelp() {
     : "Escribe aquí el mensaje de prueba…";
 }
 
-/** LiteLLM ocupa siempre la primera pestaña para separar infraestructura/modelos. */
+/** Keep LiteLLM in the first tab to separate infrastructure from model logs. */
 function renderLogTabs() {
   const tabs = [
     { name: "__litellm__", label: "LiteLLM" },
@@ -1419,7 +1419,7 @@ async function toggleModel(button) {
   }
 }
 
-/** Intl hace la conversión temporal; la base de datos conserva timestamps neutros. */
+/** Intl handles time conversion; the database retains timezone-neutral timestamps. */
 function madridTime(value) {
   if (!value) return "—";
   const date = new Date(value);
@@ -1510,7 +1510,7 @@ async function loadLogDays() {
 }
 
 async function loadLogs() {
-  /** Alterna entre stdout técnico y dashboard estructurado por modelo/día. */
+  /** Switch between technical stdout and the structured model/day dashboard. */
   if (selectedLogModel === "__litellm__") {
     const raw = await api(`/api/process-log?day=${encodeURIComponent(selectedLogDay)}`);
     $("#log-dashboard").hidden = true;
@@ -1555,7 +1555,7 @@ function readableResult(data) {
 }
 
 async function runTest() {
-  /** Recorre navegador→FastAPI→LiteLLM→proveedor y mide el tiempo total. */
+  /** Traverse browser → FastAPI → LiteLLM → provider and measure total time. */
   if (!selectedTestModel) return;
   const button = $("#test-button");
   const result = $("#test-result");
@@ -1795,9 +1795,9 @@ document.querySelectorAll(".primary-tab").forEach((button) => button.onclick = (
   if (button.dataset.view === "benchmark") loadBenchmark().catch(showError);
 });
 
-// La inicialización secuencial garantiza que la sonda sólo se lance si el gateway está listo.
+// Sequential initialization ensures the probe runs only when the gateway is ready.
 async function initialize() {
-  /** Secuencia de arranque: primero estado/modelos; después datos secundarios. */
+  /** Startup sequence: status/models first, then secondary data. */
   await loadStatus();
   await loadModels();
   await loadConfig();

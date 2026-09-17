@@ -1,4 +1,4 @@
-"""Descubrimiento opcional de servicios Cloudera sin exponer credenciales al navegador."""
+"""Optional Cloudera service discovery without exposing credentials to the browser."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 
 class ClouderaCatalog:
-    """Repositorio local y adaptador HTTP para el catálogo de Cloudera.
+    """Local repository and HTTP adapter for the Cloudera catalog.
 
     Esta clase concentra tres responsabilidades que comparten las mismas
     credenciales: CRUD de conexiones, descubrimiento/prueba de endpoints y
@@ -51,7 +51,7 @@ class ClouderaCatalog:
 
     @staticmethod
     def _endpoint_profile(endpoint: dict[str, Any]) -> dict[str, Any]:
-        """Distingue protocolo, motor y contrato sin confundirlos entre sí.
+        """Distinguish protocol, engine, and contract without conflating them.
 
         ``api_standard=openai`` describe el contrato HTTP, no demuestra que el
         servidor sea vLLM. Damos prioridad a metadatos explícitos y usamos URL
@@ -127,7 +127,7 @@ class ClouderaCatalog:
 
     @staticmethod
     def _normalize_renewal_url(value: str) -> str:
-        """Acepta una URL normal o un enlace Markdown copiado de documentación."""
+        """Accept either a normal URL or a Markdown link copied from documentation."""
 
         candidate = str(value or "").strip()
         markdown = re.fullmatch(r"\[[^\]]+\]\((https?://[^)]+)\)", candidate)
@@ -139,9 +139,9 @@ class ClouderaCatalog:
         parsed = urllib.parse.urlparse(candidate)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise RuntimeError("La URL de renovación debe ser una URL HTTP o HTTPS válida")
-        # IAM conserva el hostname histórico ``altus`` para el Control Plane
-        # us-west-1. El nombre simétrico bajo ``cdp.cloudera.com`` parece
-        # plausible, pero no tiene DNS y provoca NameResolutionError.
+        # IAM retains the historical ``altus`` hostname for the us-west-1
+        # Control Plane. The symmetrical name under ``cdp.cloudera.com`` looks
+        # plausible but has no DNS record and causes NameResolutionError.
         if (parsed.hostname or "").lower() == "iamapi.us-west-1.cdp.cloudera.com":
             parsed = parsed._replace(netloc="iamapi.us-west-1.altus.cloudera.com")
             candidate = urllib.parse.urlunparse(parsed)
@@ -149,7 +149,7 @@ class ClouderaCatalog:
 
     @classmethod
     def _validate_renewal_url(cls, value: str, platform: str, onpremise_version: str) -> str:
-        """Evita confundir consolas y páginas HTML con APIs de credenciales."""
+        """Prevent console and HTML page URLs from being mistaken for credential APIs."""
 
         normalized = cls._normalize_renewal_url(value)
         if not normalized:
@@ -166,9 +166,9 @@ class ClouderaCatalog:
                       else "la URL del API Knox terminada en /token")
             raise RuntimeError(f"Has pegado la página web Token Generation. Usa {target}")
         if onpremise_version != "legacy":
-            # En Private Cloud moderno el CDP CLI firma contra el IAM del
-            # Control Plane. La extensión ``pvcapipath`` del CLI añade
-            # ``/api/v1``; conservar aquí otro path lo duplicaría.
+            # In modern Private Cloud the CDP CLI signs against Control Plane
+            # IAM. Its ``pvcapipath`` extension adds ``/api/v1``; retaining
+            # another path here would duplicate it.
             if path not in {"", "/api", "/api/v1"}:
                 raise RuntimeError(
                     "Para renovar CDP_TOKEN usa el origen de Management Console/Control Plane, sin rutas de Knox"
@@ -182,7 +182,7 @@ class ClouderaCatalog:
     def _validate_onpremise_profile(cls, platform: str, kind: str, cai_version: str,
                                     runtime_version: str, auth_mode: str,
                                     credential_type: str) -> None:
-        """Valida sólo perfiles CAI nuevos; conserva registros heredados legibles."""
+        """Validate only new CAI profiles while keeping legacy records readable."""
 
         if platform != "onpremise" or kind != "inference" or runtime_version in {"legacy", "7.3.2_plus"}:
             return
@@ -205,7 +205,7 @@ class ClouderaCatalog:
             )
 
     def __init__(self, runtime_dir: Path) -> None:
-        """Ubica el almacén SQLite privado y migra el JSON legado si existe."""
+        """Locate the private SQLite store and migrate legacy JSON when present."""
 
         self.path = runtime_dir / "cloudera.sqlite3"
         self.legacy_path = runtime_dir / "cloudera-connections.json"
@@ -217,7 +217,7 @@ class ClouderaCatalog:
         return sqlite3.connect(self.path, timeout=10)
 
     def _initialize_store(self) -> None:
-        """Crea SQLite e importa una sola vez el catálogo JSON anterior."""
+        """Create SQLite and import the former JSON catalog exactly once."""
 
         with self._renewal_lock, self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
@@ -244,7 +244,7 @@ class ClouderaCatalog:
             )
 
     def _read(self) -> dict[str, Any]:
-        """Lee el documento del catálogo dentro de una transacción SQLite corta."""
+        """Read the catalog document within a short SQLite transaction."""
 
         try:
             with self._renewal_lock, self._connect() as connection:
@@ -255,7 +255,7 @@ class ClouderaCatalog:
             return {"connections": [], "model_tokens": {}}
 
     def _write(self, data: dict[str, Any]) -> None:
-        """Actualiza el catálogo atómicamente y restringe permisos a su dueño."""
+        """Update the catalog atomically and restrict permissions to its owner."""
 
         payload = json.dumps(data, ensure_ascii=False)
         with self._renewal_lock, self._connect() as connection:
@@ -270,13 +270,13 @@ class ClouderaCatalog:
 
     @staticmethod
     def _id(kind: str, url: str) -> str:
-        """Crea un ID estable sin almacenar una segunda copia de la URL."""
+        """Create a stable ID without storing a second copy of the URL."""
 
         return hashlib.sha256(f"{kind}:{url.rstrip('/')}".encode()).hexdigest()[:12]
 
     @staticmethod
     def _token_metadata(token: str) -> dict[str, Any]:
-        """Lee fechas declaradas de un JWT sin confundirlo con una verificación criptográfica."""
+        """Read declared JWT dates without mistaking parsing for cryptographic verification."""
         try:
             payload = token.split(".")[1]
             payload += "=" * (-len(payload) % 4)
@@ -289,7 +289,7 @@ class ClouderaCatalog:
 
     @classmethod
     def _connection_token_metadata(cls, connection: dict[str, Any]) -> dict[str, Any]:
-        """Usa ``exp`` y, si falta, la caducidad declarada por emisor u operador."""
+        """Use ``exp`` or, when absent, the expiry declared by issuer or operator."""
 
         metadata = cls._token_metadata(str(connection.get("token") or ""))
         if metadata.get("token_expires_at") or not connection.get("token_expire_at"):
@@ -312,7 +312,7 @@ class ClouderaCatalog:
 
     @staticmethod
     def _normalize_declared_expiry(value: str) -> str:
-        """Normaliza la fecha administrativa de una API key opaca."""
+        """Normalize the administrative expiry date of an opaque API key."""
 
         candidate = str(value or "").strip()
         if not candidate:
@@ -334,7 +334,7 @@ class ClouderaCatalog:
 
     @classmethod
     def _validate_tls_settings(cls, mode: str, ca_pem: str) -> tuple[str, str]:
-        """Valida la política TLS y un posible bundle PEM antes de persistirlo."""
+        """Validate TLS policy and an optional PEM bundle before persisting it."""
 
         normalized_mode = str(mode or "system").strip().lower()
         if normalized_mode not in cls.TLS_VERIFICATION_MODES:
@@ -361,14 +361,14 @@ class ClouderaCatalog:
         return normalized_mode, "\n".join(certificates) + "\n"
 
     def _ca_bundle_path(self, connection_id: str) -> Path:
-        """Devuelve una ruta privada y estable para el bundle usado por CDP CLI."""
+        """Return a stable private path for the bundle used by the CDP CLI."""
 
         ca_dir = self.path.parent / "cloudera-ca"
         ca_dir.mkdir(parents=True, exist_ok=True)
         return ca_dir / f"{connection_id}.pem"
 
     def _write_ca_bundle(self, connection: dict[str, Any]) -> Path:
-        """Materializa el PEM justo antes de invocar CDP CLI."""
+        """Materialize the PEM immediately before invoking the CDP CLI."""
 
         ca_path = self._ca_bundle_path(str(connection["id"]))
         ca_path.write_text(str(connection.get("tls_ca_pem") or ""), encoding="utf-8")
@@ -377,7 +377,7 @@ class ClouderaCatalog:
 
     def tls_verification_for(self, api_key_reference: str = "", url: str = "",
                              as_context: bool = False) -> bool | str | ssl.SSLContext | None:
-        """Resuelve la política TLS de una referencia `CLOUDERA_*` o su URL.
+        """Resolve TLS policy from a ``CLOUDERA_*`` reference or its URL.
 
         Devuelve ``None`` para conservar el comportamiento normal, ``False``
         para el modo diagnóstico y un contexto/ruta PEM para una CA privada.
@@ -409,7 +409,7 @@ class ClouderaCatalog:
 
     @staticmethod
     def _tls_context(connection: dict[str, Any]) -> ssl.SSLContext | None:
-        """Construye el contexto TLS compartido por catálogo y sondas.
+        """Build the TLS context shared by catalog calls and probes.
 
         Los certificados de algunos Private Cloud antiguos no incluyen AKI.
         Para una CA proporcionada explícitamente relajamos sólo X509_STRICT;
@@ -431,7 +431,7 @@ class ClouderaCatalog:
     @classmethod
     def _urlopen(cls, request: urllib.request.Request, connection: dict[str, Any],
                  timeout: int = 20):
-        """Abre HTTPS con la política TLS de la conexión sin alterar el proceso global."""
+        """Open HTTPS with connection-scoped TLS policy without changing global state."""
 
         context = cls._tls_context(connection)
         if context is None:
@@ -439,7 +439,7 @@ class ClouderaCatalog:
         return urllib.request.urlopen(request, timeout=timeout, context=context)
 
     def connections(self) -> list[dict[str, Any]]:
-        """Devuelve la vista pública de conexiones con indicadores de secretos."""
+        """Return the public connection view with secret-presence indicators."""
 
         result = []
         for item in self._read().get("connections", []):
@@ -496,7 +496,7 @@ class ClouderaCatalog:
 
     @staticmethod
     def _onpremise_version(connection: dict[str, Any]) -> str:
-        """Migra conexiones antiguas infiriendo v2 cuando la URL ya lo declara."""
+        """Migrate old connections by inferring v2 when the URL already declares it."""
 
         configured = str(connection.get("onpremise_version") or "").strip()
         if configured in {"7.1.9_sp1", "7.1.9_sp2", "7.3.1", "7.3.2", "7.3.2_plus", "legacy"}:
@@ -505,16 +505,16 @@ class ClouderaCatalog:
 
     @staticmethod
     def _renewal_ready(connection: dict[str, Any]) -> bool:
-        """Indica si hay datos suficientes para generar o renovar el token."""
+        """Report whether enough data exists to generate or renew the token."""
 
         if not str(connection.get("renewal_url") or "").strip():
             return False
         if connection.get("platform", "cloud") == "cloud":
             return bool(connection.get("cdp_access_key_id") and connection.get("cdp_private_key"))
         if ClouderaCatalog._onpremise_version(connection) != "legacy":
-            # AI Inference acepta el CDP_TOKEN de UMS. En Private Cloud se
-            # obtiene de forma desatendida firmando el IAM del Control Plane
-            # con una access key; no depende de una cookie SSO ni de Basic.
+            # AI Inference accepts the UMS CDP_TOKEN. In Private Cloud it is
+            # obtained unattended by signing Control Plane IAM with an access
+            # key; it does not depend on an SSO cookie or Basic Authentication.
             return bool(connection.get("kind") == "inference"
                         and connection.get("cdp_access_key_id")
                         and connection.get("cdp_private_key"))
@@ -522,7 +522,7 @@ class ClouderaCatalog:
 
     @classmethod
     def _uses_iam_renewal(cls, connection: dict[str, Any]) -> bool:
-        """Distingue IAM firmado de la emisión Knox Basic heredada."""
+        """Distinguish signed IAM from legacy Knox Basic issuance."""
 
         return (connection.get("platform", "cloud") == "cloud"
                 or (connection.get("platform") == "onpremise"
@@ -531,7 +531,7 @@ class ClouderaCatalog:
 
     @classmethod
     def _renewal_lead_seconds(cls, connection: dict[str, Any], expires_at: str) -> float:
-        """Calcula una ventana temprana sin provocar renovaciones continuas.
+        """Calculate an early window without causing continuous renewals.
 
         El valor configurable se limita a un cuarto de la vida del token. Así
         un UMS JWT de una hora se rota unos 15 minutos antes y una credencial
@@ -572,7 +572,7 @@ class ClouderaCatalog:
                         credential_expires_at: str = "", cai_version: str = "1.5.5_sp3",
                         onpremise_auth_mode: str = "", credential_type: str = "cdp_token",
                         tls_verification: str = "system", tls_ca_pem: str = "") -> dict[str, Any]:
-        """Da de alta una conexión tras validar tipo, plataforma, URL y JWT.
+        """Create a connection after validating type, platform, URL, and JWT.
 
         Una URL completa de endpoint se reduce a esquema+dominio porque las
         APIs de descubrimiento viven en ese origen. Un campo secreto vacío
@@ -596,8 +596,8 @@ class ClouderaCatalog:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc: raise RuntimeError("La URL Cloudera no es válida")
         if parsed.hostname and parsed.hostname.lower().startswith(("console.", "console-", "consoles.")):
             raise RuntimeError("Has pegado la URL de la consola CDP. Abre el servicio y usa su URL de endpoints")
-        # Es habitual copiar la URL completa de un endpoint. Para descubrir el
-        # catálogo sólo necesitamos su origen; normalizar aquí evita un 404 poco claro.
+        # Users commonly paste the full endpoint URL. Catalog discovery needs
+        # only its origin; normalizing here prevents a confusing 404 response.
         normalized = f"{parsed.scheme}://{parsed.netloc}"
         metadata = self._token_metadata(token.strip()) if token.strip() else {}
         if metadata.get("token_expired"):
@@ -661,7 +661,7 @@ class ClouderaCatalog:
         return next(item for item in self.connections() if item["id"] == connection_id)
 
     def delete_connection(self, connection_id: str) -> None:
-        """Borra una conexión y todas sus credenciales específicas de modelo."""
+        """Delete a connection and all of its model-specific credentials."""
 
         data = self._read()
         data["connections"] = [item for item in data.get("connections", []) if item.get("id") != connection_id]
@@ -680,7 +680,7 @@ class ClouderaCatalog:
                           cai_version: str = "1.5.5_sp3", onpremise_auth_mode: str = "",
                           credential_type: str = "cdp_token", tls_verification: str = "system",
                           tls_ca_pem: str = "") -> dict[str, Any]:
-        """Edita una conexión, conservando secretos si los campos no cambian."""
+        """Edit a connection while preserving secrets when fields remain unchanged."""
         if kind not in {"inference", "workbench"}: raise RuntimeError("Tipo de conexión Cloudera no válido")
         data = self._read()
         previous = next((item for item in data.get("connections", []) if item.get("id") == connection_id), None)
@@ -703,8 +703,8 @@ class ClouderaCatalog:
             platform, kind, cai_version, onpremise_version, auth_mode, credential_type,
         )
         if not 1 <= probe_interval_minutes <= 1440: raise RuntimeError("El intervalo debe estar entre 1 y 1440 minutos")
-        # Reutilizamos la validación/normalización y luego migramos credenciales
-        # de modelos si el cambio de URL produce un identificador nuevo.
+        # Reuse validation/normalization, then migrate model credentials if a
+        # URL change produces a new connection identifier.
         parsed = urllib.parse.urlparse(url.strip())
         if parsed.scheme not in {"http", "https"} or not parsed.netloc: raise RuntimeError("La URL Cloudera no es válida")
         if parsed.hostname and parsed.hostname.lower().startswith(("console.", "console-", "consoles.")):
@@ -780,7 +780,7 @@ class ClouderaCatalog:
         return next(item for item in self.connections() if item["id"] == new_id)
 
     def save_model_token(self, connection_id: str, external_id: str, token: str) -> str:
-        """Asocia un token a un endpoint y devuelve su variable de entorno."""
+        """Associate a token with an endpoint and return its environment variable."""
 
         if not self._connection_record(connection_id): raise KeyError(connection_id)
         metadata = self._token_metadata(token.strip())
@@ -791,19 +791,19 @@ class ClouderaCatalog:
         return self.environment_name(connection_id, external_id)
 
     def _connection_record(self, connection_id: str) -> dict[str, Any] | None:
-        """Busca el registro privado sin exigir que su credencial sea válida."""
+        """Find the private record without requiring its credential to be valid."""
 
         return next((item for item in self._read().get("connections", []) if item.get("id") == connection_id), None)
 
     def model_credential(self, connection_id: str, external_id: str) -> tuple[str, str, dict[str, Any]]:
-        """Resuelve prioridad: token del modelo primero, token general después."""
+        """Resolve precedence: model token first, shared connection token second."""
 
         data = self._read(); specific = data.get("model_tokens", {}).get(f"{connection_id}:{external_id}")
         connection = next((item for item in data.get("connections", []) if item.get("id") == connection_id), None)
         if not connection: raise KeyError(connection_id)
         specific_metadata = self._token_metadata(specific) if specific else {}
-        # Una credencial específica caducada no debe inutilizar un CDP_TOKEN
-        # de conexión que el supervisor mantiene renovado.
+        # An expired model-specific credential must not invalidate a connection
+        # CDP_TOKEN that the supervisor keeps renewed.
         use_specific = bool(specific and not specific_metadata.get("token_expired"))
         token = specific if use_specific else connection.get("token", "")
         if not token: raise RuntimeError("No hay credencial disponible para realizar la prueba")
@@ -819,7 +819,7 @@ class ClouderaCatalog:
         return token, source, metadata
 
     def model_token_status(self, connection_id: str, external_id: str) -> dict[str, Any]:
-        """Convierte una credencial privada en estado presentable por la UI."""
+        """Convert a private credential into UI-safe state."""
 
         try:
             _token, source, metadata = self.model_credential(connection_id, external_id)
@@ -829,7 +829,7 @@ class ClouderaCatalog:
                     "token_expires_at": None, "token_expired": False}
 
     def renew_token(self, connection_id: str, force: bool = False) -> dict[str, Any]:
-        """Genera o renueva un token y sustituye atómicamente la credencial."""
+        """Generate or renew a token and replace the credential atomically."""
         data = self._read()
         connection = next((item for item in data.get("connections", []) if item.get("id") == connection_id), None)
         if not connection: raise KeyError(connection_id)
@@ -853,8 +853,8 @@ class ClouderaCatalog:
         renewal_url = self._normalize_renewal_url(connection.get("renewal_url", ""))
         if not renewal_url:
             raise RuntimeError("Configura la URL de renovación de esta conexión")
-        # Repara también registros creados por versiones anteriores que
-        # guardaron literalmente un enlace Markdown en lugar de su destino.
+        # Also repair records created by older versions that stored a literal
+        # Markdown link instead of its destination.
         if renewal_url != connection.get("renewal_url"):
             connection["renewal_url"] = renewal_url
             self._write(data)
@@ -944,7 +944,7 @@ class ClouderaCatalog:
                 "declared_expire_at": declared_expiry}
 
     def record_renewal_error(self, connection_id: str, message: str) -> None:
-        """Persiste un fallo de generación/renovación para hacerlo visible en UI."""
+        """Persist a generation or renewal failure so it remains visible in the UI."""
 
         with self._renewal_lock:
             data = self._read()
@@ -961,7 +961,7 @@ class ClouderaCatalog:
                 self._write(data)
 
     def renew_due_tokens(self) -> list[dict[str, Any]]:
-        """Genera tokens ausentes y renueva los próximos a caducar."""
+        """Generate missing tokens and renew those approaching expiry."""
         results = []
         with self._renewal_lock:
             for connection in list(self._read().get("connections", [])):
@@ -977,7 +977,7 @@ class ClouderaCatalog:
     def probe_model(self, connection_id: str, external_id: str, url: str, protocol: str,
                     model_name: str = "", task: str = "", has_chat_template: bool = True,
                     serving_engine: str = "", requires_input_type: bool = False) -> dict[str, Any]:
-        """Hace una inferencia mínima en la URL exacta publicada por Cloudera.
+        """Run minimal inference against the exact URL published by Cloudera.
 
         Un endpoint OpenAI de Cloudera no está obligado a exponer ``/models``.
         La única prueba concluyente es usar el contrato y la URL anunciados por
@@ -1028,9 +1028,9 @@ class ClouderaCatalog:
                 "reasoning_effort": "low",
             }}
         elif "/v2/models/" in target:
-            # En OIP la URL publicada ya acaba en /infer. Una comprobación real
-            # requiere conocer el esquema tensorial del modelo, así que usamos
-            # el readiness estándar sin fingir una inferencia válida.
+            # In OIP the published URL already ends in /infer. A real probe needs
+            # the model's tensor schema, so use standard readiness rather than
+            # pretending to perform valid inference.
             target = f"{target.split('/v2/models/', 1)[0]}/v2/health/ready"
         body = json.dumps(payload).encode() if payload is not None else None
         request = urllib.request.Request(target, data=body, method=method,
@@ -1069,19 +1069,19 @@ class ClouderaCatalog:
 
     @staticmethod
     def environment_name(connection_id: str, external_id: str) -> str:
-        """Construye un nombre de entorno determinista para un token específico."""
+        """Build a deterministic environment name for a model-specific token."""
 
         safe = re.sub(r"[^A-Z0-9]+", "_", external_id.upper()).strip("_")[:35]
         return f"CLOUDERA_{connection_id.upper()}_{safe}_TOKEN"
 
     @staticmethod
     def connection_environment_name(connection_id: str) -> str:
-        """Construye el nombre compartido por los modelos de una conexión."""
+        """Build the environment name shared by a connection's models."""
 
         return f"CLOUDERA_{connection_id.upper()}_CDP_TOKEN"
 
     def environment(self) -> dict[str, str]:
-        """Materializa secretos sólo para el entorno del subproceso LiteLLM."""
+        """Materialize secrets only in the LiteLLM subprocess environment."""
 
         data = self._read()
         result = {self.connection_environment_name(item["id"]): item["token"]
@@ -1099,7 +1099,7 @@ class ClouderaCatalog:
         return result
 
     def _connection(self, connection_id: str) -> dict[str, Any]:
-        """Obtiene una conexión lista para API o explica credencial/caducidad."""
+        """Return an API-ready connection or explain credential/expiry failure."""
 
         connection = next((item for item in self._read().get("connections", []) if item.get("id") == connection_id), None)
         if not connection: raise KeyError(connection_id)
@@ -1112,7 +1112,7 @@ class ClouderaCatalog:
     def _request(self, url: str, token: str, method: str = "GET",
                  payload: dict[str, Any] | None = None,
                  connection: dict[str, Any] | None = None) -> Any:
-        """Cliente JSON pequeño que traduce errores HTTP a mensajes operables."""
+        """Small JSON client that translates HTTP failures into actionable messages."""
 
         body = json.dumps(payload).encode() if payload is not None else None
         request = urllib.request.Request(url, data=body, method=method,
@@ -1133,7 +1133,7 @@ class ClouderaCatalog:
 
     @staticmethod
     def _items(payload: Any, *keys: str) -> list[dict[str, Any]]:
-        """Normaliza listas directas o colecciones envueltas por distintas APIs."""
+        """Normalize direct lists or collections wrapped by different APIs."""
 
         if isinstance(payload, list): return [item for item in payload if isinstance(item, dict)]
         if isinstance(payload, dict):
@@ -1142,7 +1142,7 @@ class ClouderaCatalog:
         return []
 
     def discover(self, connection_id: str) -> list[dict[str, Any]]:
-        """Descubre endpoints de AI Inference o deployments de Workbench.
+        """Discover AI Inference endpoints or Workbench deployments.
 
         El resultado común incluye URL, estado, protocolo, modelo interno y
         credencial efectiva. Así JavaScript no necesita conocer las diferencias
@@ -1179,8 +1179,8 @@ class ClouderaCatalog:
                         connection)
                     if isinstance(described, dict): detail = described
                 except RuntimeError:
-                    # listEndpoints ya contiene los campos esenciales y debe
-                    # seguir siendo útil aunque el detalle no esté permitido.
+                    # listEndpoints already contains essential fields and must
+                    # remain useful even when detail access is not permitted.
                     pass
                 merged = {**item, **detail}
                 profile = self._endpoint_profile(merged)
@@ -1190,9 +1190,9 @@ class ClouderaCatalog:
                 chat_value = merged.get("has_chat_template", merged.get("hasChatTemplate"))
                 has_chat_template = (bool(chat_value) if chat_value is not None else
                                      endpoint_url.rstrip("/").endswith("/v1") and "embed" not in task.lower())
-                # CAII no siempre usa exactamente el literal "openai" en sus
-                # distintas versiones. Los NIM de texto también se identifican
-                # por su base /v1 o su plantilla de chat. OIP publica /v2/infer.
+                # CAII does not use the exact literal "openai" consistently
+                # across versions. Text NIMs can also be identified by their /v1
+                # base or chat template. OIP publishes /v2/infer.
                 openai_protocol = (
                     "openai" in api_standard
                     or endpoint_url.rstrip("/").endswith("/v1")

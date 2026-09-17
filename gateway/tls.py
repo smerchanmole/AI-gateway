@@ -1,4 +1,4 @@
-"""Generación y protección del certificado TLS local del panel."""
+"""Generate and protect the dashboard's local TLS certificate."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import subprocess
 
 
 def _local_addresses() -> list[str]:
-    """Recoge nombres/IP locales para reducir avisos por nombre no coincidente."""
+    """Collect local names and addresses to reduce hostname mismatch warnings."""
     values = {"localhost", "127.0.0.1"}
     hostname = socket.gethostname()
     if hostname:
@@ -27,10 +27,10 @@ def _local_addresses() -> list[str]:
 
 
 def ensure_self_signed_certificate(runtime_dir: Path) -> tuple[Path, Path]:
-    """Crea una clave RSA y certificado autofirmado si aún no existen.
+    """Create an RSA key and self-signed certificate when they do not exist.
 
-    La clave privada queda con permisos ``0600`` dentro de ``runtime/`` y, al
-    estar esa carpeta ignorada por Git, nunca se publica accidentalmente.
+    The private key remains mode ``0600`` under ``runtime/``. Because Git
+    ignores that directory, it cannot be published accidentally.
     """
     tls_dir = runtime_dir / "tls"
     certificate = tls_dir / "ia-gateway.crt"
@@ -60,4 +60,3 @@ def ensure_self_signed_certificate(runtime_dir: Path) -> tuple[Path, Path]:
     os.chmod(private_key, 0o600)
     os.chmod(certificate, 0o644)
     return certificate, private_key
-
