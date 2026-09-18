@@ -294,6 +294,85 @@ def test_discovers_workbench_deployments(tmp_path, monkeypatch):
     assert models[0]["credential_source"] == "API key de Workbench"
 
 
+def test_direct_onprem_workbench_extracts_access_key_and_discovers_embedding(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection(
+        "Nemotron Embed", "workbench",
+        "https://modelservice.ml-private.example/model?accessKey=model-secret",
+        platform="onpremise", onpremise_version="7.3.2",
+        workbench_mode="direct", workbench_model_type="embedding",
+        workbench_input_type="passage",
+    )
+
+    assert connection["url"] == "https://modelservice.ml-private.example/model"
+    assert "model-secret" not in json.dumps(connection)
+    assert connection["has_token"] is True
+    models = catalog.discover(connection["id"])
+    assert len(models) == 1
+    assert models[0]["task_family"] == "embedding"
+    assert models[0]["requires_input_type"] is True
+    assert models[0]["embedding_input_types"] == ["query", "passage"]
+    assert models[0]["api_key_env"].startswith("CLOUDERA_")
+
+    credential = json.loads(catalog.environment()[models[0]["api_key_env"]])
+    assert credential == {"access_key": "model-secret", "authorization": ""}
+
+
+def test_direct_workbench_embedding_probe_uses_access_key_body(tmp_path, monkeypatch):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection(
+        "Nemotron Embed", "workbench", "https://modelservice.ml-private.example/model",
+        "model-secret", platform="onpremise", onpremise_version="7.3.2",
+        workbench_mode="direct", workbench_model_type="embedding",
+        workbench_input_type="query",
+    )
+    model = catalog.discover(connection["id"])[0]
+
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    def accepted(request, timeout=20):
+        assert request.headers.get("Authorization") is None
+        assert json.loads(request.data) == {
+            "accessKey": "model-secret",
+            "request": {"input": ["health check"], "input_type": "query",
+                        "normalize": True, "batch_size": 1},
+        }
+        return Response()
+
+    monkeypatch.setattr("gateway.cloudera.urllib.request.urlopen", accepted)
+    result = catalog.probe_model(
+        connection["id"], model["external_id"], model["url"], "workbench",
+        model_name=model["model_name"], task=model["task"], has_chat_template=False,
+    )
+
+    assert result["ok"] is True
+    assert result["probe_contract"] == "workbench"
+    assert result["credential_source"] == "accessKey del modelo Workbench"
+
+
+def test_direct_workbench_access_key_rotation_preserves_connection_id(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection(
+        "Embed", "workbench", "https://modelservice.ml-private.example/model",
+        "old-key", platform="onpremise", onpremise_version="7.3.2",
+        workbench_mode="direct", workbench_model_type="embedding",
+    )
+    environment_name = catalog.connection_environment_name(connection["id"])
+
+    updated = catalog.update_connection(
+        connection["id"], "Embed", "workbench",
+        "https://modelservice.ml-private.example/model", "new-key",
+        platform="onpremise", onpremise_version="7.3.2",
+        workbench_mode="direct", workbench_model_type="embedding",
+    )
+
+    assert updated["id"] == connection["id"]
+    assert json.loads(catalog.environment()[environment_name])["access_key"] == "new-key"
+
+
 def test_workbench_probe_uses_model_contract_and_allows_modelservice_host(tmp_path, monkeypatch):
     catalog = ClouderaCatalog(tmp_path)
     connection = catalog.save_connection("Workbench", "workbench", "https://wb.example", "api-key")

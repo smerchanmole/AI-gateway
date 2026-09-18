@@ -2,7 +2,7 @@ import io
 import json
 import urllib.error
 
-from litellm import ModelResponse
+from litellm import EmbeddingResponse, ModelResponse
 
 from gateway.workbench_provider import ClouderaWorkbenchLLM
 from gateway.workbench_provider import _normalize_api_base, _request_body
@@ -78,6 +78,90 @@ def test_workbench_provider_wraps_request_and_unwraps_openai_response(monkeypatc
     }}
     assert result.choices[0].message.content == "¡Hola!"
     assert result.usage.total_tokens == 5
+
+
+def test_direct_workbench_uses_api_key_as_body_access_key(monkeypatch):
+    captured = {}
+
+    class Response(io.BytesIO):
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    def accepted(request, timeout):
+        captured["body"] = json.loads(request.data)
+        captured["authorization"] = request.headers.get("Authorization")
+        return Response(json.dumps({"response": {"content": "OK"}}).encode())
+
+    monkeypatch.setattr("gateway.workbench_provider.urllib.request.urlopen", accepted)
+    result = ClouderaWorkbenchLLM().completion(
+        model="qwen", messages=[{"role": "user", "content": "hola"}],
+        api_base="https://modelservice.workbench.example/model",
+        api_key="model-access-key", model_response=ModelResponse(),
+        optional_params={}, timeout=30,
+    )
+
+    assert captured["body"]["accessKey"] == "model-access-key"
+    assert captured["authorization"] is None
+    assert result.choices[0].message.content == "OK"
+
+
+def test_direct_workbench_supports_optional_user_api_key(monkeypatch):
+    captured = {}
+
+    class Response(io.BytesIO):
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    def accepted(request, timeout):
+        captured["body"] = json.loads(request.data)
+        captured["authorization"] = request.headers.get("Authorization")
+        return Response(json.dumps({"response": {"content": "OK"}}).encode())
+
+    monkeypatch.setattr("gateway.workbench_provider.urllib.request.urlopen", accepted)
+    credential = json.dumps({"access_key": "model-access", "authorization": "user-api-key"})
+    ClouderaWorkbenchLLM().completion(
+        model="qwen", messages=[{"role": "user", "content": "hola"}],
+        api_base="https://modelservice.workbench.example/model",
+        api_key=credential, model_response=ModelResponse(), optional_params={}, timeout=30,
+    )
+
+    assert captured["body"]["accessKey"] == "model-access"
+    assert captured["authorization"] == "Bearer user-api-key"
+
+
+def test_workbench_embedding_contract_and_response(monkeypatch):
+    captured = {}
+
+    class Response(io.BytesIO):
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    def accepted(request, timeout):
+        captured["body"] = json.loads(request.data)
+        return Response(json.dumps({
+            "success": True,
+            "response": {"embeddings": [[0.1, 0.2], [0.3, 0.4]]},
+        }).encode())
+
+    monkeypatch.setattr("gateway.workbench_provider.urllib.request.urlopen", accepted)
+    result = ClouderaWorkbenchLLM().embedding(
+        model="nemotron-embed", input=["uno", "dos"],
+        api_base="https://modelservice.workbench.example/model",
+        api_key="model-access-key", model_response=EmbeddingResponse(),
+        optional_params={"extra_body": {"input_type": "passage", "normalize": True}},
+        timeout=30,
+    )
+
+    assert captured["body"] == {
+        "accessKey": "model-access-key",
+        "request": {"input": ["uno", "dos"], "input_type": "passage",
+                    "normalize": True, "batch_size": 2},
+    }
+    assert result.data[0]["embedding"] == [0.1, 0.2]
+    assert result.data[1]["index"] == 1
 
 
 def test_workbench_http_error_reports_safe_request_shape(monkeypatch):

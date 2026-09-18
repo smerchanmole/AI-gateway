@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 from datetime import date
 import asyncio
+import json
 import ssl
 import pytest
 
@@ -191,7 +192,10 @@ def test_onpremise_cai_profile_and_auth_mode_reach_catalog(monkeypatch, client):
     })
 
     assert response.status_code == 200
-    assert captured["args"][-5:] == ("1.5.5_sp3", "ums_auto", "cdp_token", "system", "")
+    assert captured["args"][-9:] == (
+        "1.5.5_sp3", "ums_auto", "cdp_token", "system", "",
+        "catalog", "chat", "passage", "",
+    )
 
 
 def test_dashboard_disables_cache_and_uses_test_tabs(client):
@@ -703,6 +707,72 @@ def test_manual_workbench_profile_gets_cloudera_155_output_cap(client):
     assert "512 tokens" in response.json()["detail"]
 
 
+def test_guided_workbench_embedding_serializes_input_contract():
+    entry = dashboard._model_entry(dashboard.ModelCreate(
+        model_name="nemotron-passage",
+        model="cloudera_workbench/nemotron-embed",
+        api_base="https://modelservice.ml-private.example/model",
+        api_key_env="CLOUDERA_DIRECT_TOKEN",
+        source="cloudera",
+        cloudera_kind="workbench",
+        backend_profile="workbench",
+        task="embedding",
+        embedding_input_type="passage",
+    ))
+
+    params = entry["litellm_params"]
+    assert params["extra_body"] == {"input_type": "passage", "normalize": True}
+    assert entry["model_info"]["dashboard_task"] == "embedding"
+    assert entry["model_info"]["dashboard_embedding_input_type"] == "passage"
+
+
+def test_workbench_embedding_validation_uses_direct_model_contract(monkeypatch):
+    model = dashboard.ModelCreate(
+        model_name="nemotron-passage",
+        model="cloudera_workbench/nemotron-embed",
+        api_base="https://modelservice.ml-private.example/model",
+        api_key_env="CLOUDERA_DIRECT_TOKEN",
+        source="cloudera", cloudera_kind="workbench",
+        backend_profile="workbench", task="embedding",
+        embedding_input_type="passage",
+    )
+    entry = dashboard._model_entry(model)
+    captured = {}
+
+    class Catalog:
+        def environment(self):
+            return {"CLOUDERA_DIRECT_TOKEN": json.dumps({
+                "access_key": "model-access", "authorization": "user-api-key",
+            })}
+        def tls_verification_for(self, *_args, **_kwargs): return None
+
+    class Response:
+        status_code = 200
+        is_error = False
+        def json(self): return {"response": {"embeddings": [[0.1, 0.2]]}}
+
+    class Client:
+        def __init__(self, **_kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return False
+        async def post(self, url, json, headers):
+            captured.update({"url": url, "json": json, "headers": headers})
+            return Response()
+
+    monkeypatch.setattr(dashboard, "cloudera", Catalog())
+    monkeypatch.setattr(dashboard.httpx, "AsyncClient", Client)
+    result = asyncio.run(dashboard._probe_model_candidate(model, entry))
+
+    assert result["status"] == 200
+    assert captured["url"] == "https://modelservice.ml-private.example/model"
+    assert captured["headers"]["Authorization"] == "Bearer user-api-key"
+    assert captured["json"] == {
+        "accessKey": "model-access",
+        "request": {"input": ["Prueba de configuración"], "input_type": "passage",
+                    "normalize": True, "batch_size": 1},
+    }
+
+
 def test_model_parameter_editor_exposes_backend_specific_controls():
     html = (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
     javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -715,6 +785,19 @@ def test_model_parameter_editor_exposes_backend_specific_controls():
         assert f'id="{control}"' in html
     assert "updateModelParameterContext" in javascript
     assert "Triton OIP recibe tensores" in javascript
+
+
+def test_onprem_workbench_form_exposes_direct_model_and_embedding_fields():
+    html = (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert '<option value="workbench">Cloudera AI Workbench</option>' in html
+    for control in ("cloudera-onprem-workbench-fields", "cloudera-workbench-model-type",
+                    "cloudera-workbench-input-type", "cloudera-workbench-access-key",
+                    "cloudera-workbench-api-key", "cloudera-workbench-tls-verification"):
+        assert f'id="{control}"' in html
+    assert "updateClouderaWorkbenchFields" in javascript
+    assert 'workbench_mode: $("#cloudera-kind").value === "workbench" ? "direct"' in javascript
     assert "Probando el deployment con todos los parámetros" in javascript
     assert "dashboard_effective_parameters" in (dashboard.ROOT / "gateway" / "litellm_callback.py").read_text(encoding="utf-8")
 

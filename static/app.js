@@ -118,16 +118,29 @@ function updateClouderaFormContext() {
   const onpremise = platform === "onpremise";
   $("#cloudera-version-field").hidden = !onpremise;
   $("#cloudera-cai-version-field").hidden = !onpremise;
-  $("#cloudera-cloud-fields").hidden = onpremise;
+  $("#cloudera-cloud-fields").hidden = onpremise || kind === "workbench";
   $("#cloudera-onprem-inference-fields").hidden = !onpremise || kind !== "inference";
+  $("#cloudera-onprem-workbench-fields").hidden = kind !== "workbench";
   const helpContext = `${platform}-${kind}`;
   document.querySelectorAll("[data-cloudera-help]").forEach((content) => {
     content.hidden = content.dataset.clouderaHelp !== helpContext;
   });
   $("#cloudera-url").placeholder = kind === "workbench"
-    ? "https://ml-workbench.example.com"
+    ? "https://modelservice.ml-workbench.example.com/model"
     : "https://ml-entorno.example.com";
+  $("#cloudera-url-hint").textContent = kind === "workbench"
+    ? "URL completa de Model Service terminada en /model; accessKey puede ir en su campo o en la URL."
+    : "Origen que publica el catálogo y los modelos; no es la consola central de CDP.";
   if (onpremise && kind === "inference") updateClouderaOnpremCompatibility();
+  updateClouderaWorkbenchFields();
+}
+
+function updateClouderaWorkbenchFields() {
+  const embedding = $("#cloudera-workbench-model-type").value === "embedding";
+  $("#cloudera-workbench-input-type-field").hidden = !embedding;
+  const customCa = $("#cloudera-workbench-tls-verification").value === "custom_ca";
+  $("#cloudera-workbench-ca-field").hidden = !customCa;
+  $("#cloudera-workbench-ca-pem").disabled = !customCa;
 }
 
 function updateClouderaOnpremCompatibility() {
@@ -175,6 +188,15 @@ function updateClouderaTlsFields() {
 
 function clouderaFormCredential() {
   const platform = $("#cloudera-platform").value;
+  const kind = $("#cloudera-kind").value;
+  if (kind === "workbench") {
+    return {token: $("#cloudera-workbench-access-key").value, renewalUrl: "",
+      accessKeyId: "", privateKey: "", workloadName: "DE",
+      credentialExpiresAt: $("#cloudera-workbench-expiry").value,
+      tlsVerification: $("#cloudera-workbench-tls-verification").value,
+      tlsCaPem: $("#cloudera-workbench-ca-pem").value,
+      workbenchApiKey: $("#cloudera-workbench-api-key").value};
+  }
   if (platform === "cloud") {
     return {token: $("#cloudera-token").value, renewalUrl: $("#cloudera-cloud-renewal-url").value,
       accessKeyId: $("#cloudera-access-key-id").value, privateKey: $("#cloudera-private-key").value,
@@ -195,6 +217,7 @@ function clouderaFormCredential() {
 }
 
 function clouderaLifecycleLabel(item) {
+  if (item.kind === "workbench" && item.workbench_mode === "direct") return "Access key del modelo · rotación manual";
   if (item.credential_lifecycle === "renewable") return "Renovación automática configurada";
   if (item.credential_lifecycle === "expiring_manual") return "Caduca · sustitución manual";
   if (item.credential_lifecycle === "long_lived_unverified") return "Clave larga · verifica vigencia en Knox";
@@ -226,7 +249,7 @@ async function loadClouderaConnections({onlyIfChanged = false} = {}) {
   ));
   clouderaConnections = updated;
   $("#cloudera-connections").innerHTML = clouderaConnections.length ? clouderaConnections.map((item) => `
-    <article class="cloudera-connection" data-connection="${item.id}"><div><b>${escapeHtml(item.name)}</b><small>${item.kind === "inference" ? "AI Inference" : "Workbench API v2"} · ${item.platform === "onpremise" ? `On-premise ${escapeHtml(item.cai_version_label || "")} · Runtime ${escapeHtml(item.runtime_version_label || item.onpremise_version)}` : "Cloud"}</small><small>Prueba automática cada ${escapeHtml(item.probe_interval_minutes || 5)} min</small></div><div class="connection-url">${escapeHtml(item.url)}</div><span class="credential-state ${item.token_expired ? "expired" : item.has_token ? "ready" : "missing"}">${item.renewal_state === "renewing" ? (item.has_token ? "Renovando token…" : "Generando token inicial…") : item.token_expired ? "JWT caducado" : item.has_token ? "Credencial guardada" : item.renewal_ready ? "Token pendiente de generar" : "Falta credencial"}${item.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(item.token_expires_at))}</small>` : ""}${item.renewal_due_at ? `<small>Renovación prevista: ${escapeHtml(madridTime(item.renewal_due_at))}</small>` : ""}${item.rotation_due_at ? `<small>Rotar antes de: ${escapeHtml(madridTime(item.rotation_due_at))}</small>` : ""}<small>${escapeHtml(clouderaLifecycleLabel(item))}</small></span><div class="row-actions"><button class="secondary discover-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Buscar modelos</button><button class="secondary check-all-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Probar todos</button>${item.renewal_ready ? `<button class="secondary renew-cloudera" data-id="${item.id}">${item.has_token ? "Renovar token" : "Generar token"}</button>` : ""}<button class="secondary edit-cloudera" data-id="${item.id}">${item.has_token && !item.renewal_ready ? "Sustituir credencial" : "Editar"}</button><button class="danger delete-cloudera" data-id="${item.id}">Borrar</button></div><div class="connection-health-summary" data-health-summary="${item.id}">Sin comprobaciones de modelos</div><p class="connection-progress ${item.renewal_state === "error" || item.token_expired ? "error" : ""}" data-progress="${item.id}" role="status">${escapeHtml(item.renewal_message || (item.token_expired ? (item.renewal_ready ? "JWT caducado; se regenerará automáticamente" : "JWT caducado; sustituye la credencial") : item.has_token ? "Lista para consultar" : item.renewal_ready ? "Completa la generación del token" : "Añade una credencial válida"))}</p><section class="connection-models" data-connection-models="${item.id}"><p class="empty compact">Pulsa «Buscar modelos» para ver los modelos de esta conexión.</p></section></article>`).join("") : '<p class="empty compact">No hay conexiones Cloudera configuradas. Añade una arriba para comenzar.</p>';
+    <article class="cloudera-connection" data-connection="${item.id}"><div><b>${escapeHtml(item.name)}</b><small>${item.kind === "inference" ? "AI Inference" : item.workbench_mode === "direct" ? "Workbench · Model Service" : "Workbench API v2"} · ${item.platform === "onpremise" ? `On-premise ${escapeHtml(item.cai_version_label || "")} · Runtime ${escapeHtml(item.runtime_version_label || item.onpremise_version)}` : "Cloud"}</small><small>Prueba automática cada ${escapeHtml(item.probe_interval_minutes || 5)} min</small></div><div class="connection-url">${escapeHtml(item.url)}</div><span class="credential-state ${item.token_expired ? "expired" : item.has_token ? "ready" : "missing"}">${item.renewal_state === "renewing" ? (item.has_token ? "Renovando token…" : "Generando token inicial…") : item.token_expired ? "JWT caducado" : item.has_token ? "Credencial guardada" : item.renewal_ready ? "Token pendiente de generar" : "Falta credencial"}${item.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(item.token_expires_at))}</small>` : ""}${item.renewal_due_at ? `<small>Renovación prevista: ${escapeHtml(madridTime(item.renewal_due_at))}</small>` : ""}${item.rotation_due_at ? `<small>Rotar antes de: ${escapeHtml(madridTime(item.rotation_due_at))}</small>` : ""}<small>${escapeHtml(clouderaLifecycleLabel(item))}</small></span><div class="row-actions"><button class="secondary discover-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Buscar modelos</button><button class="secondary check-all-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Probar todos</button>${item.renewal_ready ? `<button class="secondary renew-cloudera" data-id="${item.id}">${item.has_token ? "Renovar token" : "Generar token"}</button>` : ""}<button class="secondary edit-cloudera" data-id="${item.id}">${item.has_token && !item.renewal_ready ? "Sustituir credencial" : "Editar"}</button><button class="danger delete-cloudera" data-id="${item.id}">Borrar</button></div><div class="connection-health-summary" data-health-summary="${item.id}">Sin comprobaciones de modelos</div><p class="connection-progress ${item.renewal_state === "error" || item.token_expired ? "error" : ""}" data-progress="${item.id}" role="status">${escapeHtml(item.renewal_message || (item.token_expired ? (item.renewal_ready ? "JWT caducado; se regenerará automáticamente" : "JWT caducado; sustituye la credencial") : item.has_token ? "Lista para consultar" : item.renewal_ready ? "Completa la generación del token" : "Añade una credencial válida"))}</p><section class="connection-models" data-connection-models="${item.id}"><p class="empty compact">Pulsa «Buscar modelos» para ver los modelos de esta conexión.</p></section></article>`).join("") : '<p class="empty compact">No hay conexiones Cloudera configuradas. Añade una arriba para comenzar.</p>';
   document.querySelectorAll(".discover-cloudera").forEach((button) => button.onclick = () => discoverCloudera(button));
   document.querySelectorAll(".check-all-cloudera").forEach((button) => button.onclick = () => autoProbeConnection(button.dataset.id, true));
   document.querySelectorAll(".renew-cloudera").forEach((button) => button.onclick = () => renewClouderaToken(button.dataset.id, true));
@@ -281,7 +304,18 @@ function editClouderaConnection(id) {
   $("#cloudera-onprem-ca-pem").placeholder = item.has_tls_ca
     ? "Bundle guardado · déjalo vacío para conservarlo"
     : "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
-  updateClouderaOnpremCompatibility();
+  $("#cloudera-workbench-model-type").value = item.workbench_model_type || "chat";
+  $("#cloudera-workbench-input-type").value = item.workbench_input_type || "passage";
+  $("#cloudera-workbench-access-key").value = "";
+  $("#cloudera-workbench-api-key").value = "";
+  $("#cloudera-workbench-expiry").value = item.token_expires_at && item.kind === "workbench" ? item.token_expires_at.slice(0, 10) : "";
+  $("#cloudera-workbench-tls-verification").value = item.tls_verification || "system";
+  $("#cloudera-workbench-ca-pem").value = "";
+  $("#cloudera-workbench-ca-pem").placeholder = item.has_tls_ca
+    ? "Bundle guardado · déjalo vacío para conservarlo"
+    : "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
+  if (item.platform === "onpremise" && item.kind === "inference") updateClouderaOnpremCompatibility();
+  updateClouderaWorkbenchFields();
   $("#save-cloudera-connection").textContent = "Guardar cambios"; $("#cancel-cloudera-edit").hidden = false;
   setInlineStatus("#cloudera-status", `Editando conexión «${item.name}». La credencial actual se conservará si dejas el campo vacío.`);
   $("#cloudera-name").focus();
@@ -290,6 +324,7 @@ function editClouderaConnection(id) {
 function cancelClouderaEdit() {
   editingClouderaConnectionId = null; $("#cloudera-connection-form").reset();
   $("#cloudera-onprem-ca-pem").placeholder = "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
+  $("#cloudera-workbench-ca-pem").placeholder = "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
   $("#save-cloudera-connection").textContent = "Guardar conexión"; $("#cancel-cloudera-edit").hidden = true;
   updateClouderaFormContext();
 }
@@ -331,6 +366,10 @@ async function saveClouderaConnection(event) {
       renewal_url: credential.renewalUrl, workload_name: credential.workloadName,
       credential_expires_at: credential.credentialExpiresAt,
       tls_verification: credential.tlsVerification, tls_ca_pem: credential.tlsCaPem,
+      workbench_mode: $("#cloudera-kind").value === "workbench" ? "direct" : "catalog",
+      workbench_model_type: $("#cloudera-workbench-model-type").value,
+      workbench_input_type: $("#cloudera-workbench-input-type").value,
+      workbench_api_key: credential.workbenchApiKey || "",
     })});
     const action = editingClouderaConnectionId ? "actualizada" : "guardada";
     cancelClouderaEdit();
@@ -386,6 +425,7 @@ function clouderaDeploymentState(model) {
 function clouderaCredentialState(model) {
   if (model.token_expired) return {level: "danger", label: "Token caducado"};
   if (model.has_model_token) return {level: "healthy", label: "Token propio disponible"};
+  if (model.credential_source === "accessKey del modelo Workbench") return {level: "healthy", label: "Access key del modelo disponible"};
   if (model.credential_available) return {level: "warning", label: "Usará el CDP token general"};
   return {level: "unknown", label: "Sin credencial"};
 }
@@ -492,6 +532,7 @@ function renderClouderaModels(sortByHealth = true) {
   const modelMarkup = (entries) => entries.length ? entries.map(({model, index}) => {
     const compatible = model.protocol === "openai";
     const workbench = model.protocol === "workbench";
+    const directWorkbench = workbench && model.workbench_mode === "direct";
     const deployment = clouderaDeploymentState(model);
     const credential = clouderaCredentialState(model);
     const probe = model.probe_result;
@@ -508,13 +549,15 @@ function renderClouderaModels(sortByHealth = true) {
       ? "<small>La prueba usa el contrato request/response propio de Workbench.</small>"
       : "<small>Necesita conocer el esquema de tensores del modelo para probarlo.</small>");
     const credentialHint = workbench ? "Opcional: usa la API key de Workbench si queda vacío" : "Opcional: usa el CDP token si queda vacío";
+    const credentialEditor = directWorkbench ? "" : `<label>JWT / API key del modelo<input class="cloudera-model-token" data-index="${index}" type="password" autocomplete="new-password" placeholder="${model.has_model_token ? "Escribe un token nuevo para sustituir" : credentialHint}"></label>`;
+    const credentialAction = directWorkbench ? "" : `<button class="secondary save-cloudera-token" data-index="${index}">${model.has_model_token ? "Sustituir token" : "Guardar token propio"}</button>`;
     const prepareActions = model.requires_input_type
       ? `<button class="primary prepare-cloudera" data-index="${index}" data-input-type="query">Preparar consulta</button><button class="secondary prepare-cloudera" data-index="${index}" data-input-type="passage">Preparar documentos</button>`
       : `<button class="primary prepare-cloudera" data-index="${index}">Preparar borrador</button>`;
     const roleHelp = model.requires_input_type
       ? "<small>Embedding asimétrico: usa query para preguntas y passage para documentos.</small>"
       : "";
-    return `<article class="cloudera-model"><div><b>${escapeHtml(model.name)}</b><small>${escapeHtml(model.source)}${model.project ? ` · ${escapeHtml(model.project)}` : ""}</small></div><div class="model-state-stack">${stateIndicator(deployment)}${stateIndicator(credential)}<small>Cloudera informa: ${escapeHtml(model.state)}</small>${model.replica_count !== undefined && model.replica_count !== null ? `<small>Réplicas: ${escapeHtml(model.replica_count)}</small>` : ""}${model.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(model.token_expires_at))}</small>` : ""}</div><div><span class="protocol ${compatible ? "compatible" : "adapter"}">${protocolName}</span><small>${escapeHtml(engineName)}${escapeHtml(backendName)} · ${escapeHtml(model.task_family || model.task || "tarea no publicada")}</small>${protocolHelp}${roleHelp}</div><div class="connection-url"><span>${escapeHtml(model.url || "Endpoint no incluido por la API")}</span>${model.url ? `<small>URL obtenida mediante ${escapeHtml(model.url_source || "la API de Cloudera")}</small>` : ""}</div><label>JWT / API key del modelo<input class="cloudera-model-token" data-index="${index}" type="password" autocomplete="new-password" placeholder="${model.has_model_token ? "Escribe un token nuevo para sustituir" : credentialHint}"></label><div class="row-actions"><button class="secondary save-cloudera-token" data-index="${index}">${model.has_model_token ? "Sustituir token" : "Guardar token propio"}</button><button class="secondary probe-cloudera" data-index="${index}" ${!model.url ? "disabled" : ""}>Probar acceso</button>${prepareActions}</div><p class="model-probe-status ${probe ? (probe.ok ? "success" : "error") : ""}" data-probe="${index}" role="status">${response}</p></article>`;
+    return `<article class="cloudera-model"><div><b>${escapeHtml(model.name)}</b><small>${escapeHtml(model.source)}${model.project ? ` · ${escapeHtml(model.project)}` : ""}</small></div><div class="model-state-stack">${stateIndicator(deployment)}${stateIndicator(credential)}<small>Cloudera informa: ${escapeHtml(model.state)}</small>${model.replica_count !== undefined && model.replica_count !== null ? `<small>Réplicas: ${escapeHtml(model.replica_count)}</small>` : ""}${model.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(model.token_expires_at))}</small>` : ""}</div><div><span class="protocol ${compatible ? "compatible" : "adapter"}">${protocolName}</span><small>${escapeHtml(engineName)}${escapeHtml(backendName)} · ${escapeHtml(model.task_family || model.task || "tarea no publicada")}</small>${protocolHelp}${roleHelp}</div><div class="connection-url"><span>${escapeHtml(model.url || "Endpoint no incluido por la API")}</span>${model.url ? `<small>URL obtenida mediante ${escapeHtml(model.url_source || "la API de Cloudera")}</small>` : ""}</div>${credentialEditor}<div class="row-actions">${credentialAction}<button class="secondary probe-cloudera" data-index="${index}" ${!model.url ? "disabled" : ""}>Probar acceso</button>${prepareActions}</div><p class="model-probe-status ${probe ? (probe.ok ? "success" : "error") : ""}" data-probe="${index}" role="status">${response}</p></article>`;
   }).join("") : '<p class="empty compact">La API no devolvió modelos visibles para esta conexión.</p>';
   document.querySelectorAll("[data-connection-models]").forEach((container) => {
     const entries = clouderaModels.map((model, index) => ({model, index}))
@@ -894,19 +937,27 @@ function currentModelBackend() {
       : preparedClouderaSource?.serving_engine || (providerModel.startsWith("ollama/") ? "ollama" : "openai");
 }
 
+function currentModelIsEmbedding() {
+  const task = String(preparedClouderaSource?.task || "").toLowerCase();
+  const model = $("#config-model").value.toLowerCase();
+  return task.includes("embed") || model.includes("embed") || model.includes("bge-");
+}
+
 function updateModelParameterContext() {
   const backend = currentModelBackend();
   const triton = backend === "triton";
+  const embedding = currentModelIsEmbedding();
+  const generationDisabled = triton || embedding;
   const supportsProviderSampling = ["vllm", "nim", "workbench", "ollama"].includes(backend);
   const generation = $("#generation-parameter-section");
-  generation.setAttribute("aria-disabled", String(triton));
-  generation.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = triton; });
+  generation.setAttribute("aria-disabled", String(generationDisabled));
+  generation.querySelectorAll("input, textarea, select").forEach((control) => { control.disabled = generationDisabled; });
   ["#config-top-k", "#config-min-p", "#config-repetition-penalty"].forEach((selector) => {
-    $(selector).disabled = triton || !supportsProviderSampling;
+    $(selector).disabled = generationDisabled || !supportsProviderSampling;
   });
-  $("#config-reasoning-mode").disabled = triton;
-  $("#config-reasoning").disabled = triton || $("#config-reasoning-mode").value === "disabled";
-  $("#config-preserve-thinking").disabled = backend !== "workbench" || triton;
+  $("#config-reasoning-mode").disabled = generationDisabled;
+  $("#config-reasoning").disabled = generationDisabled || $("#config-reasoning-mode").value === "disabled";
+  $("#config-preserve-thinking").disabled = backend !== "workbench" || generationDisabled;
   const compatibility = $("#config-compatibility").value;
   const hints = {
     triton: "Triton OIP recibe tensores. El contexto, batching y decoding se cambian en config.pbtxt o al desplegar el modelo, no como parámetros OpenAI.",
@@ -918,7 +969,9 @@ function updateModelParameterContext() {
     ollama: "LiteLLM traduce las opciones compatibles hacia Ollama. Keep alive controla cuánto permanece cargado el modelo.",
     openai: "Sólo se envían parámetros OpenAI estándar; las opciones específicas de vLLM/NIM se omiten.",
   };
-  $("#model-parameter-hint").textContent = hints[backend] || hints.openai;
+  $("#model-parameter-hint").textContent = embedding && backend === "workbench"
+    ? "Workbench embeddings usa request.input, input_type, normalize y batch_size; los parámetros de generación y razonamiento no se envían."
+    : hints[backend] || hints.openai;
 }
 
 function applyModelPreset() {
@@ -1055,6 +1108,8 @@ async function addConfiguredModel(event) {
   setInlineStatus("#model-form-status", "Validando y guardando…");
   const effectiveBackend = currentModelBackend();
   const tritonProfile = effectiveBackend === "triton";
+  const embeddingProfile = currentModelIsEmbedding();
+  const generationDisabled = tritonProfile || embeddingProfile;
   const providerSampling = ["vllm", "nim", "workbench", "ollama"].includes(effectiveBackend);
   const reasoningMode = tritonProfile ? "auto" : $("#config-reasoning-mode").value;
   let extraParameters;
@@ -1077,19 +1132,19 @@ async function addConfiguredModel(event) {
     compatibility_profile: $("#config-compatibility").value,
     context_window: optionalNumber("#config-context-window"),
     max_output_tokens: optionalNumber("#config-max-output-tokens"),
-    default_max_tokens: tritonProfile ? null : optionalNumber("#config-default-max-tokens"),
-    temperature: tritonProfile ? null : optionalNumber("#config-temperature"),
-    top_p: tritonProfile ? null : optionalNumber("#config-top-p"),
-    top_k: providerSampling ? optionalNumber("#config-top-k") : null,
-    min_p: providerSampling ? optionalNumber("#config-min-p") : null,
-    repetition_penalty: providerSampling ? optionalNumber("#config-repetition-penalty") : null,
-    frequency_penalty: tritonProfile ? null : optionalNumber("#config-frequency-penalty"),
-    presence_penalty: tritonProfile ? null : optionalNumber("#config-presence-penalty"),
-    seed: tritonProfile ? null : optionalNumber("#config-seed"),
-    stop: tritonProfile ? [] : $("#config-stop").value.split("\n").map((value) => value.trim()).filter(Boolean),
-    reasoning_mode: reasoningMode,
-    reasoning_effort: reasoningMode === "disabled" ? "" : $("#config-reasoning").value,
-    preserve_thinking: reasoningMode === "enabled" && $("#config-preserve-thinking").checked,
+    default_max_tokens: generationDisabled ? null : optionalNumber("#config-default-max-tokens"),
+    temperature: generationDisabled ? null : optionalNumber("#config-temperature"),
+    top_p: generationDisabled ? null : optionalNumber("#config-top-p"),
+    top_k: providerSampling && !generationDisabled ? optionalNumber("#config-top-k") : null,
+    min_p: providerSampling && !generationDisabled ? optionalNumber("#config-min-p") : null,
+    repetition_penalty: providerSampling && !generationDisabled ? optionalNumber("#config-repetition-penalty") : null,
+    frequency_penalty: generationDisabled ? null : optionalNumber("#config-frequency-penalty"),
+    presence_penalty: generationDisabled ? null : optionalNumber("#config-presence-penalty"),
+    seed: generationDisabled ? null : optionalNumber("#config-seed"),
+    stop: generationDisabled ? [] : $("#config-stop").value.split("\n").map((value) => value.trim()).filter(Boolean),
+    reasoning_mode: embeddingProfile ? "auto" : reasoningMode,
+    reasoning_effort: embeddingProfile || reasoningMode === "disabled" ? "" : $("#config-reasoning").value,
+    preserve_thinking: !embeddingProfile && reasoningMode === "enabled" && $("#config-preserve-thinking").checked,
     num_retries: optionalNumber("#config-num-retries"),
     max_parallel_requests: optionalNumber("#config-max-parallel"),
     keep_alive: $("#config-keep-alive").value,
@@ -1780,6 +1835,8 @@ $("#cloudera-onpremise-version").onchange = updateClouderaOnpremCompatibility;
 $("#cloudera-cai-version").onchange = updateClouderaOnpremCompatibility;
 $("#cloudera-credential-type").onchange = updateClouderaOnpremCompatibility;
 $("#cloudera-onprem-tls-verification").onchange = updateClouderaTlsFields;
+$("#cloudera-workbench-model-type").onchange = updateClouderaWorkbenchFields;
+$("#cloudera-workbench-tls-verification").onchange = updateClouderaWorkbenchFields;
 document.querySelectorAll('input[name="cloudera-auth-mode"]').forEach((radio) => {
   radio.onchange = updateClouderaOnpremCompatibility;
 });

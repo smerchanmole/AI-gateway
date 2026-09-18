@@ -657,6 +657,10 @@ class ClouderaConnection(BaseModel):
     credential_type: str = "cdp_token"
     tls_verification: str = "system"
     tls_ca_pem: str = ""
+    workbench_mode: str = "catalog"
+    workbench_model_type: str = "chat"
+    workbench_input_type: str = "passage"
+    workbench_api_key: str = ""
 
 
 class ClouderaTokenRenewal(BaseModel):
@@ -821,6 +825,10 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
                 extra_body["preserve_thinking"] = True
         elif effective_backend in {"vllm", "nim"}:
             extra_body["chat_template_kwargs"] = {"enable_thinking": thinking}
+    if (effective_backend == "workbench" and "embed" in model.task.lower()
+            and model.embedding_input_type in {"query", "passage"}):
+        extra_body["input_type"] = model.embedding_input_type
+        extra_body["normalize"] = True
     if extra_body:
         params["extra_body"] = extra_body
 
@@ -952,12 +960,24 @@ async def _probe_model_candidate(model: ModelCreate, entry: dict[str, Any]) -> d
         if options:
             payload["options"] = options
     elif provider_model.startswith("cloudera_workbench/") or backend == "workbench":
-        from gateway.workbench_provider import _request_body
-        url = api_base
-        payload = _request_body(
-            [{"role": "user", "content": "Responde solamente OK"}],
-            {**configured, "extra_body": configured.get("extra_body", {})},
-        )
+        from gateway.workbench_provider import _embedding_request_body, _endpoint_auth, _request_body
+        url, body_access_key, bearer = _endpoint_auth(api_base, key or None)
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        else:
+            headers.pop("Authorization", None)
+        if embedding:
+            payload = _embedding_request_body(
+                ["Prueba de configuración"],
+                {**configured, "extra_body": configured.get("extra_body", {})},
+            )
+        else:
+            payload = _request_body(
+                [{"role": "user", "content": "Responde solamente OK"}],
+                {**configured, "extra_body": configured.get("extra_body", {})},
+            )
+        if body_access_key:
+            payload["accessKey"] = body_access_key
     else:
         base = api_base or "https://api.openai.com/v1"
         endpoint = "embeddings" if embedding else "chat/completions"
@@ -1143,9 +1163,15 @@ def save_cloudera_connection(connection: ClouderaConnection):
             connection.renewal_url, connection.workload_name, connection.onpremise_version,
             connection.credential_expires_at, connection.cai_version,
             connection.onpremise_auth_mode, connection.credential_type,
-            connection.tls_verification, connection.tls_ca_pem)
+            connection.tls_verification, connection.tls_ca_pem,
+            connection.workbench_mode, connection.workbench_model_type,
+            connection.workbench_input_type, connection.workbench_api_key)
         result = generate_initial_cloudera_token(result)
-        if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
+        credential_changed = bool(
+            connection.token.strip() or connection.workbench_api_key.strip()
+            or (connection.kind == "workbench" and "accessKey=" in connection.url)
+        )
+        if manager.process_alive() and credential_changed and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
         return result
     except RuntimeError as exc:
@@ -1163,9 +1189,15 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
             connection.renewal_url, connection.workload_name, connection.onpremise_version,
             connection.credential_expires_at, connection.cai_version,
             connection.onpremise_auth_mode, connection.credential_type,
-            connection.tls_verification, connection.tls_ca_pem)
+            connection.tls_verification, connection.tls_ca_pem,
+            connection.workbench_mode, connection.workbench_model_type,
+            connection.workbench_input_type, connection.workbench_api_key)
         result = generate_initial_cloudera_token(result)
-        if manager.process_alive() and connection.token.strip() and not result.get("token_generated"):
+        credential_changed = bool(
+            connection.token.strip() or connection.workbench_api_key.strip()
+            or (connection.kind == "workbench" and "accessKey=" in connection.url)
+        )
+        if manager.process_alive() and credential_changed and not result.get("token_generated"):
             result.update(apply_cloudera_credential_changes())
         return result
     except KeyError as exc:

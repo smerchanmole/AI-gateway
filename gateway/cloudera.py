@@ -28,7 +28,7 @@ class ClouderaCatalog:
     sólo recibe estructuras saneadas y variables de entorno temporales.
     """
 
-    SECRET_FIELDS = {"token", "workload_password", "cdp_private_key", "tls_ca_pem"}
+    SECRET_FIELDS = {"token", "workload_password", "cdp_private_key", "tls_ca_pem", "workbench_api_key"}
     TLS_VERIFICATION_MODES = {"system", "custom_ca", "disabled"}
     CAI_RUNTIME_COMPATIBILITY = {
         "1.5.5_sp2": {"7.1.9_sp1", "7.3.1"},
@@ -486,6 +486,7 @@ class ClouderaCatalog:
                           {"has_token": bool(item.get("token")),
                            "has_workload_password": bool(item.get("workload_password")),
                            "has_cdp_private_key": bool(item.get("cdp_private_key")),
+                           "has_workbench_api_key": bool(item.get("workbench_api_key")),
                            "has_tls_ca": bool(item.get("tls_ca_pem")),
                            "renewal_ready": renewal_ready,
                            "renewal_supported": renewal_ready,
@@ -571,7 +572,10 @@ class ClouderaCatalog:
                         workload_name: str = "DE", onpremise_version: str = "legacy",
                         credential_expires_at: str = "", cai_version: str = "1.5.5_sp3",
                         onpremise_auth_mode: str = "", credential_type: str = "cdp_token",
-                        tls_verification: str = "system", tls_ca_pem: str = "") -> dict[str, Any]:
+                        tls_verification: str = "system", tls_ca_pem: str = "",
+                        workbench_mode: str = "catalog", workbench_model_type: str = "chat",
+                        workbench_input_type: str = "passage",
+                        workbench_api_key: str = "") -> dict[str, Any]:
         """Create a connection after validating type, platform, URL, and JWT.
 
         Una URL completa de endpoint se reduce a esquema+dominio porque las
@@ -581,6 +585,12 @@ class ClouderaCatalog:
 
         if kind not in {"inference", "workbench"}: raise RuntimeError("Tipo de conexión Cloudera no válido")
         if platform not in {"cloud", "onpremise"}: raise RuntimeError("La instalación debe ser Cloud u On-premise")
+        if workbench_mode not in {"catalog", "direct"}:
+            raise RuntimeError("Selecciona catálogo API v2 o endpoint directo para Workbench")
+        if workbench_model_type not in {"chat", "embedding"}:
+            raise RuntimeError("El contrato Workbench debe ser chat o embeddings")
+        if workbench_input_type not in {"query", "passage"}:
+            raise RuntimeError("El tipo de entrada de embeddings debe ser query o passage")
         if onpremise_version not in {*self.RUNTIME_VERSION_LABELS}:
             raise RuntimeError("Selecciona una versión válida de Runtime on-premise")
         new_inference_profile = (platform == "onpremise" and kind == "inference"
@@ -596,18 +606,28 @@ class ClouderaCatalog:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc: raise RuntimeError("La URL Cloudera no es válida")
         if parsed.hostname and parsed.hostname.lower().startswith(("console.", "console-", "consoles.")):
             raise RuntimeError("Has pegado la URL de la consola CDP. Abre el servicio y usa su URL de endpoints")
-        # Users commonly paste the full endpoint URL. Catalog discovery needs
-        # only its origin; normalizing here prevents a confusing 404 response.
+        pasted_access_key = urllib.parse.parse_qs(parsed.query).get("accessKey", [""])[0].strip()
+        effective_token = token.strip() or (pasted_access_key if kind == "workbench" and workbench_mode == "direct" else "")
+        # Catalog discovery needs only its origin. A direct Model Service
+        # connection keeps /model but strips accessKey from the public URL.
         normalized = f"{parsed.scheme}://{parsed.netloc}"
-        metadata = self._token_metadata(token.strip()) if token.strip() else {}
+        if kind == "workbench" and workbench_mode == "direct":
+            normalized = f"{normalized}{parsed.path.rstrip('/') or '/model'}"
+            if not normalized.endswith("/model"):
+                normalized = f"{normalized}/model"
+        metadata = self._token_metadata(effective_token) if effective_token else {}
         if metadata.get("token_expired"):
             raise RuntimeError(f"El JWT está caducado desde {metadata['token_expires_at']}. Genera uno nuevo en Cloudera")
         declared_expiry = self._normalize_declared_expiry(credential_expires_at)
-        data = self._read(); connection_id = self._id(kind, normalized)
+        identity_url = normalized
+        if kind == "workbench" and workbench_mode == "direct" and effective_token:
+            identity_url = f"{normalized}:{hashlib.sha256(effective_token.encode()).hexdigest()}"
+        data = self._read(); connection_id = self._id(kind, identity_url)
         previous = next((item for item in data.get("connections", []) if item.get("id") == connection_id), {})
         previous_mode = str(previous.get("onpremise_auth_mode") or auth_mode)
         same_auth_context = (previous.get("platform", platform) == platform and
-                             (not new_inference_profile or previous_mode == auth_mode))
+                             (not new_inference_profile or previous_mode == auth_mode) and
+                             (kind != "workbench" or previous.get("workbench_mode", workbench_mode) == workbench_mode))
         requested_tls_mode = str(tls_verification or "system").strip().lower()
         candidate_ca_pem = (tls_ca_pem or
                             (previous.get("tls_ca_pem", "")
@@ -615,8 +635,7 @@ class ClouderaCatalog:
         effective_tls_mode, effective_ca_pem = self._validate_tls_settings(
             requested_tls_mode, candidate_ca_pem,
         )
-        manual_modern_workbench = (platform == "onpremise" and
-                                   onpremise_version == "7.3.2_plus" and kind == "workbench")
+        manual_modern_workbench = kind == "workbench"
         manual_inference = new_inference_profile and auth_mode == "manual"
         renewal_candidate = ("" if manual_modern_workbench or manual_inference else
                              renewal_url or (previous.get("renewal_url", "") if same_auth_context else ""))
@@ -632,7 +651,7 @@ class ClouderaCatalog:
                  "cai_version": cai_version,
                  "onpremise_auth_mode": auth_mode if new_inference_profile else "",
                  "credential_type": credential_type if new_inference_profile else "cdp_token",
-                 "token": token.strip() or (previous.get("token", "") if same_auth_context else ""),
+                 "token": effective_token or (previous.get("token", "") if same_auth_context else ""),
                  "workload_user": ((workload_user.strip() or (previous.get("workload_user", "") if same_auth_context else ""))
                                    if platform == "onpremise" and onpremise_version == "legacy" else ""),
                  "workload_password": ((workload_password or (previous.get("workload_password", "") if same_auth_context else ""))
@@ -645,8 +664,15 @@ class ClouderaCatalog:
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE"),
                  "tls_verification": effective_tls_mode,
                  "tls_ca_pem": effective_ca_pem,
+                 "workbench_mode": workbench_mode if kind == "workbench" else "catalog",
+                 "workbench_model_type": workbench_model_type if kind == "workbench" else "chat",
+                 "workbench_input_type": workbench_input_type if kind == "workbench" else "passage",
+                 "workbench_api_key": ((workbench_api_key.strip() or previous.get("workbench_api_key", ""))
+                                       if kind == "workbench" and workbench_mode == "direct" else ""),
                  "token_expire_at": (declared_expiry or
-                    (previous.get("token_expire_at", "") if not token.strip() else ""))}
+                    (previous.get("token_expire_at", "") if not effective_token else ""))}
+        if kind == "workbench" and workbench_mode == "direct" and not entry["token"]:
+            raise RuntimeError("Pega el accessKey del modelo o una URL /model?accessKey=…")
         if new_inference_profile and auth_mode == "manual" and not entry["token"]:
             raise RuntimeError("Pega un CDP_TOKEN o una Knox API key para usar la opción de credencial existente")
         if new_inference_profile and auth_mode == "ums_auto" and not all((
@@ -679,7 +705,10 @@ class ClouderaCatalog:
                           onpremise_version: str = "legacy", credential_expires_at: str = "",
                           cai_version: str = "1.5.5_sp3", onpremise_auth_mode: str = "",
                           credential_type: str = "cdp_token", tls_verification: str = "system",
-                          tls_ca_pem: str = "") -> dict[str, Any]:
+                          tls_ca_pem: str = "", workbench_mode: str = "catalog",
+                          workbench_model_type: str = "chat",
+                          workbench_input_type: str = "passage",
+                          workbench_api_key: str = "") -> dict[str, Any]:
         """Edit a connection while preserving secrets when fields remain unchanged."""
         if kind not in {"inference", "workbench"}: raise RuntimeError("Tipo de conexión Cloudera no válido")
         data = self._read()
@@ -690,8 +719,16 @@ class ClouderaCatalog:
             return self.save_connection(name, kind, url, token, platform, probe_interval_minutes, workload_user,
                                         workload_password, cdp_access_key_id, cdp_private_key, renewal_url,
                                         workload_name, onpremise_version, credential_expires_at, cai_version,
-                                        onpremise_auth_mode, credential_type, tls_verification, tls_ca_pem)
+                                        onpremise_auth_mode, credential_type, tls_verification, tls_ca_pem,
+                                        workbench_mode, workbench_model_type, workbench_input_type,
+                                        workbench_api_key)
         if platform not in {"cloud", "onpremise"}: raise RuntimeError("La instalación debe ser Cloud u On-premise")
+        if workbench_mode not in {"catalog", "direct"}:
+            raise RuntimeError("Selecciona catálogo API v2 o endpoint directo para Workbench")
+        if workbench_model_type not in {"chat", "embedding"}:
+            raise RuntimeError("El contrato Workbench debe ser chat o embeddings")
+        if workbench_input_type not in {"query", "passage"}:
+            raise RuntimeError("El tipo de entrada de embeddings debe ser query o passage")
         if onpremise_version not in {*self.RUNTIME_VERSION_LABELS}:
             raise RuntimeError("Selecciona una versión válida de Runtime on-premise")
         new_inference_profile = (platform == "onpremise" and kind == "inference"
@@ -709,15 +746,36 @@ class ClouderaCatalog:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc: raise RuntimeError("La URL Cloudera no es válida")
         if parsed.hostname and parsed.hostname.lower().startswith(("console.", "console-", "consoles.")):
             raise RuntimeError("Has pegado la URL de la consola CDP. Abre el servicio y usa su URL de endpoints")
+        pasted_access_key = urllib.parse.parse_qs(parsed.query).get("accessKey", [""])[0].strip()
+        effective_token = token.strip() or pasted_access_key or (
+            str(previous.get("token") or "")
+            if (kind == "workbench" and workbench_mode == "direct"
+                and previous.get("workbench_mode") == "direct") else ""
+        )
         normalized = f"{parsed.scheme}://{parsed.netloc}"
-        metadata = self._token_metadata(token.strip()) if token.strip() else {}
+        if kind == "workbench" and workbench_mode == "direct":
+            normalized = f"{normalized}{parsed.path.rstrip('/') or '/model'}"
+            if not normalized.endswith("/model"):
+                normalized = f"{normalized}/model"
+        metadata = self._token_metadata(effective_token) if effective_token else {}
         if metadata.get("token_expired"):
             raise RuntimeError(f"El JWT está caducado desde {metadata['token_expires_at']}. Genera uno nuevo en Cloudera")
         declared_expiry = self._normalize_declared_expiry(credential_expires_at)
-        new_id = self._id(kind, normalized)
+        identity_url = normalized
+        if kind == "workbench" and workbench_mode == "direct" and effective_token:
+            identity_url = f"{normalized}:{hashlib.sha256(effective_token.encode()).hexdigest()}"
+        same_endpoint_identity = (
+            previous.get("kind") == kind
+            and previous.get("url") == normalized
+            and previous.get("workbench_mode", "catalog") == workbench_mode
+        )
+        # Rotating a secret must not rename the environment variable already
+        # referenced by configured LiteLLM models.
+        new_id = connection_id if same_endpoint_identity else self._id(kind, identity_url)
         previous_mode = str(previous.get("onpremise_auth_mode") or auth_mode)
         same_auth_context = (previous.get("platform", "cloud") == platform and
-                             (not new_inference_profile or previous_mode == auth_mode))
+                             (not new_inference_profile or previous_mode == auth_mode) and
+                             (kind != "workbench" or previous.get("workbench_mode", "catalog") == workbench_mode))
         requested_tls_mode = str(tls_verification or "system").strip().lower()
         candidate_ca_pem = (tls_ca_pem or
                             (previous.get("tls_ca_pem", "")
@@ -725,8 +783,7 @@ class ClouderaCatalog:
         effective_tls_mode, effective_ca_pem = self._validate_tls_settings(
             requested_tls_mode, candidate_ca_pem,
         )
-        manual_modern_workbench = (platform == "onpremise" and
-                                   onpremise_version == "7.3.2_plus" and kind == "workbench")
+        manual_modern_workbench = kind == "workbench"
         manual_inference = new_inference_profile and auth_mode == "manual"
         renewal_candidate = ("" if manual_modern_workbench or manual_inference else
                              renewal_url or (previous.get("renewal_url", "") if same_auth_context else ""))
@@ -742,7 +799,7 @@ class ClouderaCatalog:
                  "cai_version": cai_version,
                  "onpremise_auth_mode": auth_mode if new_inference_profile else "",
                  "credential_type": credential_type if new_inference_profile else "cdp_token",
-                 "token": token.strip() or (previous.get("token", "") if same_auth_context else ""),
+                 "token": effective_token or (previous.get("token", "") if same_auth_context else ""),
                  "workload_user": ((workload_user.strip() or (previous.get("workload_user", "") if same_auth_context else ""))
                                    if platform == "onpremise" and onpremise_version == "legacy" else ""),
                  "workload_password": ((workload_password or (previous.get("workload_password", "") if same_auth_context else ""))
@@ -755,8 +812,15 @@ class ClouderaCatalog:
                  "workload_name": workload_name.strip() or previous.get("workload_name", "DE"),
                  "tls_verification": effective_tls_mode,
                  "tls_ca_pem": effective_ca_pem,
+                 "workbench_mode": workbench_mode if kind == "workbench" else "catalog",
+                 "workbench_model_type": workbench_model_type if kind == "workbench" else "chat",
+                 "workbench_input_type": workbench_input_type if kind == "workbench" else "passage",
+                 "workbench_api_key": ((workbench_api_key.strip() or previous.get("workbench_api_key", ""))
+                                       if kind == "workbench" and workbench_mode == "direct" else ""),
                  "token_expire_at": (declared_expiry or
-                    (previous.get("token_expire_at", "") if not token.strip() else ""))}
+                    (previous.get("token_expire_at", "") if not token.strip() and not pasted_access_key else ""))}
+        if kind == "workbench" and workbench_mode == "direct" and not entry["token"]:
+            raise RuntimeError("Pega el accessKey del modelo o una URL /model?accessKey=…")
         if new_inference_profile and auth_mode == "manual" and not entry["token"]:
             raise RuntimeError("Pega un CDP_TOKEN o una Knox API key para usar la opción de credencial existente")
         if new_inference_profile and auth_mode == "ums_auto" and not all((
@@ -809,6 +873,8 @@ class ClouderaCatalog:
         if not token: raise RuntimeError("No hay credencial disponible para realizar la prueba")
         if use_specific:
             source = "Token del modelo"
+        elif connection.get("kind") == "workbench" and connection.get("workbench_mode") == "direct":
+            source = "accessKey del modelo Workbench"
         elif connection.get("kind") == "workbench":
             source = "API key de Workbench"
         elif specific:
@@ -1020,22 +1086,37 @@ class ClouderaCatalog:
                 payload = {"model": model_name or external_id, "prompt": "OK", "max_tokens": 1}
         elif protocol == "workbench":
             method = "POST"
-            payload = {"request": {
-                "messages": [{"role": "user", "content": "Responde solo OK"}],
-                "max_tokens": 1,
-                "temperature": 0,
-                "enable_thinking": False,
-                "reasoning_effort": "low",
-            }}
+            if "embed" in task.lower():
+                payload = {"request": {
+                    "input": ["health check"],
+                    "input_type": str(connection.get("workbench_input_type") or "query"),
+                    "normalize": True,
+                    "batch_size": 1,
+                }}
+            else:
+                payload = {"request": {
+                    "messages": [{"role": "user", "content": "Responde solo OK"}],
+                    "max_tokens": 1,
+                    "temperature": 0,
+                    "enable_thinking": False,
+                    "reasoning_effort": "low",
+                }}
         elif "/v2/models/" in target:
             # In OIP the published URL already ends in /infer. A real probe needs
             # the model's tensor schema, so use standard readiness rather than
             # pretending to perform valid inference.
             target = f"{target.split('/v2/models/', 1)[0]}/v2/health/ready"
         body = json.dumps(payload).encode() if payload is not None else None
-        request = urllib.request.Request(target, data=body, method=method,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
-                     "Content-Type": "application/json"})
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if protocol == "workbench" and connection.get("workbench_mode") == "direct":
+            if payload is not None:
+                payload["accessKey"] = token
+                body = json.dumps(payload).encode()
+            if connection.get("workbench_api_key"):
+                headers["Authorization"] = f"Bearer {connection['workbench_api_key']}"
+        else:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(target, data=body, method=method, headers=headers)
         started = datetime.now(timezone.utc)
         try:
             with self._urlopen(request, connection, timeout=20) as response:
@@ -1084,8 +1165,17 @@ class ClouderaCatalog:
         """Materialize secrets only in the LiteLLM subprocess environment."""
 
         data = self._read()
-        result = {self.connection_environment_name(item["id"]): item["token"]
-                  for item in data.get("connections", []) if item.get("id") and item.get("token")}
+        result = {}
+        for item in data.get("connections", []):
+            if not item.get("id") or not item.get("token"):
+                continue
+            value = item["token"]
+            if item.get("kind") == "workbench" and item.get("workbench_mode") == "direct":
+                value = json.dumps({
+                    "access_key": item["token"],
+                    "authorization": item.get("workbench_api_key", ""),
+                }, ensure_ascii=False)
+            result[self.connection_environment_name(item["id"])] = value
         connections = {item.get("id"): item for item in data.get("connections", [])}
         for key, token in data.get("model_tokens", {}).items():
             connection_id, external_id = key.split(":", 1)
@@ -1103,7 +1193,10 @@ class ClouderaCatalog:
 
         connection = next((item for item in self._read().get("connections", []) if item.get("id") == connection_id), None)
         if not connection: raise KeyError(connection_id)
-        if not connection.get("token"): raise RuntimeError("Añade el CDP/API token antes de descubrir modelos")
+        if not connection.get("token"):
+            if connection.get("kind") == "workbench" and connection.get("workbench_mode") == "direct":
+                raise RuntimeError("Añade el accessKey del modelo Workbench antes de preparar el endpoint")
+            raise RuntimeError("Añade el CDP/API token antes de descubrir modelos")
         metadata = self._connection_token_metadata(connection)
         if metadata.get("token_expired"):
             raise RuntimeError(f"El JWT de esta conexión caducó en {metadata['token_expires_at']}. Edítala y pega un token nuevo")
@@ -1216,6 +1309,35 @@ class ClouderaCatalog:
                                     else self.connection_environment_name(connection_id)),
                     **profile, **self.model_token_status(connection_id, external_id)})
             return discovered
+        if connection.get("workbench_mode") == "direct":
+            model_type = str(connection.get("workbench_model_type") or "chat")
+            input_type = str(connection.get("workbench_input_type") or "passage")
+            external_id = f"direct-{connection_id}"
+            model_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(connection.get("name") or external_id)).strip("-")
+            is_embedding = model_type == "embedding"
+            return [{
+                "connection_id": connection_id,
+                "source": "Cloudera AI Workbench",
+                "external_id": external_id,
+                "name": model_name or external_id,
+                "model_name": model_name or external_id,
+                "url": connection["url"],
+                "url_source": "endpoint directo de Model Service",
+                "state": "configurado",
+                "protocol": "workbench",
+                "workbench_mode": "direct",
+                "task": "embedding" if is_embedding else "generation",
+                "task_family": "embedding" if is_embedding else "generation",
+                "serving_engine": "workbench",
+                "runtime_backend": "workbench",
+                "has_chat_template": not is_embedding,
+                "requires_input_type": is_embedding,
+                "embedding_input_types": ["query", "passage"] if is_embedding else [],
+                "default_input_type": input_type if is_embedding else "",
+                "has_model_token": False,
+                "api_key_env": self.connection_environment_name(connection_id),
+                **self.model_token_status(connection_id, external_id),
+            }]
         projects = self._items(self._request(
             f"{connection['url']}/api/v2/projects?page_size=100", connection["token"],
             connection=connection,
