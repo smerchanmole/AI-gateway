@@ -52,6 +52,12 @@ def safe_value(value: Any, depth: int = 0) -> Any:
             for k, v in value.items()
         }
     if isinstance(value, (list, tuple)):
+        # Embedding vectors can contain thousands of floats. Persisting every
+        # coordinate for every load-test request makes the daily database and
+        # the logs API grow without adding useful operational information.
+        if len(value) > 64 and all(isinstance(item, (int, float)) for item in value):
+            preview = [safe_value(item, depth + 1) for item in value[:16]]
+            return [*preview, f"[… {len(value) - 16} valores omitidos]"]
         return [safe_value(v, depth + 1) for v in value]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
@@ -77,11 +83,15 @@ def connect(db_path: Path) -> sqlite3.Connection:
     for name, column_type in {
         "started_at": "TEXT", "origin_ip": "TEXT", "provider_ip": "TEXT", "ttft_ms": "INTEGER",
         "guardrail_status": "TEXT", "guardrail_reason": "TEXT",
-        "parameters_json": "TEXT"
+        "parameters_json": "TEXT", "prompt_tokens": "INTEGER",
+        "completion_tokens": "INTEGER"
     }.items():
         if name not in existing:
             connection.execute(f"ALTER TABLE requests ADD COLUMN {name} {column_type}")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model, id DESC)")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_requests_model_duration ON requests(model, duration_ms)"
+    )
     return connection
 
 
@@ -93,17 +103,25 @@ def insert_log(db_path: Path, model: str, status: str, duration_ms: int | None,
                parameters: Any = None) -> None:
     """Insert an event in a short transaction so the callback is not blocked."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_request = safe_value(request)
+    safe_response = safe_value(response)
+    safe_parameters = safe_value(parameters)
+    usage = safe_response.get("usage", {}) if isinstance(safe_response, dict) else {}
+    prompt_tokens = int(usage.get("prompt_tokens") or 0) if isinstance(usage, dict) else 0
+    completion_tokens = int(usage.get("completion_tokens") or 0) if isinstance(usage, dict) else 0
     with connect(db_path) as connection:
         connection.execute(
             """INSERT INTO requests(
             model,status,duration_ms,request_json,response_json,error,
-            started_at,origin_ip,provider_ip,ttft_ms,guardrail_status,guardrail_reason,parameters_json
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            started_at,origin_ip,provider_ip,ttft_ms,guardrail_status,guardrail_reason,parameters_json,
+            prompt_tokens,completion_tokens
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (model, status, duration_ms,
-             json.dumps(safe_value(request), ensure_ascii=False, default=str),
-             json.dumps(safe_value(response), ensure_ascii=False, default=str), error,
+             json.dumps(safe_request, ensure_ascii=False, default=str),
+             json.dumps(safe_response, ensure_ascii=False, default=str), error,
              started_at, origin_ip, provider_ip, ttft_ms, guardrail_status, guardrail_reason,
-             json.dumps(safe_value(parameters), ensure_ascii=False, default=str)),
+             json.dumps(safe_parameters, ensure_ascii=False, default=str),
+             prompt_tokens, completion_tokens),
         )
 
 
@@ -159,6 +177,120 @@ def available_days(runtime_dir: Path, model: str) -> list[str]:
         days.update(day.isoformat() for item in read_logs(legacy, model, 10_000)
                     if (day := _madrid_day(item.get("started_at") or item.get("created_at"))))
     return sorted(days, reverse=True)
+
+
+def _madrid_hour(timestamp: str | None) -> int | None:
+    """Return the civil hour used by the dashboard without loading JSON."""
+
+    if not timestamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(MADRID).hour
+    except (ValueError, TypeError):
+        return None
+
+
+def log_kpis_for_day(runtime_dir: Path, models: list[str], day: date) -> dict[str, Any]:
+    """Aggregate a complete day in SQLite without hydrating request payloads.
+
+    Detail rows stay deliberately bounded in the HTTP response, while these
+    figures cover every matching event. New databases keep token counts in
+    scalar columns; migrated rows fall back to their historical JSON once.
+    """
+
+    unique_models = list(dict.fromkeys(str(model) for model in models if str(model)))
+    if not unique_models:
+        return log_kpis([])
+    daily = daily_log_path(runtime_dir, day)
+    legacy = runtime_dir / "requests.sqlite3"
+    if not daily.exists() and not legacy.exists():
+        return log_kpis([])
+    daily.parent.mkdir(parents=True, exist_ok=True)
+    # Apply additive migrations before composing a query across both schemas.
+    with connect(daily):
+        pass
+    if legacy.exists():
+        with connect(legacy):
+            pass
+    with connect(daily) as connection:
+        connection.create_function("madrid_hour", 1, _madrid_hour)
+        connection.create_function(
+            "madrid_day", 1,
+            lambda value: (selected.isoformat() if (selected := _madrid_day(value)) else None),
+        )
+        placeholders = ",".join("?" for _ in unique_models)
+        selections = [
+            f"""SELECT status,duration_ms,ttft_ms,guardrail_status,started_at,created_at,
+                COALESCE(prompt_tokens, CAST(json_extract(response_json,'$.usage.prompt_tokens') AS INTEGER), 0) prompt_tokens,
+                COALESCE(completion_tokens, CAST(json_extract(response_json,'$.usage.completion_tokens') AS INTEGER), 0) completion_tokens
+                FROM main.requests WHERE model IN ({placeholders})"""
+        ]
+        parameters: list[Any] = [*unique_models]
+        if legacy.exists():
+            connection.execute("ATTACH DATABASE ? AS legacy", (str(legacy),))
+            selections.append(
+                f"""SELECT status,duration_ms,ttft_ms,guardrail_status,started_at,created_at,
+                    COALESCE(prompt_tokens, CAST(json_extract(response_json,'$.usage.prompt_tokens') AS INTEGER), 0) prompt_tokens,
+                    COALESCE(completion_tokens, CAST(json_extract(response_json,'$.usage.completion_tokens') AS INTEGER), 0) completion_tokens
+                    FROM legacy.requests WHERE model IN ({placeholders})
+                    AND madrid_day(COALESCE(started_at,created_at))=?"""
+            )
+            parameters.extend([*unique_models, day.isoformat()])
+        selected_sql = " UNION ALL ".join(selections)
+        aggregate = connection.execute(
+            f"""WITH selected AS ({selected_sql})
+                SELECT COUNT(*) requests,
+                       SUM(status='success') successes,
+                       SUM(status!='success') errors,
+                       ROUND(AVG(duration_ms)) avg_duration_ms,
+                       ROUND(AVG(ttft_ms)) avg_ttft_ms,
+                       SUM(guardrail_status='warning') guardrail_warnings,
+                       SUM(prompt_tokens) prompt_tokens,
+                       SUM(completion_tokens) completion_tokens,
+                       SUM(duration_ms IS NOT NULL) duration_count
+                FROM selected""",
+            parameters,
+        ).fetchone()
+        duration_count = int(aggregate["duration_count"] or 0)
+        p95 = None
+        if duration_count:
+            offset = min(duration_count - 1, int(duration_count * .95))
+            p95_row = connection.execute(
+                f"""WITH selected AS ({selected_sql})
+                    SELECT duration_ms FROM selected WHERE duration_ms IS NOT NULL
+                    ORDER BY duration_ms LIMIT 1 OFFSET ?""",
+                [*parameters, offset],
+            ).fetchone()
+            p95 = int(p95_row[0]) if p95_row else None
+        hourly = [0] * 24
+        for row in connection.execute(
+            f"""WITH selected AS ({selected_sql})
+                SELECT madrid_hour(COALESCE(started_at,created_at)) hour, COUNT(*) total
+                FROM selected GROUP BY hour""",
+            parameters,
+        ):
+            if row["hour"] is not None:
+                hourly[int(row["hour"])] = int(row["total"])
+    requests = int(aggregate["requests"] or 0)
+    successes = int(aggregate["successes"] or 0)
+    prompt_tokens = int(aggregate["prompt_tokens"] or 0)
+    completion_tokens = int(aggregate["completion_tokens"] or 0)
+    return {
+        "requests": requests,
+        "success_rate": round(successes / requests * 100, 1) if requests else None,
+        "errors": int(aggregate["errors"] or 0),
+        "avg_duration_ms": int(aggregate["avg_duration_ms"]) if aggregate["avg_duration_ms"] is not None else None,
+        "p95_duration_ms": p95,
+        "avg_ttft_ms": int(aggregate["avg_ttft_ms"]) if aggregate["avg_ttft_ms"] is not None else None,
+        "guardrail_warnings": int(aggregate["guardrail_warnings"] or 0),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "hourly": hourly,
+    }
 
 
 def log_kpis(rows: list[dict[str, Any]]) -> dict[str, Any]:

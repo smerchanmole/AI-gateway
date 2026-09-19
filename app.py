@@ -250,7 +250,7 @@ from gateway.core import GatewayManager, environment_port
 from gateway.cloudera import ClouderaCatalog
 from gateway.edge import EdgeProxy, public_gateway_port
 from gateway.excel_export import build_logs_xlsx
-from gateway.log_store import available_days, log_kpis, parse_day, read_day_logs
+from gateway.log_store import available_days, log_kpis, log_kpis_for_day, parse_day, read_day_logs
 from gateway.auth import AuthStore, AuthenticationError, LoginRateLimited
 from gateway.benchmark import BenchmarkRunner
 from gateway.tls import ensure_self_signed_certificate
@@ -1609,14 +1609,28 @@ def read_model_day_logs(name: str, selected, limit: int) -> list[dict]:
 
 
 @app.get("/api/models/{name}/logs")
-def logs(name: str, day: Optional[str] = None, limit: int = Query(500, ge=1, le=5000)):
-    """Query structured events with a defensive row limit."""
+def logs(name: str, day: Optional[str] = None, limit: int = Query(250, ge=1, le=1000)):
+    """Return complete-day aggregates and a bounded recent-detail window."""
     try:
         selected = parse_day(day)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    model_names = [name]
+    try:
+        settings = json.loads(
+            (ROOT / "runtime" / "dashboard_settings.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        settings = {}
+    provider_model = (settings.get("provider_models") or {}).get(name)
+    if provider_model and provider_model != name:
+        model_names.append(str(provider_model))
     rows = read_model_day_logs(name, selected, limit)
-    return {"day": selected.isoformat(), "rows": rows, "kpis": log_kpis(rows)}
+    kpis = log_kpis_for_day(ROOT / "runtime", model_names, selected)
+    return {
+        "day": selected.isoformat(), "rows": rows, "kpis": kpis,
+        "detail_limit": limit, "details_truncated": kpis["requests"] > len(rows),
+    }
 
 
 @app.get("/api/models/{name}/log-days")

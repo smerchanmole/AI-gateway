@@ -29,6 +29,18 @@ const clouderaChecksInProgress = new Set();
 let clouderaRefreshInProgress = false;
 let benchmarkPollTimer = null;
 let currentBenchmark = null;
+let logLoadPromise = null;
+
+const savedTheme = localStorage.getItem("ia-gateway-theme");
+const initialTheme = ["light", "dark"].includes(savedTheme) ? savedTheme : "dark";
+document.documentElement.dataset.theme = initialTheme;
+
+function setTheme(theme) {
+  if (!["light", "dark"].includes(theme)) return;
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("ia-gateway-theme", theme);
+  document.querySelectorAll(".theme-select").forEach((select) => { select.value = theme; });
+}
 
 /* -------------------------------------------------------------------------
  * 1. Infraestructura de interfaz
@@ -1564,8 +1576,12 @@ async function loadLogDays() {
   $("#log-day").innerHTML = days.map((day) => `<option value="${day}" ${day === selectedLogDay ? "selected" : ""}>${day === today ? `Hoy · ${day}` : day}</option>`).join("");
 }
 
-async function loadLogs() {
+async function loadLogs(force = false) {
   /** Switch between technical stdout and the structured model/day dashboard. */
+  if (logLoadPromise && !force) return logLoadPromise;
+  const operation = (async () => {
+  $("#logs").setAttribute("aria-busy", "true");
+  $("#logs").innerHTML = '<p class="empty compact">Cargando registros…</p>';
   if (selectedLogModel === "__litellm__") {
     const raw = await api(`/api/process-log?day=${encodeURIComponent(selectedLogDay)}`);
     $("#log-dashboard").hidden = true;
@@ -1579,15 +1595,23 @@ async function loadLogs() {
     return;
   }
   if (!selectedLogModel) return;
-  const data = await api(`/api/models/${encodeURIComponent(selectedLogModel)}/logs?day=${encodeURIComponent(selectedLogDay)}&limit=5000`);
+  const data = await api(`/api/models/${encodeURIComponent(selectedLogModel)}/logs?day=${encodeURIComponent(selectedLogDay)}&limit=250`);
   $("#log-dashboard").hidden = false;
   $("#download-logs").hidden = false;
   $("#clear-process-log").hidden = true;
   $("#download-logs").href = `/api/models/${encodeURIComponent(selectedLogModel)}/logs.xlsx?day=${encodeURIComponent(selectedLogDay)}`;
   renderKpis(data.kpis);
+  $("#log-detail-summary").textContent = data.details_truncated
+    ? `Mostrando las ${data.rows.length} peticiones más recientes de ${data.kpis.requests}. Los indicadores y el gráfico incluyen toda la jornada.`
+    : `${data.rows.length} peticiones detalladas. Los indicadores y el gráfico incluyen toda la jornada.`;
   $("#logs").innerHTML = logTable(data.rows);
-  const tableLog = $(".log-table-wrap");
-  if (tableLog) tableLog.scrollTop = tableLog.scrollHeight;
+  })();
+  logLoadPromise = operation;
+  try { return await operation; }
+  finally {
+    $("#logs").setAttribute("aria-busy", "false");
+    if (logLoadPromise === operation) logLoadPromise = null;
+  }
 }
 
 async function clearSelectedProcessLog() {
@@ -1797,7 +1821,7 @@ async function cancelBenchmark() {
 
 $("#refresh").onclick = () => loadLogDays().then(loadLogs).catch(showError);
 $("#clear-process-log").onclick = () => clearSelectedProcessLog().catch(showError);
-$("#log-day").onchange = () => { selectedLogDay = $("#log-day").value; loadLogs().catch(showError); };
+$("#log-day").onchange = () => { selectedLogDay = $("#log-day").value; loadLogs(true).catch(showError); };
 $("#test-button").onclick = runTest;
 $("#benchmark-form").onsubmit = startBenchmark;
 $("#benchmark-cancel").onclick = cancelBenchmark;
@@ -1933,6 +1957,10 @@ $("#password-dialog").addEventListener("cancel", (event) => {
 });
 
 updateClouderaFormContext();
+document.querySelectorAll(".theme-select").forEach((select) => {
+  select.value = initialTheme;
+  select.onchange = () => setTheme(select.value);
+});
 authenticationBootstrap().catch(showError);
 window.setInterval(() => {
   if (dashboardAuthenticated) Promise.all([loadStatus(), loadModelResources()]).catch(() => {});

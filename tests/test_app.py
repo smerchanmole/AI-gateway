@@ -352,23 +352,40 @@ def test_dashboard_exposes_architecture_infographic(client):
     )
 
 
-def test_dashboard_offers_persistent_spanish_english_and_italian_localization(client):
+def test_dashboard_offers_persistent_localization_and_theme(client):
     dashboard_response = client.get("/")
     javascript_response = client.get("/static/i18n.js")
+    french_response = client.get("/static/i18n-fr.js")
 
     assert dashboard_response.text.count('class="language-select"') == 2
     assert '<option value="es">ES</option>' in dashboard_response.text
     assert '<option value="en">EN</option>' in dashboard_response.text
+    assert '<option value="fr">FR</option>' in dashboard_response.text
     assert '<option value="it">IT</option>' in dashboard_response.text
+    assert dashboard_response.text.count('class="theme-select"') == 2
     assert dashboard_response.text.count('id="password-dialog"') == 1
     assert javascript_response.status_code == 200
     assert 'localStorage.getItem("ia-gateway-language")' in javascript_response.text
     assert 'document.documentElement.lang = language' in javascript_response.text
+    assert 'window.IAGatewayFrench' in javascript_response.text
     assert 'new MutationObserver' in javascript_response.text
     assert '"Split across all levels · maximum 100,000 s."' in javascript_response.text
     assert '"Suddiviso tra tutti i livelli · massimo 100.000 s."' in javascript_response.text
     assert '"The connection will be vulnerable to impersonation.' in javascript_response.text
     assert '"La connessione sarà vulnerabile all\'impersonificazione.' in javascript_response.text
+    assert french_response.status_code == 200
+
+
+def test_dashboard_uses_wide_responsive_grid_and_bounded_log_details():
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    stylesheet = (dashboard.ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "limit=250" in javascript
+    assert "logLoadPromise" in javascript
+    assert "ia-gateway-theme" in javascript
+    assert "width: min(1720px" in stylesheet
+    assert "repeat(3, minmax(0, 1fr))" in stylesheet
+    assert 'html[data-theme="light"]' in stylesheet
 
 
 def test_model_metrics_use_vertical_rows_and_accessible_statuses():
@@ -1023,4 +1040,25 @@ def test_cloudera_log_reader_includes_historical_provider_model_rows(tmp_path, m
     monkeypatch.setattr(dashboard, "ROOT", tmp_path)
     rows = dashboard.read_model_day_logs("nemotron-publico", selected, 500)
     assert len(rows) == 1
+
+
+def test_logs_endpoint_keeps_complete_kpis_when_details_are_bounded(tmp_path, monkeypatch, client):
+    runtime = tmp_path / "runtime"
+    selected = date(2026, 9, 19)
+    for duration in (100, 200, 300):
+        insert_log(
+            daily_log_path(runtime, selected), "modelo", "success", duration,
+            {}, {"usage": {"prompt_tokens": 2, "completion_tokens": 1}},
+            started_at=f"2026-09-19T10:00:0{duration // 100}Z",
+        )
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+
+    response = client.get(f"/api/models/modelo/logs?day={selected.isoformat()}&limit=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["rows"]) == 1
+    assert payload["kpis"]["requests"] == 3
+    assert payload["kpis"]["total_tokens"] == 9
+    assert payload["details_truncated"] is True
 """Tests for the HTTP contract and essential dashboard elements."""

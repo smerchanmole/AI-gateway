@@ -8,7 +8,7 @@ The same Python application runs locally and as a Cloudera AI Workbench applicat
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](#local-installation)
 [![LiteLLM](https://img.shields.io/badge/Router-LiteLLM-00BFA6)](https://docs.litellm.ai/)
-[![UI languages](https://img.shields.io/badge/UI-ES%20%7C%20EN%20%7C%20IT-8A5CF6)](#interface-languages)
+[![UI languages](https://img.shields.io/badge/UI-ES%20%7C%20EN%20%7C%20FR%20%7C%20IT-8A5CF6)](#interface-languages)
 [![Storage](https://img.shields.io/badge/Storage-SQLite-003B57?logo=sqlite&logoColor=white)](#persistence-and-restart-rules)
 [![Tests](https://img.shields.io/badge/Tested-pytest-0A9EDC?logo=pytest&logoColor=white)](#run-tests)
 
@@ -39,7 +39,7 @@ The same Python application runs locally and as a Cloudera AI Workbench applicat
 - SQLite-only persistence for Cloudera credentials, dynamic tokens, and structured request logs.
 - Daily KPIs, hourly activity, origin/provider IPs, TTFT, duration, tokens, and Excel export.
 - Controlled load batteries with stepped concurrency, real TTFT percentiles, correctness checks, live charts, cancellation, and JSON reports.
-- Spanish, English, and Italian dashboard languages, persisted per browser.
+- Spanish, English, French, and Italian dashboard languages, plus a persistent light/dark theme.
 - Built-in administrator login with forced password change on first access.
 
 ## 1. User manual
@@ -56,7 +56,7 @@ The same Python application runs locally and as a Cloudera AI Workbench applicat
 
 ![English sign-in screen](docs/screenshots/sign-in-en.jpg)
 
-The screenshot above is generated from the running application. The language selector is available before authentication, so every administrator can choose a language before entering credentials.
+The screenshot above is generated from the running application. Language and light/dark theme selectors are available before authentication, so every administrator can choose both before entering credentials.
 
 ### Dashboard tour
 
@@ -120,11 +120,13 @@ The live view reports in-flight requests, throughput, error rate, correctness, T
 
 ### Logs
 
-Structured logs are stored per day and model. They include timestamps, public alias, origin/provider IP, status, TTFT, total duration, token usage, guardrail result, and sanitized effective parameters after precedence rules. API keys, authorization headers, and routing secrets are redacted. The daily view provides KPIs, an hourly histogram, request detail, and Excel export. A separate LiteLLM tab exposes stdout/stderr for startup and provider diagnostics.
+Structured logs are stored per day and model. They include timestamps, public alias, origin/provider IP, status, TTFT, total duration, token usage, guardrail result, and sanitized effective parameters after precedence rules. API keys, authorization headers, and routing secrets are redacted. The daily view calculates KPIs and the hourly histogram directly in SQLite over the complete day, while only the 250 newest detail rows are hydrated and sent to the browser. This keeps the page responsive during high-volume load tests without making its totals approximate. Large embedding vectors are compacted before storage because their individual coordinates provide no operational value. Excel export remains available on demand. A separate LiteLLM tab exposes stdout/stderr for startup and provider diagnostics.
 
 ### Interface languages
 
-The dashboard is available in Spanish, English, and Italian. The choice is stored locally in the browser and applies to static labels, accessibility attributes, modal content, and dynamic status messages. Backend/provider payloads are preserved verbatim inside diagnostic details so that vendor support can recognize the original error.
+The dashboard is available in Spanish, English, French, and Italian. The choice is stored locally in the browser and applies to static labels, accessibility attributes, modal content, and dynamic status messages. Backend/provider payloads are preserved verbatim inside diagnostic details so that vendor support can recognize the original error.
+
+The interface also provides persistent light and dark themes from both the sign-in screen and the authenticated header. Every main view uses the same wide responsive canvas: model cards form three, two, or one columns according to the available width, and long endpoint names or translated button labels wrap without pushing a card outside the grid.
 
 ## 2. Architecture
 
@@ -627,7 +629,7 @@ The dashboard login is not currently an API key for `/v1/*`. If the Cloudera app
 
 ## Logs and client IPs
 
-Each model has structured daily logs containing request/response summaries, the effective sanitized provider parameters, status, origin IP, provider IP, TTFT, total duration, token counts, and guardrail outcome. This records the final OpenAI/vLLM/NIM/Workbench/Triton-compatible options after precedence rules have run, without logging API keys, authorization headers, messages as parameters, or routing secrets. The dashboard shows KPIs and an hourly histogram and can export the selected day to Excel.
+Each model has structured daily logs containing request/response summaries, the effective sanitized provider parameters, status, origin IP, provider IP, TTFT, total duration, token counts, and guardrail outcome. This records the final OpenAI/vLLM/NIM/Workbench/Triton-compatible options after precedence rules have run, without logging API keys, authorization headers, messages as parameters, or routing secrets. Token counters are stored in scalar columns for efficient aggregation, and oversized numeric arrays such as embedding vectors are reduced to a short preview. The dashboard computes full-day KPIs and the hourly histogram in SQLite, transfers at most 250 recent detail rows per refresh, prevents overlapping refresh requests, and can export the selected day to Excel.
 
 The edge trusts Cloudera/Istio forwarding metadata at the application boundary, preferring `X-Envoy-External-Address`, then the first non-loopback value in `X-Forwarded-For`, then `X-Real-IP`. If Cloudera removes the external address before the application, the only observable address will be the platform sidecar (`127.0.0.x`); application code cannot reconstruct information the ingress did not forward.
 
@@ -760,7 +762,7 @@ When escalating a provider problem, export the load-test JSON or daily Excel, ca
 
 ### Extension guide
 
-Add a provider by keeping four concerns independent: discovery metadata, runtime transport, secret lifecycle, and UI presentation. Implement provider calls in a focused adapter, normalize safe metadata for the browser, store mutable secrets outside YAML, and add a real contract test plus observability coverage. New UI text must include Spanish, English, and Italian entries in `static/i18n.js`; developer comments and documentation remain in English.
+Add a provider by keeping four concerns independent: discovery metadata, runtime transport, secret lifecycle, and UI presentation. Implement provider calls in a focused adapter, normalize safe metadata for the browser, store mutable secrets outside YAML, and add a real contract test plus observability coverage. New UI text must include Spanish, English, French, and Italian entries in `static/i18n.js`; developer comments and documentation remain in English.
 
 ## Source map
 
@@ -776,7 +778,7 @@ Add a provider by keeping four concerns independent: discovery metadata, runtime
 | `gateway/auth.py` | Administrator credentials and sessions |
 | `static/index.html` | Dashboard structure |
 | `static/app.js` | Dashboard behaviour and API integration |
-| `static/i18n.js` | Spanish, English, and Italian interface localization |
+| `static/i18n.js` and `static/i18n-fr.js` | Spanish, English, French, and Italian interface localization |
 | `static/style.css` | Responsive visual system |
 
 ## License and production note

@@ -2,8 +2,8 @@
 (() => {
   "use strict";
 
-  const supported = new Set(["es", "en", "it"]);
-  const localeTags = {es: "es-ES", en: "en-GB", it: "it-IT"};
+  const supported = new Set(["es", "en", "fr", "it"]);
+  const localeTags = {es: "es-ES", en: "en-GB", fr: "fr-FR", it: "it-IT"};
   const saved = localStorage.getItem("ia-gateway-language");
   let language = supported.has(saved)
     ? saved
@@ -422,11 +422,23 @@
     ["Embedding · automático", "Embedding · automatic", "Embedding · automatico"],
     ["Embedding · validación vectorial", "Embedding · vector validation", "Embedding · convalida vettoriale"],
     ["Chat · respuestas autocorregibles", "Chat · self-scoring answers", "Chat · risposte con verifica automatica"],
-    ["Concurrencia máxima", "Maximum concurrency", "Concorrenza massima"]
+    ["Concurrencia máxima", "Maximum concurrency", "Concorrenza massima"],
+    ["Tema", "Theme", "Tema", "Thème"],
+    ["Tema de la interfaz", "Interface theme", "Tema dell'interfaccia", "Thème de l'interface"],
+    ["Claro", "Light", "Chiaro", "Clair"], ["Oscuro", "Dark", "Scuro", "Sombre"],
+    ["Los indicadores y el gráfico incluyen toda la jornada.", "Indicators and the chart include the full day.", "Gli indicatori e il grafico includono l'intera giornata.", "Les indicateurs et le graphique couvrent toute la journée."],
+    ["Cargando registros…", "Loading logs…", "Caricamento dei log…", "Chargement des journaux…"]
+    ,["ACTIVO", "ACTIVE", "ATTIVO", "ACTIF"], ["INACTIVO", "INACTIVE", "INATTIVO", "INACTIF"],
+    ["Activar", "Enable", "Attiva", "Activer"], ["Desactivar", "Disable", "Disattiva", "Désactiver"]
   ];
 
-  const dictionaries = {es: new Map(), en: new Map(), it: new Map()};
-  rows.forEach(([es, en, it]) => { dictionaries.es.set(es, es); dictionaries.en.set(es, en); dictionaries.it.set(es, it); });
+  const dictionaries = {es: new Map(), en: new Map(), fr: new Map(), it: new Map()};
+  rows.forEach(([es, en, it, fr]) => {
+    dictionaries.es.set(es, es);
+    dictionaries.en.set(es, en);
+    dictionaries.it.set(es, it);
+    dictionaries.fr.set(es, fr || window.IAGatewayFrench?.[es] || en);
+  });
 
   const patterns = {
     en: [
@@ -461,6 +473,43 @@
       [/^Activo · (.+)$/, "Enabled · $1"],
       [/^(\d+) modelo\(s\) · pico agregado (\d+) · mínimo recomendado (\d+) por modelo\.$/, "$1 model(s) · combined peak $2 · recommended minimum $3 per model."],
       [/^Concurrencia máxima para (.+)$/, "Maximum concurrency for $1"]
+      , [/^Detenido · puerto (\d+)$/, "Stopped · port $1"], [/^(\d+) activos \/ (\d+)$/, "$1 active / $2"]
+    ],
+    fr: [
+      [/^(\d+) modelos?$/, "$1 modèles"], [/^(\d+) errores$/, "$1 erreurs"], [/^(\d+) entrada · (\d+) salida$/, "$1 entrée · $2 sortie"],
+      [/^Máximo (\d+) peticiones en una hora$/, "Maximum de $1 requêtes en une heure"], [/^Editando (.+)$/, "Modification de $1"],
+      [/^Prueba automática cada (\d+) min$/, "Test automatique toutes les $1 min"], [/^CDP token actualizado automáticamente\.(.*)$/, "Jeton CDP mis à jour automatiquement.$1"],
+      [/^Editando conexión «(.+)»\. La credencial actual se conservará si dejas el campo vacío\.$/, "Modification de la connexion « $1 ». L'identifiant actuel sera conservé si le champ reste vide."],
+      [/^Conexión (creada|actualizada), pero no se pudo generar el token: (.+)$/, "Connexion enregistrée, mais le jeton n'a pas pu être généré : $2"],
+      [/^Conexión (creada|actualizada) correctamente\.(.*) URL efectiva: (.+)\. Pulsa «Buscar modelos»\.$/, "Connexion enregistrée.$2 URL effective : $3. Sélectionnez « Rechercher des modèles »."],
+      [/^No se pudo guardar la conexión: (.+)$/, "Impossible d'enregistrer la connexion : $1"], [/^Búsqueda completada: (.+)\.$/, "Recherche terminée : $1."],
+      [/^No se pudieron cargar modelos: (.+)$/, "Impossible de charger les modèles : $1"], [/^No se pudo completar la comprobación: (.+)$/, "Impossible de terminer la vérification : $1"],
+      [/^Prueba manual completada · (.+)$/, "Test manuel terminé · $1"], [/^Prueba automática completada · (.+)$/, "Test automatique terminé · $1"], [/^No se pudo obtener el token: (.+)$/, "Impossible d'obtenir le jeton : $1"],
+      [/^Se usará (.+)$/, "$1 sera utilisé"], [/^Credencial de (.+) guardada\. Pulsa «Probar acceso» para validarla\.$/, "Identifiant $1 enregistré. Sélectionnez « Tester l'accès » pour le valider."],
+      [/^YAML válido · (\d+) modelos(.*)$/, "YAML valide · $1 modèles$2"], [/^Validando (.+)…$/, "Validation de $1…"],
+      [/^Backup importado: (\d+) modelos\. (.+)$/, "Sauvegarde importée : $1 modèles. $2"], [/^No se pudo importar: (.+)$/, "Échec de l'importation : $1"],
+      [/^Embedding generado correctamente\n\nDimensiones: (\d+)\nPrimeros valores: (.+)$/, "Embedding généré correctement\n\nDimensions : $1\nPremières valeurs : $2"],
+      [/^Vas a eliminar el alias «(.+)» de config\.yaml\.$/, "Vous allez supprimer l'alias « $1 » de config.yaml."],
+      [/^Seleccionado: (.+)$/, "Sélectionné : $1"], [/^Estado (.+)$/, "État : $1"], [/^Modelo (.+)$/, "Modèle $1"],
+      [/^puerto (\d+)$/, "port $1"], [/^(\d+) encontrados · (\d+) activos · (\d+) OpenAI compatibles$/, "$1 trouvés · $2 actifs · $3 compatibles OpenAI"],
+      [/^Comprobando (\d+)\/(\d+) modelos…$/, "Vérification de $1/$2 modèles…"], [/^(\d+) con error$/, "$1 en erreur"], [/^(\d+) sin probar$/, "$1 non testés"],
+      [/^Caduca: (.+)$/, "Expire : $1"], [/^Réplicas: (.+)$/, "Réplicas : $1"], [/^(\d+) modelos configurados$/, "$1 modèles configurés"],
+      [/^Nivel (\d+) · (\d+) en vuelo$/, "Niveau $1 · $2 en cours"], [/^Nivel (\d+)$/, "Niveau $1"],
+      [/^Mínimo (\d+) para alcanzar realmente el nivel (\d+)\.$/, "Minimum $1 pour atteindre réellement le niveau $2."],
+      [/^(\d+) peticiones$/, "$1 requêtes"], [/^(\d+) s previstos$/, "$1 s prévues"],
+      [/^Recomendación del asesor aplicada a (.+)\. Debes guardarla y superar la prueba real\.$/, "Recommandation appliquée à $1. Enregistrez-la puis validez le test réel."],
+      [/^URL obtenida mediante (.+)$/, "URL obtenue via $1"],
+      [/^(.+) con Runtime (.+) está en la matriz documentada\. CDP_TOKEN \(UMS\) está disponible\.$/, "$1 avec Runtime $2 figure dans la matrice documentée. CDP_TOKEN (UMS) est disponible."],
+      [/^(.+) con Runtime (.+) no figura como combinación compatible en la matriz oficial\.$/, "$1 avec Runtime $2 ne figure pas comme combinaison compatible dans la matrice officielle."],
+      [/^Borrador (query|passage) preparado\. Crea también el alias (query|passage) para completar el flujo RAG\.$/, "Brouillon $1 prêt. Créez également l'alias $2 pour compléter le flux RAG."],
+      [/^Cómo llamar al modelo (.+)$/, "Comment appeler le modèle $1"],
+      [/^Extra línea (\d+): usa VARIABLE=VALOR$/, "Ligne supplémentaire $1 : utilisez VARIABLE=VALEUR"],
+      [/^Activo · (.+)$/, "Actif · $1"],
+      [/^(\d+) modelo\(s\) · pico agregado (\d+) · mínimo recomendado (\d+) por modelo\.$/, "$1 modèle(s) · pic cumulé $2 · minimum recommandé $3 par modèle."],
+      [/^Concurrencia máxima para (.+)$/, "Concurrence maximale pour $1"],
+      [/^Detenido · puerto (\d+)$/, "Arrêté · port $1"], [/^(\d+) activos \/ (\d+)$/, "$1 actifs / $2"],
+      [/^Mostrando las (\d+) peticiones más recientes de (\d+)\. Los indicadores y el gráfico incluyen toda la jornada\.$/, "Affichage des $1 requêtes les plus récentes sur $2. Les indicateurs et le graphique couvrent toute la journée."],
+      [/^(\d+) peticiones detalladas\. Los indicadores y el gráfico incluyen toda la jornada\.$/, "$1 requêtes détaillées. Les indicateurs et le graphique couvrent toute la journée."]
     ],
     it: [
       [/^(\d+) modelos?$/, "$1 modelli"], [/^(\d+) errores$/, "$1 errori"], [/^(\d+) entrada · (\d+) salida$/, "$1 input · $2 output"],
@@ -494,6 +543,7 @@
       [/^Activo · (.+)$/, "Attivo · $1"],
       [/^(\d+) modelo\(s\) · pico agregado (\d+) · mínimo recomendado (\d+) por modelo\.$/, "$1 modello/i · picco complessivo $2 · minimo consigliato $3 per modello."],
       [/^Concurrencia máxima para (.+)$/, "Concorrenza massima per $1"]
+      , [/^Detenido · puerto (\d+)$/, "Arrestato · porta $1"], [/^(\d+) activos \/ (\d+)$/, "$1 attivi / $2"]
     ]
   };
 

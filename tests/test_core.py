@@ -16,7 +16,7 @@ import zipfile
 import io
 
 from gateway.excel_export import build_logs_xlsx
-from gateway.log_store import daily_log_path, insert_log, log_kpis, read_day_logs, read_logs
+from gateway.log_store import daily_log_path, insert_log, log_kpis, log_kpis_for_day, read_day_logs, read_logs
 from gateway.litellm_callback import DashboardLogger, _classify_with_guardrail, _configure_private_ca, _origin_ip
 
 
@@ -466,6 +466,18 @@ def test_log_store_redacts_secrets(tmp_path):
     assert logs[0]["response"] == {"ok": True}
 
 
+def test_log_store_compacts_embedding_vectors(tmp_path):
+    db = tmp_path / "requests.sqlite3"
+    insert_log(db, "embed", "success", 12, {"input": ["hola"]}, {
+        "data": [{"embedding": [float(index) for index in range(256)]}],
+        "usage": {"prompt_tokens": 3, "total_tokens": 3},
+    })
+
+    response = read_logs(db, "embed")[0]["response"]
+    assert len(response["data"][0]["embedding"]) == 17
+    assert response["data"][0]["embedding"][-1] == "[… 240 valores omitidos]"
+
+
 def test_log_store_keeps_network_and_latency_metadata(tmp_path):
     db = tmp_path / "requests.sqlite3"
     insert_log(
@@ -512,6 +524,11 @@ def test_daily_logs_kpis_and_excel_export(tmp_path):
     assert kpis["requests"] == 2
     assert kpis["success_rate"] == 50.0
     assert kpis["hourly"][8:10] == [1, 1]
+    complete_kpis = log_kpis_for_day(runtime, ["uno"], day)
+    assert complete_kpis["requests"] == 2
+    assert complete_kpis["success_rate"] == 50.0
+    assert complete_kpis["p95_duration_ms"] == 500
+    assert complete_kpis["hourly"][8:10] == [1, 1]
     content = build_logs_xlsx("uno", day.isoformat(), rows, kpis)
     with zipfile.ZipFile(io.BytesIO(content)) as workbook:
         assert "xl/worksheets/sheet1.xml" in workbook.namelist()
