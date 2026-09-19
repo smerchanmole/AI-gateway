@@ -126,7 +126,7 @@ Structured logs are stored per day and model. They include timestamps, public al
 
 The dashboard is available in Spanish, English, French, and Italian. The choice is stored locally in the browser and applies to static labels, accessibility attributes, modal content, and dynamic status messages. Backend/provider payloads are preserved verbatim inside diagnostic details so that vendor support can recognize the original error.
 
-The interface also provides persistent light and dark themes from both the sign-in screen and the authenticated header. The light theme uses a cool blue-white pastel canvas with accessible navy text and high-contrast orange actions. Every main view uses the same wide responsive canvas: model cards form three, two, or one columns according to the available width, and long endpoint names or translated button labels wrap without pushing a card outside the grid.
+The interface also provides persistent light and dark themes from both the sign-in screen and the authenticated header. The light theme uses a cool blue-white pastel canvas with accessible navy text, high-contrast orange actions, explicit active states in model selectors, and readable status, chart, table, and helper text. Every main view uses the same wide responsive canvas: model cards form three, two, or one columns according to the available width, and long endpoint names or translated button labels wrap without pushing a card outside the grid. Load-test stopping-rule controls share fixed label and input rows so translated labels do not shift adjacent fields.
 
 ## 2. Architecture
 

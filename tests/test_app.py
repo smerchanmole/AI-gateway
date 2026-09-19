@@ -418,6 +418,10 @@ def test_dashboard_uses_wide_responsive_grid_and_bounded_log_details():
     assert 'html[data-theme="light"]' in stylesheet
     assert "@keyframes log-refresh" in stylesheet
     assert ".field-label" in stylesheet
+    assert 'html[data-theme="light"] .tab.active' in stylesheet
+    assert ".benchmark-two-cols > label" in stylesheet
+    assert ".benchmark-levels th" in stylesheet
+    assert ".log-table summary" in stylesheet
 
 
 def test_model_metrics_use_vertical_rows_and_accessible_statuses():
