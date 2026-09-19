@@ -1,11 +1,12 @@
 import io
 import json
+import ssl
 import urllib.error
 
 from litellm import EmbeddingResponse, ModelResponse
 
 from gateway.workbench_provider import ClouderaWorkbenchLLM
-from gateway.workbench_provider import _normalize_api_base, _request_body
+from gateway.workbench_provider import _normalize_api_base, _request_body, _urlopen
 from litellm.llms.custom_llm import CustomLLMError
 
 
@@ -25,6 +26,29 @@ def test_workbench_provider_normalizes_pasted_access_key_whitespace():
     )
 
     assert normalized == "https://modelservice.wb.example/model?accessKey=model-key"
+
+
+def test_workbench_urlopen_disables_tls_only_for_configured_host(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout, **kwargs):
+        captured[request.full_url] = {"timeout": timeout, **kwargs}
+        return object()
+
+    monkeypatch.setenv(
+        "IA_GATEWAY_INSECURE_TLS_HOSTS",
+        "modelservice.private.example",
+    )
+    monkeypatch.setattr("gateway.workbench_provider.urllib.request.urlopen", fake_urlopen)
+
+    _urlopen(urllib.request.Request("https://modelservice.private.example/model"), 7)
+    _urlopen(urllib.request.Request("https://api.openai.com/v1/models"), 9)
+
+    private = captured["https://modelservice.private.example/model"]
+    assert private["timeout"] == 7
+    assert isinstance(private["context"], ssl.SSLContext)
+    assert private["context"].verify_mode == ssl.CERT_NONE
+    assert captured["https://api.openai.com/v1/models"] == {"timeout": 9}
 
 
 def test_workbench_provider_wraps_request_and_unwraps_openai_response(monkeypatch):

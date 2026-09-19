@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -99,6 +101,31 @@ def _timeout_seconds(value: Any) -> float:
         if isinstance(candidate, (int, float)):
             return float(candidate)
     return 120.0
+
+
+def _urlopen(request: urllib.request.Request, timeout: Any):
+    """Open a Workbench request with the host-scoped TLS policy.
+
+    LiteLLM runs this adapter through ``urllib`` rather than its usual aiohttp
+    transport.  The parent process publishes only the hosts whose connection
+    explicitly selected diagnostic TLS mode.  Never disable verification for
+    any other destination handled by the same proxy.
+    """
+
+    hostname = (urllib.parse.urlsplit(request.full_url).hostname or "").lower()
+    insecure_hosts = {
+        value.strip().lower()
+        for value in os.environ.get("IA_GATEWAY_INSECURE_TLS_HOSTS", "").split(",")
+        if value.strip()
+    }
+    seconds = _timeout_seconds(timeout)
+    if hostname in insecure_hosts:
+        return urllib.request.urlopen(
+            request,
+            timeout=seconds,
+            context=ssl._create_unverified_context(),
+        )
+    return urllib.request.urlopen(request, timeout=seconds)
 
 
 def _request_body(messages: list, optional_params: dict[str, Any]) -> dict[str, Any]:
@@ -230,7 +257,7 @@ class ClouderaWorkbenchLLM(CustomLLM):
             headers=request_headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=_timeout_seconds(timeout)) as remote:
+            with _urlopen(request, timeout) as remote:
                 status_code = int(getattr(remote, "status", 200))
                 raw = remote.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
@@ -272,7 +299,7 @@ class ClouderaWorkbenchLLM(CustomLLM):
             target, data=json.dumps(payload).encode("utf-8"), method="POST", headers=headers,
         )
         try:
-            with urllib.request.urlopen(request, timeout=_timeout_seconds(timeout)) as remote:
+            with _urlopen(request, timeout) as remote:
                 status_code = int(getattr(remote, "status", 200))
                 raw = remote.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
