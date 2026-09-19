@@ -429,7 +429,11 @@
     ["Los indicadores y el gráfico incluyen toda la jornada.", "Indicators and the chart include the full day.", "Gli indicatori e il grafico includono l'intera giornata.", "Les indicateurs et le graphique couvrent toute la journée."],
     ["Cargando registros…", "Loading logs…", "Caricamento dei log…", "Chargement des journaux…"]
     ,["ACTIVO", "ACTIVE", "ATTIVO", "ACTIF"], ["INACTIVO", "INACTIVE", "INATTIVO", "INACTIF"],
-    ["Activar", "Enable", "Attiva", "Activer"], ["Desactivar", "Disable", "Disattiva", "Désactiver"]
+    ["Activar", "Enable", "Attiva", "Activer"], ["Desactivar", "Disable", "Disattiva", "Désactiver"],
+    ["Iniciando…", "Starting…", "Avvio…", "Démarrage…"], ["Preparando", "Preparing", "Preparazione", "Préparation"],
+    ["Indica entre 1 y 10.000 peticiones por modelo.", "Enter between 1 and 10,000 requests per model.", "Inserisci tra 1 e 10.000 richieste per modello.", "Indiquez entre 1 et 10 000 requêtes par modèle."],
+    ["Indica entre 5 y 100.000 segundos por modelo.", "Enter between 5 and 100,000 seconds per model.", "Inserisci tra 5 e 100.000 secondi per modello.", "Indiquez entre 5 et 100 000 secondes par modèle."],
+    ["El timeout por petición debe estar entre 5 y 300 segundos.", "The per-request timeout must be between 5 and 300 seconds.", "Il timeout per richiesta deve essere compreso tra 5 e 300 secondi.", "Le délai d’attente par requête doit être compris entre 5 et 300 secondes."]
   ];
 
   const dictionaries = {es: new Map(), en: new Map(), fr: new Map(), it: new Map()};
@@ -474,6 +478,7 @@
       [/^(\d+) modelo\(s\) · pico agregado (\d+) · mínimo recomendado (\d+) por modelo\.$/, "$1 model(s) · combined peak $2 · recommended minimum $3 per model."],
       [/^Concurrencia máxima para (.+)$/, "Maximum concurrency for $1"]
       , [/^Detenido · puerto (\d+)$/, "Stopped · port $1"], [/^(\d+) activos \/ (\d+)$/, "$1 active / $2"]
+      , [/^(\d+) peticiones detalladas · calculando totales de la jornada…$/, "$1 detailed requests · calculating full-day totals…"]
     ],
     fr: [
       [/^(\d+) modelos?$/, "$1 modèles"], [/^(\d+) errores$/, "$1 erreurs"], [/^(\d+) entrada · (\d+) salida$/, "$1 entrée · $2 sortie"],
@@ -508,6 +513,7 @@
       [/^(\d+) modelo\(s\) · pico agregado (\d+) · mínimo recomendado (\d+) por modelo\.$/, "$1 modèle(s) · pic cumulé $2 · minimum recommandé $3 par modèle."],
       [/^Concurrencia máxima para (.+)$/, "Concurrence maximale pour $1"],
       [/^Detenido · puerto (\d+)$/, "Arrêté · port $1"], [/^(\d+) activos \/ (\d+)$/, "$1 actifs / $2"],
+      [/^(\d+) peticiones detalladas · calculando totales de la jornada…$/, "$1 requêtes détaillées · calcul des totaux de la journée…"],
       [/^Mostrando las (\d+) peticiones más recientes de (\d+)\. Los indicadores y el gráfico incluyen toda la jornada\.$/, "Affichage des $1 requêtes les plus récentes sur $2. Les indicateurs et le graphique couvrent toute la journée."],
       [/^(\d+) peticiones detalladas\. Los indicadores y el gráfico incluyen toda la jornada\.$/, "$1 requêtes détaillées. Les indicateurs et le graphique couvrent toute la journée."]
     ],
@@ -544,6 +550,7 @@
       [/^(\d+) modelo\(s\) · pico agregado (\d+) · mínimo recomendado (\d+) por modelo\.$/, "$1 modello/i · picco complessivo $2 · minimo consigliato $3 per modello."],
       [/^Concurrencia máxima para (.+)$/, "Concorrenza massima per $1"]
       , [/^Detenido · puerto (\d+)$/, "Arrestato · porta $1"], [/^(\d+) activos \/ (\d+)$/, "$1 attivi / $2"]
+      , [/^(\d+) peticiones detalladas · calculando totales de la jornada…$/, "$1 richieste dettagliate · calcolo dei totali giornalieri…"]
     ]
   };
 

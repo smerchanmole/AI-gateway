@@ -266,6 +266,8 @@ cloudera = ClouderaCatalog(ROOT / "runtime")
 auth = AuthStore(ROOT / "runtime")
 benchmarks = BenchmarkRunner()
 _MODEL_VALIDATIONS: dict[str, tuple[str, float]] = {}
+_LOG_KPI_CACHE: dict[tuple[str, tuple[str, ...], str], tuple[float, dict[str, Any]]] = {}
+_LOG_KPI_CACHE_SECONDS = 30.0
 
 # Locally, the edge proxy also terminates TLS. Inside Cloudera that responsibility
 # belongs to the platform proxy, and our listener receives HTTP over loopback.
@@ -1585,9 +1587,8 @@ async def model_latency(name: str):
     return {"model": name, "latency_ms": latency_ms}
 
 
-def read_model_day_logs(name: str, selected, limit: int) -> list[dict]:
-    """Include legacy rows stored under the provider identifier."""
-
+def log_model_names(name: str) -> list[str]:
+    """Resolve a public alias and its historical provider identifier."""
     model_names = [name]
     try:
         settings = json.loads(
@@ -1598,14 +1599,56 @@ def read_model_day_logs(name: str, selected, limit: int) -> list[dict]:
     provider_model = (settings.get("provider_models") or {}).get(name)
     if provider_model and provider_model != name:
         model_names.append(str(provider_model))
+    return model_names
+
+
+def read_model_day_logs(name: str, selected, limit: int) -> list[dict]:
+    """Include legacy rows stored under the provider identifier."""
+
     rows = []
-    for model_name in model_names:
+    for model_name in log_model_names(name):
         rows.extend(read_day_logs(ROOT / "runtime", model_name, selected, limit))
     rows.sort(
         key=lambda item: item.get("started_at") or item.get("created_at") or "",
         reverse=True,
     )
     return rows[:limit]
+
+
+def cached_log_kpis(name: str, selected, *, fresh: bool = False) -> dict[str, Any]:
+    """Reuse expensive full-day aggregates briefly during live refreshes."""
+
+    model_names = tuple(log_model_names(name))
+    key = (str(ROOT), model_names, selected.isoformat())
+    now = time.monotonic()
+    cached = _LOG_KPI_CACHE.get(key)
+    if not fresh and cached and now - cached[0] < _LOG_KPI_CACHE_SECONDS:
+        return cached[1]
+    result = log_kpis_for_day(ROOT / "runtime", list(model_names), selected)
+    _LOG_KPI_CACHE[key] = (now, result)
+    return result
+
+
+@app.get("/api/models/{name}/log-details")
+def log_details(name: str, day: Optional[str] = None, limit: int = Query(250, ge=1, le=1000)):
+    """Return only recent rows so the table does not wait for daily aggregates."""
+
+    try:
+        selected = parse_day(day)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"day": selected.isoformat(), "rows": read_model_day_logs(name, selected, limit), "detail_limit": limit}
+
+
+@app.get("/api/models/{name}/log-kpis")
+def log_kpis_endpoint(name: str, day: Optional[str] = None, fresh: bool = False):
+    """Return complete-day aggregates independently from recent detail rows."""
+
+    try:
+        selected = parse_day(day)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"day": selected.isoformat(), "kpis": cached_log_kpis(name, selected, fresh=fresh)}
 
 
 @app.get("/api/models/{name}/logs")
@@ -1615,18 +1658,8 @@ def logs(name: str, day: Optional[str] = None, limit: int = Query(250, ge=1, le=
         selected = parse_day(day)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    model_names = [name]
-    try:
-        settings = json.loads(
-            (ROOT / "runtime" / "dashboard_settings.json").read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError, TypeError):
-        settings = {}
-    provider_model = (settings.get("provider_models") or {}).get(name)
-    if provider_model and provider_model != name:
-        model_names.append(str(provider_model))
     rows = read_model_day_logs(name, selected, limit)
-    kpis = log_kpis_for_day(ROOT / "runtime", model_names, selected)
+    kpis = cached_log_kpis(name, selected)
     return {
         "day": selected.isoformat(), "rows": rows, "kpis": kpis,
         "detail_limit": limit, "details_truncated": kpis["requests"] > len(rows),

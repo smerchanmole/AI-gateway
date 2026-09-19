@@ -30,6 +30,8 @@ let clouderaRefreshInProgress = false;
 let benchmarkPollTimer = null;
 let currentBenchmark = null;
 let logLoadPromise = null;
+let logLoadSequence = 0;
+let renderedLogKey = "";
 
 const savedTheme = localStorage.getItem("ia-gateway-theme");
 const initialTheme = ["light", "dark"].includes(savedTheme) ? savedTheme : "dark";
@@ -1467,7 +1469,7 @@ function renderLogTabs() {
     button.onclick = () => {
       selectedLogModel = button.dataset.name;
       renderLogTabs();
-      loadLogDays().then(loadLogs).catch(showError);
+      loadLogDays().then(() => loadLogs(true)).catch(showError);
     };
   });
 }
@@ -1579,37 +1581,54 @@ async function loadLogDays() {
 async function loadLogs(force = false) {
   /** Switch between technical stdout and the structured model/day dashboard. */
   if (logLoadPromise && !force) return logLoadPromise;
+  const sequence = ++logLoadSequence;
+  const model = selectedLogModel;
+  const day = selectedLogDay;
+  const logKey = `${model}:${day}`;
   const operation = (async () => {
   $("#logs").setAttribute("aria-busy", "true");
-  $("#logs").innerHTML = '<p class="empty compact">Cargando registros…</p>';
-  if (selectedLogModel === "__litellm__") {
-    const raw = await api(`/api/process-log?day=${encodeURIComponent(selectedLogDay)}`);
+  if (renderedLogKey !== logKey) $("#logs").innerHTML = '<p class="empty compact">Cargando registros…</p>';
+  if (model === "__litellm__") {
+    const raw = await api(`/api/process-log?day=${encodeURIComponent(day)}`);
+    if (sequence !== logLoadSequence) return;
     $("#log-dashboard").hidden = true;
     $("#download-logs").hidden = true;
     $("#clear-process-log").hidden = false;
     $("#logs").innerHTML = raw
       ? `<pre class="process-log">${escapeHtml(raw)}</pre>`
       : '<p class="empty">LiteLLM todavía no ha generado salida de proceso.</p>';
+    renderedLogKey = logKey;
     const processLog = $(".process-log");
     if (processLog) processLog.scrollTop = processLog.scrollHeight;
     return;
   }
-  if (!selectedLogModel) return;
-  const data = await api(`/api/models/${encodeURIComponent(selectedLogModel)}/logs?day=${encodeURIComponent(selectedLogDay)}&limit=250`);
+  if (!model) return;
   $("#log-dashboard").hidden = false;
   $("#download-logs").hidden = false;
   $("#clear-process-log").hidden = true;
-  $("#download-logs").href = `/api/models/${encodeURIComponent(selectedLogModel)}/logs.xlsx?day=${encodeURIComponent(selectedLogDay)}`;
-  renderKpis(data.kpis);
-  $("#log-detail-summary").textContent = data.details_truncated
-    ? `Mostrando las ${data.rows.length} peticiones más recientes de ${data.kpis.requests}. Los indicadores y el gráfico incluyen toda la jornada.`
-    : `${data.rows.length} peticiones detalladas. Los indicadores y el gráfico incluyen toda la jornada.`;
-  $("#logs").innerHTML = logTable(data.rows);
+  $("#download-logs").href = `/api/models/${encodeURIComponent(model)}/logs.xlsx?day=${encodeURIComponent(day)}`;
+  const detailTask = api(`/api/models/${encodeURIComponent(model)}/log-details?day=${encodeURIComponent(day)}&limit=250`).then((data) => {
+    if (sequence !== logLoadSequence) return;
+    $("#logs").innerHTML = logTable(data.rows);
+    $("#log-detail-summary").textContent = `${data.rows.length} peticiones detalladas · calculando totales de la jornada…`;
+    renderedLogKey = logKey;
+  });
+  const kpiTask = api(`/api/models/${encodeURIComponent(model)}/log-kpis?day=${encodeURIComponent(day)}&fresh=${force}`).then((data) => {
+    if (sequence !== logLoadSequence) return;
+    renderKpis(data.kpis);
+    const shown = $("#logs").querySelectorAll(".log-table tbody tr").length;
+    $("#log-detail-summary").textContent = data.kpis.requests > shown
+      ? `Mostrando las ${shown} peticiones más recientes de ${data.kpis.requests}. Los indicadores y el gráfico incluyen toda la jornada.`
+      : `${shown} peticiones detalladas. Los indicadores y el gráfico incluyen toda la jornada.`;
+  });
+  const results = await Promise.allSettled([detailTask, kpiTask]);
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
   })();
   logLoadPromise = operation;
   try { return await operation; }
   finally {
-    $("#logs").setAttribute("aria-busy", "false");
+    if (sequence === logLoadSequence) $("#logs").setAttribute("aria-busy", "false");
     if (logLoadPromise === operation) logLoadPromise = null;
   }
 }
@@ -1804,13 +1823,29 @@ async function startBenchmark(event) {
   const targets = benchmarkTargets();
   if (!targets.length) { setInlineStatus("#benchmark-form-status", "Selecciona al menos un modelo.", "error"); return; }
   const limitMode = document.querySelector('input[name="benchmark-limit"]:checked').value;
-  const payload = {targets, limit_mode: limitMode, requests_per_model: Number($("#benchmark-requests").value), duration_seconds: Number($("#benchmark-duration").value), strategy: $("#benchmark-strategy").value, request_timeout_seconds: Number($("#benchmark-timeout").value), warmup: $("#benchmark-warmup").checked};
+  const requests = $("#benchmark-requests").valueAsNumber;
+  const duration = $("#benchmark-duration").valueAsNumber;
+  const timeout = $("#benchmark-timeout").valueAsNumber;
+  if (limitMode === "requests" && (!Number.isInteger(requests) || requests < 1 || requests > 10_000)) {
+    setInlineStatus("#benchmark-form-status", "Indica entre 1 y 10.000 peticiones por modelo.", "error"); return;
+  }
+  if (limitMode === "duration" && (!Number.isInteger(duration) || duration < 5 || duration > 100_000)) {
+    setInlineStatus("#benchmark-form-status", "Indica entre 5 y 100.000 segundos por modelo.", "error"); return;
+  }
+  if (!Number.isInteger(timeout) || timeout < 5 || timeout > 300) {
+    setInlineStatus("#benchmark-form-status", "El timeout por petición debe estar entre 5 y 300 segundos.", "error"); return;
+  }
+  const payload = {targets, limit_mode: limitMode, requests_per_model: requests, duration_seconds: duration, strategy: $("#benchmark-strategy").value, request_timeout_seconds: timeout, warmup: $("#benchmark-warmup").checked};
   $("#benchmark-start").disabled = true;
+  $("#benchmark-start").textContent = "Iniciando…";
+  $("#benchmark-state").className = "benchmark-state running";
+  $("#benchmark-state").textContent = "Preparando";
   setInlineStatus("#benchmark-form-status", "Preparando workers y casos autocorregibles…");
   try {
     renderBenchmark(await api("/api/benchmarks", {method: "POST", body: JSON.stringify(payload)}));
     await loadBenchmark();
   } catch (error) { setInlineStatus("#benchmark-form-status", error.message, "error"); $("#benchmark-start").disabled = false; }
+  finally { $("#benchmark-start").textContent = "Iniciar batería"; }
 }
 
 async function cancelBenchmark() {
@@ -1819,7 +1854,7 @@ async function cancelBenchmark() {
   catch (error) { showError(error); }
 }
 
-$("#refresh").onclick = () => loadLogDays().then(loadLogs).catch(showError);
+$("#refresh").onclick = () => loadLogDays().then(() => loadLogs(true)).catch(showError);
 $("#clear-process-log").onclick = () => clearSelectedProcessLog().catch(showError);
 $("#log-day").onchange = () => { selectedLogDay = $("#log-day").value; loadLogs(true).catch(showError); };
 $("#test-button").onclick = runTest;

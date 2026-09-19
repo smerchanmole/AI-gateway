@@ -272,6 +272,32 @@ def test_benchmark_duration_accepts_up_to_one_hundred_thousand_seconds():
         )
 
 
+def test_benchmark_duration_endpoint_starts_at_one_hundred_thousand_seconds(monkeypatch, client):
+    captured = {}
+
+    class Runner:
+        def start(self, config, models, base_url, headers):
+            captured.update(config)
+            return {"id": "duration-run", "status": "running", "models": {}}
+
+    monkeypatch.setattr(dashboard, "benchmarks", Runner())
+    monkeypatch.setattr(dashboard.manager, "models", lambda: [{
+        "name": "modelo", "enabled": True, "mode": "chat", "provider_model": "openai/demo",
+    }])
+    monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
+    monkeypatch.setattr(dashboard.manager, "active_model_names", lambda: ["modelo"])
+
+    response = client.post("/api/benchmarks", json={
+        "targets": [{"model": "modelo", "max_concurrency": 5}],
+        "limit_mode": "duration", "duration_seconds": 100_000,
+        "strategy": "parallel", "request_timeout_seconds": 120,
+    })
+
+    assert response.status_code == 200
+    assert captured["limit_mode"] == "duration"
+    assert captured["duration_seconds"] == 100_000
+
+
 def test_benchmark_starts_against_internal_gateway(monkeypatch, client):
     captured = {}
 
@@ -382,10 +408,16 @@ def test_dashboard_uses_wide_responsive_grid_and_bounded_log_details():
 
     assert "limit=250" in javascript
     assert "logLoadPromise" in javascript
+    assert "/log-details?" in javascript
+    assert "/log-kpis?" in javascript
+    assert "Promise.allSettled" in javascript
+    assert 'valueAsNumber' in javascript
     assert "ia-gateway-theme" in javascript
     assert "width: min(1720px" in stylesheet
     assert "repeat(3, minmax(0, 1fr))" in stylesheet
     assert 'html[data-theme="light"]' in stylesheet
+    assert "@keyframes log-refresh" in stylesheet
+    assert ".field-label" in stylesheet
 
 
 def test_model_metrics_use_vertical_rows_and_accessible_statuses():
@@ -1061,4 +1093,12 @@ def test_logs_endpoint_keeps_complete_kpis_when_details_are_bounded(tmp_path, mo
     assert payload["kpis"]["requests"] == 3
     assert payload["kpis"]["total_tokens"] == 9
     assert payload["details_truncated"] is True
+
+    details = client.get(f"/api/models/modelo/log-details?day={selected.isoformat()}&limit=1")
+    aggregates = client.get(f"/api/models/modelo/log-kpis?day={selected.isoformat()}")
+    assert details.status_code == 200
+    assert len(details.json()["rows"]) == 1
+    assert "kpis" not in details.json()
+    assert aggregates.status_code == 200
+    assert aggregates.json()["kpis"]["requests"] == 3
 """Tests for the HTTP contract and essential dashboard elements."""
