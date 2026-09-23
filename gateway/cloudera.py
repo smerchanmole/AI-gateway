@@ -276,6 +276,30 @@ class ClouderaCatalog:
         return hashlib.sha256(f"{kind}:{url.rstrip('/')}".encode()).hexdigest()[:12]
 
     @staticmethod
+    def _normalize_workbench_app_url(value: str) -> str:
+        """Return the exact OpenAI chat endpoint exposed by a Workbench App.
+
+        Older UI flows could append the classic Workbench ``/model`` route and
+        then append the OpenAI route again. Keeping this repair in the catalog
+        also makes already-saved connections usable without recreation.
+        """
+
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+        path = parsed.path.rstrip("/")
+        marker = "/v1/chat/completions"
+        if marker in path:
+            # The first complete OpenAI route is authoritative; anything after
+            # it is an accidental suffix such as /model/v1/chat/completions.
+            path = f"{path.split(marker, 1)[0]}{marker}"
+        elif path.endswith("/v1"):
+            path = f"{path}/chat/completions"
+        elif path.endswith("/model"):
+            path = f"{path[:-len('/model')]}{marker}"
+        elif not path.endswith("/chat/completions"):
+            path = f"{path}{marker}" if path else marker
+        return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+    @staticmethod
     def _token_metadata(token: str) -> dict[str, Any]:
         """Read declared JWT dates without mistaking parsing for cryptographic verification."""
         try:
@@ -444,6 +468,9 @@ class ClouderaCatalog:
 
         result = []
         for item in self._read().get("connections", []):
+            public_item = dict(item)
+            if item.get("kind") == "workbench_app":
+                public_item["url"] = self._normalize_workbench_app_url(str(item.get("url") or ""))
             metadata = self._connection_token_metadata(item) if item.get("token") else {
                 "token_expires_at": None, "token_expired": False,
             }
@@ -483,7 +510,7 @@ class ClouderaCatalog:
                            ),
                            "onpremise_auth_mode": item.get("onpremise_auth_mode", ""),
                            "credential_type": item.get("credential_type", "cdp_token"),
-                           **{k: v for k, v in item.items() if k not in self.SECRET_FIELDS}} |
+                           **{k: v for k, v in public_item.items() if k not in self.SECRET_FIELDS}} |
                           {"has_token": bool(item.get("token")),
                            "has_workload_password": bool(item.get("workload_password")),
                            "has_cdp_private_key": bool(item.get("cdp_private_key")),
@@ -623,12 +650,7 @@ class ClouderaCatalog:
             if not normalized.endswith("/model"):
                 normalized = f"{normalized}/model"
         elif kind == "workbench_app":
-            path = parsed.path.rstrip("/")
-            if path.endswith("/v1"):
-                path = f"{path}/chat/completions"
-            elif not path.endswith("/chat/completions"):
-                path = f"{path}/v1/chat/completions" if path else "/v1/chat/completions"
-            normalized = f"{normalized}{path}"
+            normalized = self._normalize_workbench_app_url(url)
         metadata = self._token_metadata(effective_token) if effective_token else {}
         if metadata.get("token_expired"):
             raise RuntimeError(f"El JWT está caducado desde {metadata['token_expires_at']}. Genera uno nuevo en Cloudera")
@@ -789,12 +811,7 @@ class ClouderaCatalog:
             if not normalized.endswith("/model"):
                 normalized = f"{normalized}/model"
         elif kind == "workbench_app":
-            path = parsed.path.rstrip("/")
-            if path.endswith("/v1"):
-                path = f"{path}/chat/completions"
-            elif not path.endswith("/chat/completions"):
-                path = f"{path}/v1/chat/completions" if path else "/v1/chat/completions"
-            normalized = f"{normalized}{path}"
+            normalized = self._normalize_workbench_app_url(url)
         metadata = self._token_metadata(effective_token) if effective_token else {}
         if metadata.get("token_expired"):
             raise RuntimeError(f"El JWT está caducado desde {metadata['token_expires_at']}. Genera uno nuevo en Cloudera")
@@ -1264,6 +1281,9 @@ class ClouderaCatalog:
 
         connection = next((item for item in self._read().get("connections", []) if item.get("id") == connection_id), None)
         if not connection: raise KeyError(connection_id)
+        if connection.get("kind") == "workbench_app":
+            connection = dict(connection)
+            connection["url"] = self._normalize_workbench_app_url(str(connection.get("url") or ""))
         if not connection.get("token") and connection.get("kind") == "workbench_app":
             return connection
         if not connection.get("token"):

@@ -453,6 +453,29 @@ def test_workbench_app_accepts_v1_base_and_preserves_api_key_when_edited(tmp_pat
     assert catalog.environment()[catalog.workbench_app_environment_name(connection["id"])] == catalog.PUBLIC_APP_NO_AUTH
 
 
+def test_workbench_app_repairs_duplicated_classic_model_route(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    malformed = (
+        "https://qwen38.example/v1/chat/completions/model/v1/chat/completions"
+    )
+    connection = catalog.save_connection(
+        "Qwen", "workbench_app", malformed, "",
+        workbench_app_model="qwen3.8-27b-fp8", workbench_app_auth_mode="public",
+    )
+
+    expected = "https://qwen38.example/v1/chat/completions"
+    assert connection["url"] == expected
+    assert catalog._read()["connections"][0]["url"] == expected
+
+    # Records saved by the earlier release are repaired on read/discovery too,
+    # so operators do not need to delete and recreate the connection.
+    data = catalog._read()
+    data["connections"][0]["url"] = malformed
+    catalog._write(data)
+    assert catalog.connections()[0]["url"] == expected
+    assert catalog.discover(connection["id"])[0]["url"] == expected
+
+
 def test_workbench_probe_uses_model_contract_and_allows_modelservice_host(tmp_path, monkeypatch):
     catalog = ClouderaCatalog(tmp_path)
     connection = catalog.save_connection("Workbench", "workbench", "https://wb.example", "api-key")
