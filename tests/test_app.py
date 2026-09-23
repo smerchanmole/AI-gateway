@@ -192,9 +192,9 @@ def test_onpremise_cai_profile_and_auth_mode_reach_catalog(monkeypatch, client):
     })
 
     assert response.status_code == 200
-    assert captured["args"][-9:] == (
+    assert captured["args"][-11:] == (
         "1.5.5_sp3", "ums_auto", "cdp_token", "system", "",
-        "catalog", "chat", "passage", "",
+        "catalog", "chat", "passage", "", "", "public",
     )
 
 
@@ -905,6 +905,34 @@ def test_onprem_workbench_form_exposes_direct_model_and_embedding_fields():
     assert 'workbench_mode: $("#cloudera-kind").value === "workbench" ? "direct"' in javascript
     assert "Probando el deployment con todos los parámetros" in javascript
     assert "dashboard_effective_parameters" in (dashboard.ROOT / "gateway" / "litellm_callback.py").read_text(encoding="utf-8")
+
+
+def test_workbench_app_form_and_model_entry_use_openai_streaming_contract():
+    html = (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert '<option value="workbench_app">Cloudera AI Workbench App</option>' in html
+    for control in ("cloudera-workbench-app-fields", "cloudera-workbench-app-model",
+                    "cloudera-workbench-app-auth-mode", "cloudera-workbench-app-api-key",
+                    "cloudera-workbench-app-tls-verification"):
+        assert f'id="{control}"' in html
+    assert "updateClouderaWorkbenchAppFields" in javascript
+
+    entry = dashboard._model_entry(dashboard.ModelCreate(
+        model_name="qwen38-app",
+        model="openai/qwen3.8-27b-fp8",
+        remote_model="qwen3.8-27b-fp8",
+        api_base="https://qwen38.example/v1",
+        source="cloudera",
+        cloudera_kind="workbench_app",
+        serving_engine="openai-compatible",
+        task="generation",
+    ))
+
+    assert entry["litellm_params"]["model"] == "openai/qwen3.8-27b-fp8"
+    assert entry["litellm_params"]["api_base"] == "https://qwen38.example/v1"
+    assert "api_key" not in entry["litellm_params"]
+    assert entry["model_info"]["dashboard_cloudera_kind"] == "workbench_app"
 
 
 def test_dashboard_has_three_primary_areas_and_warn_only_guardrail():

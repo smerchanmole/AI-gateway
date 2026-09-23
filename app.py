@@ -673,6 +673,8 @@ class ClouderaConnection(BaseModel):
     workbench_model_type: str = "chat"
     workbench_input_type: str = "passage"
     workbench_api_key: str = ""
+    workbench_app_model: str = ""
+    workbench_app_auth_mode: str = "public"
 
 
 class ClouderaTokenRenewal(BaseModel):
@@ -872,7 +874,9 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
     if model.source == "cloudera":
         model_info.update({
             "dashboard_source": "cloudera",
-            "dashboard_cloudera_kind": "workbench" if model.cloudera_kind == "workbench" else "inference",
+            "dashboard_cloudera_kind": (model.cloudera_kind
+                                         if model.cloudera_kind in {"inference", "workbench", "workbench_app"}
+                                         else "inference"),
             "dashboard_serving_engine": model.serving_engine.strip(),
             "dashboard_task": model.task.strip(),
             "dashboard_embedding_input_type": model.embedding_input_type.strip(),
@@ -1187,10 +1191,12 @@ def save_cloudera_connection(connection: ClouderaConnection):
             connection.onpremise_auth_mode, connection.credential_type,
             connection.tls_verification, connection.tls_ca_pem,
             connection.workbench_mode, connection.workbench_model_type,
-            connection.workbench_input_type, connection.workbench_api_key)
+            connection.workbench_input_type, connection.workbench_api_key,
+            connection.workbench_app_model, connection.workbench_app_auth_mode)
         result = generate_initial_cloudera_token(result)
         credential_changed = bool(
             connection.token.strip() or connection.workbench_api_key.strip()
+            or connection.kind == "workbench_app"
             or (connection.kind == "workbench" and "accessKey=" in connection.url)
         )
         if manager.process_alive() and credential_changed and not result.get("token_generated"):
@@ -1213,10 +1219,12 @@ def edit_cloudera_connection(connection_id: str, connection: ClouderaConnection)
             connection.onpremise_auth_mode, connection.credential_type,
             connection.tls_verification, connection.tls_ca_pem,
             connection.workbench_mode, connection.workbench_model_type,
-            connection.workbench_input_type, connection.workbench_api_key)
+            connection.workbench_input_type, connection.workbench_api_key,
+            connection.workbench_app_model, connection.workbench_app_auth_mode)
         result = generate_initial_cloudera_token(result)
         credential_changed = bool(
             connection.token.strip() or connection.workbench_api_key.strip()
+            or connection.kind == "workbench_app"
             or (connection.kind == "workbench" and "accessKey=" in connection.url)
         )
         if manager.process_alive() and credential_changed and not result.get("token_generated"):

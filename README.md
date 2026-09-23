@@ -33,7 +33,7 @@ The same Python application runs locally and as a Cloudera AI Workbench applicat
 - LiteLLM lifecycle management from the dashboard.
 - Guided model CRUD plus an advanced `config.yaml` editor.
 - YAML validation, download backup, and validated import/restore.
-- OpenAI-compatible, Ollama, Cloudera AI Inference, and Cloudera AI Workbench models.
+- OpenAI-compatible, Ollama, Cloudera AI Inference, Cloudera AI Workbench Model Service, and streaming Workbench App models.
 - Optional pre-request guardrail using any configured chat model supported by LiteLLM.
 - Cloudera model discovery, endpoint probing, and token generation/renewal.
 - SQLite-only persistence for Cloudera credentials, dynamic tokens, and structured request logs.
@@ -379,6 +379,20 @@ For an embedding deployment, IA Gateway exposes the normal LiteLLM/OpenAI `/v1/e
 
 The discovery card offers separate `query` and `passage` drafts, so an asymmetric embedding model can be registered with two LiteLLM aliases while sharing the same deployment. Chat deployments continue to use `request.messages`; automatic retries are disabled in the active LiteLLM configuration to avoid leaving overlapping requests on a busy Workbench replica.
 
+#### OpenAI-compatible Workbench Apps with streaming
+
+A Workbench App is different from Workbench Model Service. Select **Cloudera AI Workbench App** when the application itself exposes an OpenAI-compatible endpoint such as:
+
+```bash
+curl -N 'https://qwen38.example.com/v1/chat/completions' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.8-27b-fp8","messages":[{"role":"user","content":"Hello"}],"max_tokens":128,"stream":true}'
+```
+
+Enter the complete `/v1/chat/completions` URL (a base URL ending in `/v1` is also accepted) and the exact remote model identifier. Select **Bearer API key** when the application requires authentication; IA Gateway stores the key locally and sends it as `Authorization: Bearer ...`. Select **Public · no credential** otherwise. Changing an existing connection to Public explicitly removes its former key. Private CA and diagnostic no-verification modes remain connection-scoped.
+
+The generated LiteLLM model uses the regular `openai/<remote-model>` provider and the API base ending in `/v1`. Consequently streaming is passed through rather than translated into the non-streaming Workbench `/model` contract. Load tests can measure genuine TTFT, response throughput, correctness, and concurrency for these apps.
+
 ### 5. Discover and add models
 
 1. Save the Cloudera connection.
@@ -647,6 +661,7 @@ The phrase “OpenAI-compatible” describes an HTTP contract, not identical beh
 | **Cloudera AI Inference Cloud** | Model domain plus `/namespaces/.../endpoints/.../v1` | CDP token or endpoint credential | UMS token can be generated from public IAM using an access key/private key | Discovery URL is the model origin, never the central console. Public CA trust is expected. |
 | **Cloudera AI Inference on-premises** | Private inference origin plus `/namespaces/.../endpoints/<endpoint>/v1/chat/completions` | Existing UMS CDP_TOKEN, supported Knox API key, or automatically generated UMS token | Automatic mode signs private Control Plane IAM with access key/private key | Private CA chains are common. The remote JSON `model` must be the strict published identifier, for example `openai/gpt-oss-20b`, not merely the endpoint name. |
 | **Cloudera AI Workbench** | Direct deployment URL using `POST /model`; copied `?accessKey=...` URLs are sanitized | Per-model `accessKey`, plus optional Workbench user API key when bearer authentication is enabled | Administrative rotation; not a UMS renewal flow | Chat uses `request.messages`; embeddings use `request.input`, `input_type`, normalization, and batching. Defaults cap chat output at 512 tokens and zero retries avoids overlapping orphaned generations. |
+| **Cloudera AI Workbench App** | Application-owned OpenAI-compatible `/v1/chat/completions` | Optional application Bearer API key; public apps require none | Administrative rotation when a key is configured | Uses the standard OpenAI request and SSE stream. Real TTFT and tokens/s can be measured by the load-test module. |
 | **NVIDIA NIM** | OpenAI-compatible `/v1` endpoint | Deployment-specific bearer credential | Provider-specific | Top K, Min P, repetition, and reasoning options may travel via `extra_body`. Embedding NIMs may require distinct query and passage input roles. |
 | **vLLM** | OpenAI-compatible `/v1` endpoint | Deployment-specific | Provider-specific | Provider extras are supported, but request-time context settings cannot exceed deployment-time `--max-model-len`. Chat-template reasoning support is model-specific. |
 | **Triton / KServe v2 OIP** | `/v2/models/<model>/infer` and readiness routes | Deployment-specific | Provider-specific | Tensor names, types, and shapes are model-specific. Generic OpenAI chat parameters do not apply; supply a real inference JSON or use readiness-only validation. |
@@ -657,6 +672,7 @@ The phrase “OpenAI-compatible” describes an HTTP contract, not identical beh
 - **On-premises discovery:** use the AI Inference origin such as `https://ares-inference.apps.company.example`, not the Control Plane console.
 - **On-premises token generation:** use the Management Console/Control Plane origin such as `https://console-cdp.apps.company.example`. The CDP CLI appends the private IAM API path.
 - **Workbench direct model:** use the exact `https://modelservice.<workbench-domain>/model` endpoint. The model `accessKey` can be pasted separately or extracted from the copied query string; a Workbench user API key is generated inside that Workbench, not from CDP IAM credentials.
+- **Workbench App:** use its exact OpenAI-compatible `/v1/chat/completions` URL and the model identifier expected in the JSON body. Authentication is optional and independent from CDP IAM.
 - **Runtime inference:** retain the namespace and endpoint path published by Cloudera. Cloud and on-premises URLs are not interchangeable.
 - **Strict model ID:** the endpoint name selects the deployed endpoint; the JSON `model` selects the engine's internal model. For GPT-OSS, the latter may be `openai/gpt-oss-20b`. IA Gateway preserves the nested LiteLLM/provider prefixes required to send that exact value.
 

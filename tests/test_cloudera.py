@@ -373,6 +373,86 @@ def test_direct_workbench_access_key_rotation_preserves_connection_id(tmp_path):
     assert json.loads(catalog.environment()[environment_name])["access_key"] == "new-key"
 
 
+@pytest.mark.parametrize(("api_key", "expected_authorization"), [
+    ("", None),
+    ("app-secret", "Bearer app-secret"),
+])
+def test_workbench_app_discovers_and_probes_optional_bearer_endpoint(
+    tmp_path, monkeypatch, api_key, expected_authorization,
+):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection(
+        "Qwen streaming", "workbench_app", "https://qwen38.example/v1/chat/completions",
+        api_key, platform="onpremise", onpremise_version="7.3.2",
+        workbench_app_model="qwen3.8-27b-fp8",
+        workbench_app_auth_mode="bearer" if api_key else "public",
+    )
+
+    assert connection["url"] == "https://qwen38.example/v1/chat/completions"
+    assert connection["has_token"] is bool(api_key)
+    models = catalog.discover(connection["id"])
+    assert len(models) == 1
+    model = models[0]
+    assert model["protocol"] == "openai"
+    assert model["supports_streaming"] is True
+    assert model["model_name"] == "qwen3.8-27b-fp8"
+    assert model["api_key_env"] == (
+        catalog.workbench_app_environment_name(connection["id"]) if api_key else ""
+    )
+
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    def accepted(request, timeout=20):
+        assert request.full_url == "https://qwen38.example/v1/chat/completions"
+        assert request.headers.get("Authorization") == expected_authorization
+        body = json.loads(request.data)
+        assert body["model"] == "qwen3.8-27b-fp8"
+        assert body["stream"] is False
+        return Response()
+
+    monkeypatch.setattr("gateway.cloudera.urllib.request.urlopen", accepted)
+    result = catalog.probe_model(
+        connection["id"], model["external_id"], model["url"], model["protocol"],
+        model_name=model["model_name"], task=model["task"], has_chat_template=True,
+        serving_engine=model["serving_engine"],
+    )
+
+    assert result["ok"] is True
+    assert result["credential_source"] == (
+        "API key de Workbench App" if api_key else "Sin autenticación"
+    )
+
+
+def test_workbench_app_accepts_v1_base_and_preserves_api_key_when_edited(tmp_path):
+    catalog = ClouderaCatalog(tmp_path)
+    connection = catalog.save_connection(
+        "Qwen", "workbench_app", "https://qwen38.example/v1", "secret",
+        workbench_app_model="qwen3.8-27b-fp8",
+        workbench_app_auth_mode="bearer",
+    )
+
+    assert connection["url"] == "https://qwen38.example/v1/chat/completions"
+    updated = catalog.update_connection(
+        connection["id"], "Qwen renamed", "workbench_app", connection["url"], "",
+        workbench_app_model="qwen3.8-27b-fp8",
+        workbench_app_auth_mode="bearer",
+    )
+
+    assert updated["id"] == connection["id"]
+    assert updated["has_token"] is True
+    assert catalog.environment()[catalog.workbench_app_environment_name(connection["id"])] == "secret"
+
+    public = catalog.update_connection(
+        connection["id"], "Qwen public", "workbench_app", connection["url"], "",
+        workbench_app_model="qwen3.8-27b-fp8", workbench_app_auth_mode="public",
+    )
+    assert public["has_token"] is False
+    assert catalog.environment()[catalog.workbench_app_environment_name(connection["id"])] == catalog.PUBLIC_APP_NO_AUTH
+
+
 def test_workbench_probe_uses_model_contract_and_allows_modelservice_host(tmp_path, monkeypatch):
     catalog = ClouderaCatalog(tmp_path)
     connection = catalog.save_connection("Workbench", "workbench", "https://wb.example", "api-key")

@@ -337,6 +337,42 @@ def test_cloudera_callback_logs_with_public_alias_after_provider_rewrite(tmp_pat
     assert len(read_day_logs(runtime, "nemotron-publico", now.date())) == 1
 
 
+def test_cloudera_callback_removes_cached_api_key_when_workbench_app_becomes_public(tmp_path, monkeypatch):
+    """Changing an app to public must not keep a stale Bearer header alive."""
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    catalog = ClouderaCatalog(runtime)
+    connection = catalog.save_connection(
+        "Public app", "workbench_app", "https://qwen.example/v1/chat/completions",
+        workbench_app_model="qwen3.8-27b-fp8", workbench_app_auth_mode="public",
+    )
+    variable_name = catalog.workbench_app_environment_name(connection["id"])
+    (runtime / "dashboard_settings.json").write_text(
+        __import__("json").dumps({
+            "guardrail": {"enabled": False},
+            "provider_models": {"qwen-app": "openai/qwen3.8-27b-fp8"},
+            "provider_api_key_env": {"qwen-app": variable_name},
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("IA_GATEWAY_ROOT", str(tmp_path))
+    data = {
+        "model": "qwen-app",
+        "messages": [],
+        "metadata": {},
+        "api_key": "stale-private-key",
+    }
+
+    rewritten = asyncio.run(
+        DashboardLogger().async_pre_call_hook(None, None, data, "completion")
+    )
+
+    assert rewritten["model"] == "openai/qwen3.8-27b-fp8"
+    assert "api_key" not in rewritten
+    assert catalog.environment()[variable_name] == catalog.PUBLIC_APP_NO_AUTH
+
+
 def test_callback_enforces_model_parameters_and_logs_effective_values(tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
     runtime.mkdir()

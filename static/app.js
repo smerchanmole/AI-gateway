@@ -132,21 +132,27 @@ function updateClouderaFormContext() {
   const onpremise = platform === "onpremise";
   $("#cloudera-version-field").hidden = !onpremise;
   $("#cloudera-cai-version-field").hidden = !onpremise;
-  $("#cloudera-cloud-fields").hidden = onpremise || kind === "workbench";
+  $("#cloudera-cloud-fields").hidden = onpremise || ["workbench", "workbench_app"].includes(kind);
   $("#cloudera-onprem-inference-fields").hidden = !onpremise || kind !== "inference";
   $("#cloudera-onprem-workbench-fields").hidden = kind !== "workbench";
+  $("#cloudera-workbench-app-fields").hidden = kind !== "workbench_app";
   const helpContext = `${platform}-${kind}`;
   document.querySelectorAll("[data-cloudera-help]").forEach((content) => {
     content.hidden = content.dataset.clouderaHelp !== helpContext;
   });
   $("#cloudera-url").placeholder = kind === "workbench"
     ? "https://modelservice.ml-workbench.example.com/model"
-    : "https://ml-entorno.example.com";
+    : kind === "workbench_app"
+      ? "https://mi-app.example.com/v1/chat/completions"
+      : "https://ml-entorno.example.com";
   $("#cloudera-url-hint").textContent = kind === "workbench"
     ? "URL completa de Model Service terminada en /model; accessKey puede ir en su campo o en la URL."
-    : "Origen que publica el catálogo y los modelos; no es la consola central de CDP.";
+    : kind === "workbench_app"
+      ? "Endpoint OpenAI completo de la app; también se acepta la URL base terminada en /v1."
+      : "Origen que publica el catálogo y los modelos; no es la consola central de CDP.";
   if (onpremise && kind === "inference") updateClouderaOnpremCompatibility();
   updateClouderaWorkbenchFields();
+  updateClouderaWorkbenchAppFields();
 }
 
 function updateClouderaWorkbenchFields() {
@@ -155,6 +161,15 @@ function updateClouderaWorkbenchFields() {
   const customCa = $("#cloudera-workbench-tls-verification").value === "custom_ca";
   $("#cloudera-workbench-ca-field").hidden = !customCa;
   $("#cloudera-workbench-ca-pem").disabled = !customCa;
+}
+
+function updateClouderaWorkbenchAppFields() {
+  const bearer = $("#cloudera-workbench-app-auth-mode").value === "bearer";
+  $("#cloudera-workbench-app-api-key").disabled = !bearer;
+  $("#cloudera-workbench-app-expiry").disabled = !bearer;
+  const customCa = $("#cloudera-workbench-app-tls-verification").value === "custom_ca";
+  $("#cloudera-workbench-app-ca-field").hidden = !customCa;
+  $("#cloudera-workbench-app-ca-pem").disabled = !customCa;
 }
 
 function updateClouderaOnpremCompatibility() {
@@ -211,6 +226,14 @@ function clouderaFormCredential() {
       tlsCaPem: $("#cloudera-workbench-ca-pem").value,
       workbenchApiKey: $("#cloudera-workbench-api-key").value};
   }
+  if (kind === "workbench_app") {
+    return {token: $("#cloudera-workbench-app-api-key").value, renewalUrl: "",
+      accessKeyId: "", privateKey: "", workloadName: "DE",
+      credentialExpiresAt: $("#cloudera-workbench-app-expiry").value,
+      tlsVerification: $("#cloudera-workbench-app-tls-verification").value,
+      tlsCaPem: $("#cloudera-workbench-app-ca-pem").value,
+      workbenchApiKey: ""};
+  }
   if (platform === "cloud") {
     return {token: $("#cloudera-token").value, renewalUrl: $("#cloudera-cloud-renewal-url").value,
       accessKeyId: $("#cloudera-access-key-id").value, privateKey: $("#cloudera-private-key").value,
@@ -232,6 +255,8 @@ function clouderaFormCredential() {
 
 function clouderaLifecycleLabel(item) {
   if (item.kind === "workbench" && item.workbench_mode === "direct") return "Access key del modelo · rotación manual";
+  if (item.kind === "workbench_app" && !item.has_token) return "App pública · autenticación no requerida";
+  if (item.kind === "workbench_app") return "API key Bearer · rotación manual";
   if (item.credential_lifecycle === "renewable") return "Renovación automática configurada";
   if (item.credential_lifecycle === "expiring_manual") return "Caduca · sustitución manual";
   if (item.credential_lifecycle === "long_lived_unverified") return "Clave larga · verifica vigencia en Knox";
@@ -263,7 +288,7 @@ async function loadClouderaConnections({onlyIfChanged = false} = {}) {
   ));
   clouderaConnections = updated;
   $("#cloudera-connections").innerHTML = clouderaConnections.length ? clouderaConnections.map((item) => `
-    <article class="cloudera-connection" data-connection="${item.id}"><div><b>${escapeHtml(item.name)}</b><small>${item.kind === "inference" ? "AI Inference" : item.workbench_mode === "direct" ? "Workbench · Model Service" : "Workbench API v2"} · ${item.platform === "onpremise" ? `On-premise ${escapeHtml(item.cai_version_label || "")} · Runtime ${escapeHtml(item.runtime_version_label || item.onpremise_version)}` : "Cloud"}</small><small>Prueba automática cada ${escapeHtml(item.probe_interval_minutes || 5)} min</small></div><div class="connection-url">${escapeHtml(item.url)}</div><span class="credential-state ${item.token_expired ? "expired" : item.has_token ? "ready" : "missing"}">${item.renewal_state === "renewing" ? (item.has_token ? "Renovando token…" : "Generando token inicial…") : item.token_expired ? "JWT caducado" : item.has_token ? "Credencial guardada" : item.renewal_ready ? "Token pendiente de generar" : "Falta credencial"}${item.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(item.token_expires_at))}</small>` : ""}${item.renewal_due_at ? `<small>Renovación prevista: ${escapeHtml(madridTime(item.renewal_due_at))}</small>` : ""}${item.rotation_due_at ? `<small>Rotar antes de: ${escapeHtml(madridTime(item.rotation_due_at))}</small>` : ""}<small>${escapeHtml(clouderaLifecycleLabel(item))}</small></span><div class="row-actions"><button class="secondary discover-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Buscar modelos</button><button class="secondary check-all-cloudera" data-id="${item.id}" ${!item.has_token || item.token_expired ? "disabled" : ""}>Probar todos</button>${item.renewal_ready ? `<button class="secondary renew-cloudera" data-id="${item.id}">${item.has_token ? "Renovar token" : "Generar token"}</button>` : ""}<button class="secondary edit-cloudera" data-id="${item.id}">${item.has_token && !item.renewal_ready ? "Sustituir credencial" : "Editar"}</button><button class="danger delete-cloudera" data-id="${item.id}">Borrar</button></div><div class="connection-health-summary" data-health-summary="${item.id}">Sin comprobaciones de modelos</div><p class="connection-progress ${item.renewal_state === "error" || item.token_expired ? "error" : ""}" data-progress="${item.id}" role="status">${escapeHtml(item.renewal_message || (item.token_expired ? (item.renewal_ready ? "JWT caducado; se regenerará automáticamente" : "JWT caducado; sustituye la credencial") : item.has_token ? "Lista para consultar" : item.renewal_ready ? "Completa la generación del token" : "Añade una credencial válida"))}</p><section class="connection-models" data-connection-models="${item.id}"><p class="empty compact">Pulsa «Buscar modelos» para ver los modelos de esta conexión.</p></section></article>`).join("") : '<p class="empty compact">No hay conexiones Cloudera configuradas. Añade una arriba para comenzar.</p>';
+    <article class="cloudera-connection" data-connection="${item.id}"><div><b>${escapeHtml(item.name)}</b><small>${item.kind === "inference" ? "AI Inference" : item.kind === "workbench_app" ? "Workbench App · OpenAI" : item.workbench_mode === "direct" ? "Workbench · Model Service" : "Workbench API v2"} · ${item.platform === "onpremise" ? `On-premise ${escapeHtml(item.cai_version_label || "")} · Runtime ${escapeHtml(item.runtime_version_label || item.onpremise_version)}` : "Cloud"}</small><small>Prueba automática cada ${escapeHtml(item.probe_interval_minutes || 5)} min</small></div><div class="connection-url">${escapeHtml(item.url)}</div><span class="credential-state ${item.token_expired ? "expired" : item.has_token || item.kind === "workbench_app" ? "ready" : "missing"}">${item.renewal_state === "renewing" ? (item.has_token ? "Renovando token…" : "Generando token inicial…") : item.token_expired ? "JWT caducado" : item.has_token ? "Credencial guardada" : item.kind === "workbench_app" ? "Sin autenticación" : item.renewal_ready ? "Token pendiente de generar" : "Falta credencial"}${item.token_expires_at ? `<small>Caduca: ${escapeHtml(madridTime(item.token_expires_at))}</small>` : ""}${item.renewal_due_at ? `<small>Renovación prevista: ${escapeHtml(madridTime(item.renewal_due_at))}</small>` : ""}${item.rotation_due_at ? `<small>Rotar antes de: ${escapeHtml(madridTime(item.rotation_due_at))}</small>` : ""}<small>${escapeHtml(clouderaLifecycleLabel(item))}</small></span><div class="row-actions"><button class="secondary discover-cloudera" data-id="${item.id}" ${(!item.has_token && item.kind !== "workbench_app") || item.token_expired ? "disabled" : ""}>Buscar modelos</button><button class="secondary check-all-cloudera" data-id="${item.id}" ${(!item.has_token && item.kind !== "workbench_app") || item.token_expired ? "disabled" : ""}>Probar todos</button>${item.renewal_ready ? `<button class="secondary renew-cloudera" data-id="${item.id}">${item.has_token ? "Renovar token" : "Generar token"}</button>` : ""}<button class="secondary edit-cloudera" data-id="${item.id}">${item.has_token && !item.renewal_ready ? "Sustituir credencial" : "Editar"}</button><button class="danger delete-cloudera" data-id="${item.id}">Borrar</button></div><div class="connection-health-summary" data-health-summary="${item.id}">Sin comprobaciones de modelos</div><p class="connection-progress ${item.renewal_state === "error" || item.token_expired ? "error" : ""}" data-progress="${item.id}" role="status">${escapeHtml(item.renewal_message || (item.token_expired ? (item.renewal_ready ? "JWT caducado; se regenerará automáticamente" : "JWT caducado; sustituye la credencial") : item.has_token || item.kind === "workbench_app" ? "Lista para consultar" : item.renewal_ready ? "Completa la generación del token" : "Añade una credencial válida"))}</p><section class="connection-models" data-connection-models="${item.id}"><p class="empty compact">Pulsa «Buscar modelos» para ver los modelos de esta conexión.</p></section></article>`).join("") : '<p class="empty compact">No hay conexiones Cloudera configuradas. Añade una arriba para comenzar.</p>';
   document.querySelectorAll(".discover-cloudera").forEach((button) => button.onclick = () => discoverCloudera(button));
   document.querySelectorAll(".check-all-cloudera").forEach((button) => button.onclick = () => autoProbeConnection(button.dataset.id, true));
   document.querySelectorAll(".renew-cloudera").forEach((button) => button.onclick = () => renewClouderaToken(button.dataset.id, true));
@@ -328,8 +353,18 @@ function editClouderaConnection(id) {
   $("#cloudera-workbench-ca-pem").placeholder = item.has_tls_ca
     ? "Bundle guardado · déjalo vacío para conservarlo"
     : "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
+  $("#cloudera-workbench-app-model").value = item.workbench_app_model || "";
+  $("#cloudera-workbench-app-auth-mode").value = item.workbench_app_auth_mode || (item.has_token ? "bearer" : "public");
+  $("#cloudera-workbench-app-api-key").value = "";
+  $("#cloudera-workbench-app-expiry").value = item.token_expires_at && item.kind === "workbench_app" ? item.token_expires_at.slice(0, 10) : "";
+  $("#cloudera-workbench-app-tls-verification").value = item.tls_verification || "system";
+  $("#cloudera-workbench-app-ca-pem").value = "";
+  $("#cloudera-workbench-app-ca-pem").placeholder = item.has_tls_ca
+    ? "Bundle guardado · déjalo vacío para conservarlo"
+    : "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
   if (item.platform === "onpremise" && item.kind === "inference") updateClouderaOnpremCompatibility();
   updateClouderaWorkbenchFields();
+  updateClouderaWorkbenchAppFields();
   $("#save-cloudera-connection").textContent = "Guardar cambios"; $("#cancel-cloudera-edit").hidden = false;
   setInlineStatus("#cloudera-status", `Editando conexión «${item.name}». La credencial actual se conservará si dejas el campo vacío.`);
   $("#cloudera-name").focus();
@@ -339,6 +374,7 @@ function cancelClouderaEdit() {
   editingClouderaConnectionId = null; $("#cloudera-connection-form").reset();
   $("#cloudera-onprem-ca-pem").placeholder = "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
   $("#cloudera-workbench-ca-pem").placeholder = "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
+  $("#cloudera-workbench-app-ca-pem").placeholder = "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----";
   $("#save-cloudera-connection").textContent = "Guardar conexión"; $("#cancel-cloudera-edit").hidden = true;
   updateClouderaFormContext();
 }
@@ -384,6 +420,8 @@ async function saveClouderaConnection(event) {
       workbench_model_type: $("#cloudera-workbench-model-type").value,
       workbench_input_type: $("#cloudera-workbench-input-type").value,
       workbench_api_key: credential.workbenchApiKey || "",
+      workbench_app_model: $("#cloudera-workbench-app-model").value,
+      workbench_app_auth_mode: $("#cloudera-workbench-app-auth-mode").value,
     })});
     const action = editingClouderaConnectionId ? "actualizada" : "guardada";
     cancelClouderaEdit();
@@ -411,7 +449,7 @@ async function discoverCloudera(button) {
       .map((model) => [model.external_id, model.probe_result]));
     discovered.forEach((model) => { model.probe_result = previousResults.get(model.external_id); });
     clouderaModels = clouderaModels.filter((model) => model.connection_id !== button.dataset.id).concat(discovered);
-    const activeStates = new Set(["loaded", "deployed", "running", "ready"]);
+    const activeStates = new Set(["configured", "configurado", "loaded", "deployed", "running", "ready"]);
     const active = discovered.filter((model) => activeStates.has(String(model.state).toLowerCase())).length;
     const compatible = discovered.filter((model) => model.protocol === "openai").length;
     renderClouderaModels();
@@ -429,7 +467,7 @@ function clouderaDeploymentState(model) {
   const value = String(model.state || "").toLowerCase();
   const readiness = (model.conditions || []).find((condition) => ["ready", "ingressready"].includes(String(condition.type || "").toLowerCase()));
   if (readiness && String(readiness.status).toLowerCase() === "false") return {level: "danger", label: `${readiness.type} no disponible`};
-  if (["loaded", "deployed", "running", "ready"].includes(value)) return {level: "healthy", label: "Modelo activo"};
+  if (["configured", "configurado", "loaded", "deployed", "running", "ready"].includes(value)) return {level: "healthy", label: "Modelo activo"};
   if (["deploying", "loading", "starting", "pending", "updating"].includes(value)) return {level: "warning", label: "Modelo iniciándose"};
   if (["failed", "stopped", "stopping", "error", "unloaded"].includes(value)) return {level: "danger", label: `Modelo ${value}`};
   if (readiness && String(readiness.status).toLowerCase() === "true") return {level: "healthy", label: "Endpoint preparado"};
@@ -440,6 +478,8 @@ function clouderaCredentialState(model) {
   if (model.token_expired) return {level: "danger", label: "Token caducado"};
   if (model.has_model_token) return {level: "healthy", label: "Token propio disponible"};
   if (model.credential_source === "accessKey del modelo Workbench") return {level: "healthy", label: "Access key del modelo disponible"};
+  if (model.credential_source === "Sin autenticación") return {level: "healthy", label: "App pública"};
+  if (model.credential_source === "API key de Workbench App") return {level: "healthy", label: "API key de la app disponible"};
   if (model.credential_available) return {level: "warning", label: "Usará el CDP token general"};
   return {level: "unknown", label: "Sin credencial"};
 }
@@ -475,7 +515,7 @@ function scheduleClouderaChecks() {
   clouderaProbeTimers.forEach((timer) => window.clearInterval(timer));
   clouderaProbeTimers.clear();
   clouderaConnections.forEach((connection) => {
-    if (!connection.has_token || connection.token_expired) return;
+    if ((!connection.has_token && connection.kind !== "workbench_app") || connection.token_expired) return;
     const milliseconds = Math.max(1, Number(connection.probe_interval_minutes || 5)) * 60_000;
     clouderaProbeTimers.set(connection.id, window.setInterval(() => autoProbeConnection(connection.id), milliseconds));
   });
@@ -547,6 +587,7 @@ function renderClouderaModels(sortByHealth = true) {
     const compatible = model.protocol === "openai";
     const workbench = model.protocol === "workbench";
     const directWorkbench = workbench && model.workbench_mode === "direct";
+    const workbenchApp = clouderaConnections.find((item) => item.id === model.connection_id)?.kind === "workbench_app";
     const deployment = clouderaDeploymentState(model);
     const credential = clouderaCredentialState(model);
     const probe = model.probe_result;
@@ -563,8 +604,8 @@ function renderClouderaModels(sortByHealth = true) {
       ? "<small>La prueba usa el contrato request/response propio de Workbench.</small>"
       : "<small>Necesita conocer el esquema de tensores del modelo para probarlo.</small>");
     const credentialHint = workbench ? "Opcional: usa la API key de Workbench si queda vacío" : "Opcional: usa el CDP token si queda vacío";
-    const credentialEditor = directWorkbench ? "" : `<label>JWT / API key del modelo<input class="cloudera-model-token" data-index="${index}" type="password" autocomplete="new-password" placeholder="${model.has_model_token ? "Escribe un token nuevo para sustituir" : credentialHint}"></label>`;
-    const credentialAction = directWorkbench ? "" : `<button class="secondary save-cloudera-token" data-index="${index}">${model.has_model_token ? "Sustituir token" : "Guardar token propio"}</button>`;
+    const credentialEditor = directWorkbench || workbenchApp ? "" : `<label>JWT / API key del modelo<input class="cloudera-model-token" data-index="${index}" type="password" autocomplete="new-password" placeholder="${model.has_model_token ? "Escribe un token nuevo para sustituir" : credentialHint}"></label>`;
+    const credentialAction = directWorkbench || workbenchApp ? "" : `<button class="secondary save-cloudera-token" data-index="${index}">${model.has_model_token ? "Sustituir token" : "Guardar token propio"}</button>`;
     const prepareActions = model.requires_input_type
       ? `<button class="primary prepare-cloudera" data-index="${index}" data-input-type="query">Preparar consulta</button><button class="secondary prepare-cloudera" data-index="${index}" data-input-type="passage">Preparar documentos</button>`
       : `<button class="primary prepare-cloudera" data-index="${index}">Preparar borrador</button>`;
@@ -636,7 +677,8 @@ function prepareClouderaModel(index, inputType = "") {
       : `custom/${model.model_name || model.name}`;
   $("#config-api-base").value = (model.url || "").replace(/\/(chat\/completions|completions|embeddings)\/?$/, "");
   $("#config-api-key").value = model.api_key_env || "";
-  const detectedBackend = connection?.kind === "workbench" ? "workbench" : model.serving_engine;
+  const detectedBackend = connection?.kind === "workbench" ? "workbench"
+    : connection?.kind === "workbench_app" ? "openai" : model.serving_engine;
   $("#config-backend").value = ["vllm", "nim", "triton", "ollama", "workbench"].includes(detectedBackend)
     ? detectedBackend : "openai";
   $("#config-compatibility").value = "cloudera_1_5_5_sp3";
@@ -715,7 +757,7 @@ function modelUsageExamples(model, index) {
 function modelCard(model, index) {
   /** Project a safe backend model into a purely presentational card. */
   const sourceBadge = model.source === "cloudera"
-    ? `<span class="source-badge cloudera">CLOUDERA · ${model.cloudera_kind === "workbench" ? "WORKBENCH" : "AI INFERENCE"}</span>`
+    ? `<span class="source-badge cloudera">CLOUDERA · ${model.cloudera_kind === "workbench" ? "WORKBENCH" : model.cloudera_kind === "workbench_app" ? "WORKBENCH APP" : "AI INFERENCE"}</span>`
     : "";
   return `
     <article class="model-card ${model.enabled ? "" : "disabled"}">
@@ -861,7 +903,7 @@ async function loadModelResources() {
         ? metricRow("Latencia (sonda)", `${latency.latency_ms} ms`, metricStatus("latency", latency.latency_ms))
         : metricRow("Latencia (sonda)", latency?.error || (gatewayProcessAlive ? "Pendiente" : "Gateway detenido"));
       target.innerHTML = [
-        metricRow("Proveedor", `Cloudera · ${item.cloudera_kind === "workbench" ? "Workbench" : "AI Inference"}`),
+        metricRow("Proveedor", `Cloudera · ${item.cloudera_kind === "workbench" ? "Workbench" : item.cloudera_kind === "workbench_app" ? "Workbench App" : "AI Inference"}`),
         latencyRow,
         checkRow,
       ].join("");
@@ -1915,6 +1957,8 @@ $("#cloudera-credential-type").onchange = updateClouderaOnpremCompatibility;
 $("#cloudera-onprem-tls-verification").onchange = updateClouderaTlsFields;
 $("#cloudera-workbench-model-type").onchange = updateClouderaWorkbenchFields;
 $("#cloudera-workbench-tls-verification").onchange = updateClouderaWorkbenchFields;
+$("#cloudera-workbench-app-tls-verification").onchange = updateClouderaWorkbenchAppFields;
+$("#cloudera-workbench-app-auth-mode").onchange = updateClouderaWorkbenchAppFields;
 document.querySelectorAll('input[name="cloudera-auth-mode"]').forEach((radio) => {
   radio.onchange = updateClouderaOnpremCompatibility;
 });

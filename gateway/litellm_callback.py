@@ -225,7 +225,8 @@ def _provider_api_key(alias: str) -> str | None:
             return None
         from gateway.cloudera import ClouderaCatalog
 
-        return ClouderaCatalog(_root() / "runtime").environment().get(str(variable_name))
+        value = ClouderaCatalog(_root() / "runtime").environment().get(str(variable_name))
+        return None if value == ClouderaCatalog.PUBLIC_APP_NO_AUTH else value
     except (OSError, ValueError, TypeError):
         return None
 
@@ -299,6 +300,10 @@ class DashboardLogger(CustomLogger):
             api_key = _provider_api_key(target)
             if api_key:
                 data["api_key"] = api_key
+            else:
+                # Public Workbench Apps deliberately remove a key that may
+                # still be cached by LiteLLM from an earlier private setting.
+                data.pop("api_key", None)
         excluded = {str(name) for name in (settings.get("excluded_models") or [])}
         embedding_call = "embedding" in str(call_type).lower()
         periodic_probe = metadata.get("dashboard_probe") == "periodic"
