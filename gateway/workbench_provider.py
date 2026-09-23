@@ -201,6 +201,28 @@ def _unwrap(payload: Any, status_code: int) -> dict[str, Any]:
     }
 
 
+def _usage_mapping(value: Any) -> dict[str, Any] | None:
+    """Return the plain mapping required by LiteLLM's streaming handler.
+
+    ``ModelResponse`` converts an OpenAI usage dictionary into LiteLLM's
+    ``Usage`` object.  Custom streaming providers must convert it back before
+    yielding a ``GenericStreamingChunk``; otherwise LiteLLM tries to evaluate
+    ``Usage(**usage)`` and raises a mid-stream ``TypeError``.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    for method_name in ("model_dump", "dict"):
+        method = getattr(value, method_name, None)
+        if callable(method):
+            result = method(exclude_none=True)
+            if isinstance(result, dict):
+                return result
+    return None
+
+
 def _unwrap_embeddings(payload: Any, status_code: int, model: str) -> EmbeddingResponse:
     """Accept OpenAI-shaped or plain embedding arrays returned by predictors."""
 
@@ -325,7 +347,7 @@ class ClouderaWorkbenchLLM(CustomLLM):
             "text": choice.message.content or "",
             "is_finished": True,
             "finish_reason": choice.finish_reason or "stop",
-            "usage": response.usage,
+            "usage": _usage_mapping(response.usage),
             "index": 0,
         }
 
@@ -336,7 +358,7 @@ class ClouderaWorkbenchLLM(CustomLLM):
             "text": choice.message.content or "",
             "is_finished": True,
             "finish_reason": choice.finish_reason or "stop",
-            "usage": response.usage,
+            "usage": _usage_mapping(response.usage),
             "index": 0,
         }
 

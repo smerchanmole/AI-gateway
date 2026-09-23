@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import ssl
@@ -102,6 +103,44 @@ def test_workbench_provider_wraps_request_and_unwraps_openai_response(monkeypatc
     }}
     assert result.choices[0].message.content == "¡Hola!"
     assert result.usage.total_tokens == 5
+
+
+def test_workbench_streaming_yields_usage_as_plain_mapping(monkeypatch):
+    """LiteLLM must be able to unpack Workbench usage in its stream handler."""
+
+    response = ModelResponse(**{
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    })
+    handler = ClouderaWorkbenchLLM()
+    monkeypatch.setattr(handler, "completion", lambda **_kwargs: response)
+
+    chunk = next(handler.streaming())
+
+    assert isinstance(chunk["usage"], dict)
+    assert chunk["usage"]["total_tokens"] == 3
+
+
+def test_workbench_async_streaming_yields_usage_as_plain_mapping(monkeypatch):
+    response = ModelResponse(**{
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    })
+    handler = ClouderaWorkbenchLLM()
+
+    async def completion(**_kwargs):
+        return response
+
+    async def collect():
+        return [chunk async for chunk in handler.astreaming()]
+
+    monkeypatch.setattr(handler, "acompletion", completion)
+    chunk = asyncio.run(collect())[0]
+
+    assert isinstance(chunk["usage"], dict)
+    assert chunk["usage"]["completion_tokens"] == 1
 
 
 def test_direct_workbench_uses_api_key_as_body_access_key(monkeypatch):

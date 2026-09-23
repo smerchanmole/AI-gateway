@@ -452,8 +452,55 @@ class BenchmarkRunner:
         # ``think: false`` flag. Keep the override provider-specific: remote
         # OpenAI-compatible services may not accept this parameter.
         model_state = (self._state.get("models") or {}).get(name, {})
-        if str(model_state.get("provider_model", "")).startswith("ollama/"):
+        provider_model = str(model_state.get("provider_model", ""))
+        if provider_model.startswith("ollama/"):
             payload["reasoning_effort"] = "none"
+        # Workbench Model Service returns one complete JSON response and does
+        # not expose a token stream. Asking LiteLLM for SSE would only emulate
+        # a one-chunk stream and cannot produce a real TTFT measurement.
+        if provider_model.startswith("cloudera_workbench/"):
+            payload["stream"] = False
+            try:
+                response = await client.post(
+                    f"{base_url}/v1/chat/completions", headers=headers, json=payload,
+                )
+                finished = time.perf_counter()
+                response.raise_for_status()
+                body = response.json()
+                choice = (body.get("choices") or [{}])[0]
+                message = choice.get("message") or choice.get("delta") or {}
+                answer = _text_content(message.get("content")) or _text_content(choice.get("text"))
+                final_answer = _final_answer_text(answer)
+                completion_tokens = _usage_tokens(
+                    body.get("usage"), "completion_tokens", "output_tokens",
+                )
+                estimated = completion_tokens is None
+                processed_tokens = (
+                    completion_tokens if completion_tokens is not None else _estimated_tokens(answer)
+                )
+                return {
+                    "ok": True,
+                    "correct": _normalise_answer(final_answer) == _normalise_answer(expected),
+                    "latency_ms": (finished - started) * 1000,
+                    "ttft_ms": None,
+                    "output_chars": len(answer),
+                    "processed_tokens": processed_tokens,
+                    "tokens_estimated": estimated,
+                    "case": case,
+                    "error": None,
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "correct": False,
+                    "latency_ms": (time.perf_counter() - started) * 1000,
+                    "ttft_ms": None,
+                    "output_chars": 0,
+                    "processed_tokens": 0,
+                    "tokens_estimated": False,
+                    "case": case,
+                    "error": self._error_text(exc),
+                }
         first_token: float | None = None
         answer_parts: list[str] = []
         completion_tokens: int | None = None

@@ -141,6 +141,36 @@ def test_ollama_chat_disables_thinking_for_short_scored_cases():
     assert result["correct"] is True
 
 
+def test_workbench_chat_uses_non_streaming_contract_and_has_no_ttft():
+    async def exercise():
+        runner = BenchmarkRunner()
+        runner._state = {
+            "id": "workbench-non-streaming",
+            "models": {
+                "qwen38": {"provider_model": "cloudera_workbench/qwen38"},
+            },
+        }
+        expected = _prompt("workbench-non-streaming", 0)[1]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            assert payload["stream"] is False
+            return httpx.Response(200, json={
+                "choices": [{"message": {"role": "assistant", "content": expected}}],
+                "usage": {"completion_tokens": 4},
+            })
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await runner._request("qwen38", "chat", client, "http://gateway", {}, 0)
+
+    result = asyncio.run(exercise())
+    assert result["ok"] is True
+    assert result["correct"] is True
+    assert result["ttft_ms"] is None
+    assert result["processed_tokens"] == 4
+    assert result["tokens_estimated"] is False
+
+
 def test_embedding_is_scored_by_its_complete_vector_and_input_usage():
     async def request(vector):
         runner = BenchmarkRunner()
