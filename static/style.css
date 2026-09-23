@@ -591,12 +591,15 @@ dialog::backdrop { background: rgba(3,8,18,.72); backdrop-filter: blur(3px); }
 .benchmark-fieldset > label, .benchmark-two-cols label { display: grid; gap: 5px; color: #d8e5f3; font-size: 10px; font-weight: 750; }
 .benchmark-fieldset small, .benchmark-two-cols small { color: #91a8bd; font-size: 9px; font-weight: 500; }
 .benchmark-model-picker { display: grid; gap: 7px; }
-.benchmark-model-option { display: grid; grid-template-columns: auto minmax(0, 1fr) 76px; align-items: center; gap: 9px; min-height: 50px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.025); cursor: pointer; }
+.benchmark-model-option { display: grid; grid-template-columns: auto minmax(0, 1fr) auto 76px; align-items: center; gap: 9px; min-height: 54px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.025); cursor: pointer; }
 .benchmark-model-option:has(input[type="checkbox"]:checked) { border-color: rgba(34,211,238,.48); background: rgba(8,145,178,.1); }
 .benchmark-model-option input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--cyan); }
 .benchmark-model-option div { min-width: 0; }
 .benchmark-model-option b, .benchmark-model-option small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .benchmark-model-option b { color: #f8fafc; font-size: 11px; }
+.benchmark-last-kpi { min-width: 76px; padding-right: 9px; border-right: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+.benchmark-last-kpi small { color: #6f879e; font-size: 7px; font-weight: 850; letter-spacing: .08em; }
+.benchmark-last-kpi strong { display: block; color: var(--cyan); font-size: 11px; white-space: nowrap; }
 .benchmark-model-option input[type="number"] { width: 76px; padding: 8px; text-align: center; font-variant-numeric: tabular-nums; }
 .choice-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .choice-cards label { display: flex; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
@@ -634,15 +637,21 @@ dialog::backdrop { background: rgba(3,8,18,.72); backdrop-filter: blur(3px); }
 .benchmark-progress progress::-webkit-progress-bar { background: var(--ink-800); }
 .benchmark-progress progress::-webkit-progress-value { background: linear-gradient(90deg, var(--cyan), var(--green)); }
 .benchmark-progress progress::-moz-progress-bar { background: linear-gradient(90deg, var(--cyan), var(--green)); }
-.benchmark-overview { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+.benchmark-overview { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-bottom: 12px; }
 .benchmark-overview article, .benchmark-metric { padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.025); }
 .benchmark-overview span, .benchmark-metric span { display: block; color: #91a8bd; font-size: 8px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
 .benchmark-overview strong, .benchmark-metric strong { display: block; margin-top: 3px; color: white; font-size: 17px; font-variant-numeric: tabular-nums; }
+.benchmark-overview .benchmark-primary-kpi { grid-column: span 2; border-color: rgba(34,211,238,.38); background: rgba(8,145,178,.1); }
+.benchmark-overview .benchmark-primary-kpi strong { color: var(--cyan); font-size: 28px; line-height: 1.05; }
+.benchmark-overview .benchmark-primary-kpi small { display: block; margin-top: 4px; color: #91a8bd; font-size: 8px; }
 .benchmark-model-results { display: grid; gap: 12px; }
 .benchmark-model-result { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.018); }
 .benchmark-model-head { padding: 12px 14px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.025); }
 .benchmark-model-head h4 { margin: 0; color: white; font-size: 15px; }
 .benchmark-model-head small { display: block; max-width: 360px; overflow: hidden; color: #91a8bd; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.benchmark-model-kpi { min-width: 128px; margin-left: auto; padding: 2px 14px; border-left: 1px solid var(--line); }
+.benchmark-model-kpi span, .benchmark-model-kpi small { display: block; color: #91a8bd; font-size: 7px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.benchmark-model-kpi strong { display: block; color: var(--cyan); font-size: 24px; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .load-level { padding: 5px 8px; border-radius: 999px; color: #cffafe; background: rgba(8,145,178,.25); font-size: 9px; font-weight: 800; white-space: nowrap; }
 .benchmark-metrics { display: grid; grid-template-columns: repeat(7, 1fr); gap: 7px; padding: 11px; }
 .benchmark-metric strong { font-size: 14px; }
@@ -781,6 +790,11 @@ pre { margin: 0; max-height: 380px; overflow: auto; color: #d8e2ee; white-space:
   .benchmark-title { align-items: flex-start; }
   .benchmark-two-cols, .choice-cards, .benchmark-chart-grid { grid-template-columns: 1fr; }
   .benchmark-overview { grid-template-columns: repeat(2, 1fr); }
+  .benchmark-model-option { grid-template-columns: auto minmax(0, 1fr) 70px; }
+  .benchmark-last-kpi { grid-column: 2; text-align: left; border-right: 0; }
+  .benchmark-model-option input[type="number"] { grid-column: 3; grid-row: 1 / span 2; }
+  .benchmark-model-head { align-items: flex-start; flex-wrap: wrap; }
+  .benchmark-model-kpi { order: 3; width: 100%; margin-left: 0; padding: 9px 0 0; border-top: 1px solid var(--line); border-left: 0; }
   .benchmark-metrics { grid-template-columns: repeat(2, 1fr); }
   .hourly-chart { gap: 2px; }
   .cloudera-form, .cloudera-connection, .cloudera-model { grid-template-columns: 1fr; }
@@ -1011,8 +1025,8 @@ input {
 }
 .benchmark-live,
 .benchmark-config { padding: 20px; }
-.benchmark-metrics { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
-.benchmark-overview { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.benchmark-metrics { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.benchmark-overview { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .benchmark-chart-grid { gap: 12px; }
 .field-label { display: inline-flex; align-items: baseline; gap: .35em; white-space: nowrap; }
 .field-title, .field-unit { flex: 0 0 auto; white-space: nowrap; }

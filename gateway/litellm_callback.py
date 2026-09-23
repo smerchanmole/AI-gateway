@@ -301,9 +301,10 @@ class DashboardLogger(CustomLogger):
                 data["api_key"] = api_key
         excluded = {str(name) for name in (settings.get("excluded_models") or [])}
         embedding_call = "embedding" in str(call_type).lower()
+        periodic_probe = metadata.get("dashboard_probe") == "periodic"
         if (not settings.get("enabled") or not settings.get("provider_model") or
                 not isinstance(messages, list) or target == settings.get("model") or
-                target in excluded or embedding_call):
+                target in excluded or embedding_call or periodic_probe):
             if provider_model:
                 data["model"] = provider_model
             return data

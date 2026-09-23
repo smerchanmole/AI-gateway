@@ -71,6 +71,8 @@ The screenshot above is generated from the running application. Language and lig
 
 The inventory is the operational home page. A model card distinguishes the public alias from the provider model, displays whether it is chat or embeddings, and separates process state from endpoint health. Remote CPU or VRAM values are never fabricated: unavailable remote metrics are labelled as such.
 
+The control plane also performs one lightweight availability check every five minutes for every enabled alias currently loaded by LiteLLM. This server-side monitor continues when no browser is open, selects the chat or embeddings endpoint from the declared capability, prevents overlapping cycles, and labels the synthetic input as a periodic health check in the request log. Periodic checks bypass the content guardrail because they validate model availability rather than user content; the guardrail remains independently monitored as one of the loaded aliases.
+
 Use **Quick test** for a real end-to-end request through the same public alias used by clients. Chat aliases receive a user message; embedding aliases receive text and must return a non-empty vector. This is different from the pre-save contract test: Quick test verifies the currently loaded router, while the contract test validates a candidate configuration before it is allowed into that router.
 
 Disabling an alias changes runtime state without deleting its YAML definition. Adding, editing, deleting, or changing topology requires a LiteLLM restart; credential renewal does not.
@@ -216,6 +218,7 @@ ia-gateway/
 │   ├── edge_server.py             # Streaming path router and trusted client IP
 │   ├── excel_export.py            # Dependency-free XLSX generation
 │   ├── litellm_callback.py        # Dynamic credentials, guardrail, observability
+│   ├── health_monitor.py          # Five-minute checks for active LiteLLM aliases
 │   ├── litellm_sitecustomize.py   # Early host-scoped TLS setup for LiteLLM
 │   ├── log_store.py               # Daily SQLite request logs and KPIs
 │   ├── tls.py                     # Local development certificate generation
@@ -774,6 +777,7 @@ Add a provider by keeping four concerns independent: discovery metadata, runtime
 | `gateway/core.py` | LiteLLM process, YAML operations, runtime configuration, and model state |
 | `gateway/cloudera.py` | SQLite credentials, Cloudera discovery/probing, and token renewal |
 | `gateway/litellm_callback.py` | Dynamic credentials, guardrail execution, and structured observability |
+| `gateway/health_monitor.py` | Non-overlapping five-minute chat and embedding availability checks |
 | `gateway/log_store.py` | Daily log persistence and KPI aggregation |
 | `gateway/auth.py` | Administrator credentials and sessions |
 | `static/index.html` | Dashboard structure |

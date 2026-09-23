@@ -240,6 +240,28 @@ def test_cloudera_model_entry_builds_provider_prefix_from_remote_model():
     assert entry["model_info"]["dashboard_remote_model"] == "openai/gpt-oss-20b"
 
 
+def test_ollama_numeric_keep_alive_is_serialized_as_a_number():
+    entry = dashboard._model_entry(dashboard.ModelCreate(
+        model_name="embedding-local",
+        model="ollama/bge-m3:latest",
+        backend_profile="ollama",
+        keep_alive="-1",
+    ))
+
+    assert entry["litellm_params"]["keep_alive"] == -1
+
+
+def test_ollama_duration_keep_alive_remains_a_duration_string():
+    entry = dashboard._model_entry(dashboard.ModelCreate(
+        model_name="qwen-local",
+        model="ollama/qwen3.5:9b",
+        backend_profile="ollama",
+        keep_alive="5m",
+    ))
+
+    assert entry["litellm_params"]["keep_alive"] == "5m"
+
+
 def test_benchmark_rejects_too_few_requests_for_concurrency(monkeypatch, client):
     monkeypatch.setattr(dashboard.manager, "models", lambda: [{
         "name": "modelo", "enabled": True, "mode": "chat", "provider_model": "openai/demo",
@@ -421,6 +443,10 @@ def test_dashboard_uses_wide_responsive_grid_and_bounded_log_details():
     assert 'html[data-theme="light"] .tab.active' in stylesheet
     assert ".benchmark-two-cols > label" in stylesheet
     assert ".benchmark-levels th" in stylesheet
+    assert ".benchmark-primary-kpi" in stylesheet
+    assert ".benchmark-last-kpi" in stylesheet
+    assert 'TOKENS / SEGUNDO' in javascript
+    assert 'model.tokens_per_second' in javascript
     assert ".log-table summary" in stylesheet
 
 
@@ -434,8 +460,20 @@ def test_model_metrics_use_vertical_rows_and_accessible_statuses():
     assert 'value >= 80' in javascript
     assert 'value < 20' in javascript
     assert 'kind === "latency"' in javascript
-    assert "await loadRemoteLatencies()" in javascript
     assert ".metric-row + .metric-row" in stylesheet
+
+
+def test_remote_latency_is_only_measured_by_an_explicit_model_test():
+    """Opening the dashboard must not call every paid or private remote model."""
+    javascript = (dashboard.ROOT / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "if (gatewayProcessAlive) await loadRemoteLatencies();" not in javascript
+    assert "if (gatewayProcessAlive && remoteLatencies.size === 0) await loadRemoteLatencies();" not in javascript
+    run_test = javascript.split("async function runTest()", 1)[1].split('$("#gateway-button")', 1)[0]
+    assert run_test.index("selectedLogModel = testedModel;") < run_test.index("const data = await api(")
+    assert "remoteLatencies.set(testedModel" in run_test
+    assert "esperando primera respuesta" in run_test
+    assert 'api("/api/model-health")' in javascript
 
 
 def test_model_cards_offer_accessible_curl_and_python_examples():
@@ -482,6 +520,20 @@ def test_remote_latency_probe_works_without_gateway_auth(monkeypatch, client):
     assert len(calls) == 1
     assert calls[0][1]["headers"] == {}
     assert calls[0][1]["json"]["model"] == "topito"
+
+
+def test_model_health_endpoint_returns_periodic_monitor_snapshot(monkeypatch, client):
+    snapshot = {
+        "interval_seconds": 300,
+        "gateway_status": "running",
+        "models": {"qwen-local": {"status": "healthy", "latency_ms": 9123}},
+    }
+    monkeypatch.setattr(dashboard.model_health, "snapshot", lambda: snapshot)
+
+    response = client.get("/api/model-health")
+
+    assert response.status_code == 200
+    assert response.json() == snapshot
 
 
 def test_guided_model_config_uses_environment_reference(monkeypatch, client):

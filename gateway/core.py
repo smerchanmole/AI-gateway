@@ -43,6 +43,16 @@ def environment_port(name: str, default: int) -> int:
     return port
 
 
+def _model_mode(entry: dict[str, Any]) -> str:
+    """Infer the API contract used by a configured alias."""
+
+    name = str(entry.get("model_name") or "")
+    params = entry.get("litellm_params") or {}
+    model_info = entry.get("model_info") or {}
+    searchable = f"{name} {params.get('model', '')} {model_info.get('dashboard_task', '')}".lower()
+    return "embedding" if "embed" in searchable or "bge-" in searchable else "chat"
+
+
 class GatewayManager:
     """Orchestrate LiteLLM while keeping ``config.yaml`` as the immutable source of truth."""
 
@@ -125,12 +135,19 @@ class GatewayManager:
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
             raise RuntimeError(f"Alias duplicados: {', '.join(duplicates)}")
+        entries_by_name = {str(entry.get("model_name")): entry for entry in model_list}
         for mapping in (data.get("router_settings") or {}).get("fallbacks", []):
             if not isinstance(mapping, dict):
                 raise RuntimeError("Cada fallback debe ser un mapa alias: [alternativas]")
             for source, alternatives in mapping.items():
                 if source not in names or not isinstance(alternatives, list) or any(item not in names for item in alternatives):
                     raise RuntimeError(f"Fallback no válido para '{source}': usa alias existentes")
+                incompatible = [target for target in alternatives
+                                if _model_mode(entries_by_name[source]) != _model_mode(entries_by_name[target])]
+                if incompatible:
+                    raise RuntimeError(
+                        f"Fallback incompatible para '{source}': chat y embeddings usan APIs diferentes"
+                    )
         guardrail = (data.get("dashboard_settings") or {}).get("guardrail", {})
         if guardrail.get("enabled") and guardrail.get("model") not in names:
             raise RuntimeError("El modelo guardrail debe ser un alias existente")
@@ -516,7 +533,7 @@ class GatewayManager:
                 "validated_at": str(model_info.get("dashboard_validated_at") or ""),
                 "fallbacks": fallback_map.get(name, []),
                 "enabled": name not in disabled,
-                "mode": "embedding" if "embed" in searchable_name or "bge-" in searchable_name else "chat",
+                "mode": _model_mode(entry),
                 "source": "cloudera" if is_cloudera else ("ollama" if provider_model.startswith("ollama/") else "remote"),
                 "cloudera_kind": cloudera_kind,
                 "serving_engine": str(model_info.get("dashboard_serving_engine") or ""),

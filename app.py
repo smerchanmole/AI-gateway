@@ -253,6 +253,7 @@ from gateway.excel_export import build_logs_xlsx
 from gateway.log_store import available_days, log_kpis, log_kpis_for_day, parse_day, read_day_logs
 from gateway.auth import AuthStore, AuthenticationError, LoginRateLimited
 from gateway.benchmark import BenchmarkRunner
+from gateway.health_monitor import ModelHealthMonitor
 from gateway.tls import ensure_self_signed_certificate
 
 
@@ -264,7 +265,14 @@ INTERNAL_DASHBOARD_PORT = environment_port("IA_GATEWAY_DASHBOARD_PORT", 18080)
 manager = GatewayManager(ROOT)
 cloudera = ClouderaCatalog(ROOT / "runtime")
 auth = AuthStore(ROOT / "runtime")
-benchmarks = BenchmarkRunner()
+benchmarks = BenchmarkRunner(ROOT / "runtime" / "benchmark-latest.json")
+model_health = ModelHealthMonitor(
+    models=manager.models,
+    active_names=manager.active_model_names,
+    is_running=manager.is_running,
+    base_url=f"http://{manager.host}:{manager.port}",
+    interval_seconds=300,
+)
 _MODEL_VALIDATIONS: dict[str, tuple[str, float]] = {}
 _LOG_KPI_CACHE: dict[tuple[str, tuple[str, ...], str], tuple[float, dict[str, Any]]] = {}
 _LOG_KPI_CACHE_SECONDS = 30.0
@@ -365,12 +373,14 @@ async def lifespan(_app: FastAPI):
         flush=True,
     )
     supervisor = asyncio.create_task(cloudera_token_supervisor())
+    model_health.start()
     try:
         yield
     finally:
         supervisor.cancel()
         with suppress(asyncio.CancelledError):
             await supervisor
+        await model_health.shutdown()
         await benchmarks.shutdown()
         # The proxy is a dashboard child and must not be orphaned at shutdown.
         manager.stop()
@@ -804,7 +814,11 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
     if model.reasoning_effort: params["reasoning_effort"] = model.reasoning_effort
     if model.num_retries is not None: params["num_retries"] = model.num_retries
     if model.max_parallel_requests is not None: params["max_parallel_requests"] = model.max_parallel_requests
-    if model.keep_alive.strip(): params["keep_alive"] = model.keep_alive.strip()
+    if model.keep_alive.strip():
+        keep_alive = model.keep_alive.strip()
+        # Ollama treats JSON strings as duration expressions. Preserve values
+        # such as "5m", but send numeric controls such as -1 and 0 as numbers.
+        params["keep_alive"] = int(keep_alive) if re.fullmatch(r"-?\d+", keep_alive) else keep_alive
     if model.timeout is not None: params["timeout"] = model.timeout
 
     if (effective_backend not in {"vllm", "nim", "workbench", "ollama"}
@@ -1044,6 +1058,12 @@ def models():
 def model_resources():
     """Separate local metrics from unobservable remote providers."""
     return manager.model_resources()
+
+
+@app.get("/api/model-health")
+def model_health_status():
+    """Expose the five-minute checks without launching work from the browser."""
+    return model_health.snapshot()
 
 
 @app.post("/api/benchmarks")
@@ -1472,7 +1492,9 @@ def remove_model(name: str, restart: bool = Query(True)):
 def start():
     """Start the gateway only after validating configuration and secrets."""
     try:
-        return manager.start()
+        result = manager.start()
+        model_health.trigger()
+        return result
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc
 

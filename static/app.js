@@ -825,15 +825,26 @@ function metricRow(label, value, status = null) {
 }
 
 async function loadModelResources() {
-  /** Merge Ollama process metrics with provider latency probes. */
-  const resources = await api("/api/model-resources");
+  /** Merge local resources, manual latency, and backend-owned periodic checks. */
+  const [resources, health] = await Promise.all([
+    api("/api/model-resources"),
+    api("/api/model-health"),
+  ]);
+  const checks = health.models || {};
   for (const item of resources) {
     const target = [...document.querySelectorAll(".model-resources")]
       .find((node) => node.dataset.resourceName === item.name);
     if (!target) continue;
 
+    const check = checks[item.name];
+    const checkRow = check?.status === "healthy"
+      ? metricRow("Comprobación periódica", `Operativo · ${check.latency_ms} ms`, metricStatus("latency", check.latency_ms))
+      : check?.status === "error"
+        ? metricRow("Comprobación periódica", `Error · ${escapeHtml(check.error || "Sin detalle")}`, {level: "danger", label: "Prueba fallida"})
+        : metricRow("Comprobación periódica", health.running ? "Comprobando…" : "Pendiente · cada 5 min");
+
     if (item.source === "remote") {
-      const latency = remoteLatencies.get(item.name);
+      const latency = remoteLatencies.get(item.name) || (check?.status === "healthy" ? check : null);
       const latencyRow = latency?.latency_ms !== undefined
         ? metricRow("Latencia (sonda)", `${latency.latency_ms} ms`, metricStatus("latency", latency.latency_ms))
         : metricRow("Latencia (sonda)", latency?.error || (gatewayProcessAlive ? "Pendiente" : "Gateway detenido"));
@@ -841,20 +852,22 @@ async function loadModelResources() {
         metricRow("Proveedor", "OpenAI · remoto"),
         metricRow("Saldo / tokens", "No disponible vía API"),
         latencyRow,
+        checkRow,
       ].join("");
       target.className = "model-resources remote";
     } else if (item.source === "cloudera") {
-      const latency = remoteLatencies.get(item.name);
+      const latency = remoteLatencies.get(item.name) || (check?.status === "healthy" ? check : null);
       const latencyRow = latency?.latency_ms !== undefined
         ? metricRow("Latencia (sonda)", `${latency.latency_ms} ms`, metricStatus("latency", latency.latency_ms))
         : metricRow("Latencia (sonda)", latency?.error || (gatewayProcessAlive ? "Pendiente" : "Gateway detenido"));
       target.innerHTML = [
         metricRow("Proveedor", `Cloudera · ${item.cloudera_kind === "workbench" ? "Workbench" : "AI Inference"}`),
         latencyRow,
+        checkRow,
       ].join("");
       target.className = "model-resources cloudera";
     } else if (!item.available) {
-      target.innerHTML = metricRow("Estado", "Ollama no disponible");
+      target.innerHTML = [metricRow("Estado", "Ollama no disponible"), checkRow].join("");
       target.className = "model-resources unavailable";
     } else {
       const memoryFree = item.server_memory_free_percent;
@@ -868,6 +881,7 @@ async function loadModelResources() {
       rows.push(
         metricRow("Memoria libre", `${memoryFree ?? "—"}%`, metricStatus("memory-free", memoryFree)),
         metricRow("CPU compartida", `${cpu ?? "—"}%`, metricStatus("cpu", cpu)),
+        checkRow,
       );
       target.innerHTML = rows.join("");
       target.className = "model-resources";
@@ -1402,24 +1416,6 @@ function applyAdvisorRecommendation() {
   $("#model-form").scrollIntoView({behavior: "smooth", block: "start"});
 }
 
-/** Make one minimal call per remote model and one full page load. */
-async function loadRemoteLatencies() {
-  const remoteModels = models.filter((model) => (
-    model.enabled && !model.provider_model.startsWith("ollama/")
-  ));
-  for (const model of remoteModels) {
-    try {
-      remoteLatencies.set(
-        model.name,
-        await api(`/api/models/${encodeURIComponent(model.name)}/latency`, { method: "POST" }),
-      );
-    } catch {
-      remoteLatencies.set(model.name, { error: "No disponible" });
-    }
-    await loadModelResources();
-  }
-}
-
 function renderTestTabs() {
   /** Avoid an opaque selector: expose every active alias as a visible tab. */
   if (!models.some((model) => model.name === selectedTestModel && model.enabled)) {
@@ -1655,26 +1651,43 @@ function readableResult(data) {
 async function runTest() {
   /** Traverse browser → FastAPI → LiteLLM → provider and measure total time. */
   if (!selectedTestModel) return;
+  // Freeze the selected alias for the complete request. The user may click a
+  // different tab while a slow model is responding, but the result, latency,
+  // and log tab must continue to refer to the model that was actually called.
+  const testedModel = selectedTestModel;
+  const model = models.find((item) => item.name === testedModel);
   const button = $("#test-button");
   const result = $("#test-result");
   button.disabled = true;
   button.textContent = "Enviando…";
   result.hidden = true;
+  selectedLogModel = testedModel;
+  renderLogTabs();
   const started = performance.now();
+  const sendingTimer = window.setInterval(() => {
+    const seconds = Math.max(1, Math.round((performance.now() - started) / 1000));
+    button.textContent = `Enviando… ${seconds} s · esperando primera respuesta`;
+  }, 1000);
   try {
-    const data = await api(`/api/models/${encodeURIComponent(selectedTestModel)}/test`, {
+    const data = await api(`/api/models/${encodeURIComponent(testedModel)}/test`, {
       method: "POST",
       body: JSON.stringify({ prompt: $("#test-prompt").value }),
     });
+    const elapsedMs = Math.round(performance.now() - started);
     result.querySelector("pre").textContent = readableResult(data);
-    $("#test-time").textContent = `${Math.round(performance.now() - started)} ms`;
+    $("#test-time").textContent = `${elapsedMs} ms`;
     result.hidden = false;
-    selectedLogModel = selectedTestModel;
-    renderLogTabs();
+    // A user-triggered test is the only trustworthy and cost-visible remote
+    // latency measurement. Never probe every remote model on page load.
+    if (model && !model.provider_model.startsWith("ollama/")) {
+      remoteLatencies.set(testedModel, { latency_ms: elapsedMs });
+      await loadModelResources();
+    }
     window.setTimeout(() => loadLogs().catch(showError), 500);
   } catch (exception) {
     showError(exception);
   } finally {
+    window.clearInterval(sendingTimer);
     button.disabled = false;
     button.textContent = "Enviar prueba";
   }
@@ -1686,7 +1699,6 @@ $("#gateway-button").onclick = async () => {
   try {
     await api(`/api/gateway/${gatewayProcessAlive ? "stop" : "start"}`, { method: "POST" });
     await loadStatus();
-    if (gatewayProcessAlive && remoteLatencies.size === 0) await loadRemoteLatencies();
   } catch (exception) {
     showError(exception);
     button.disabled = false;
@@ -1714,7 +1726,11 @@ function renderBenchmarkModelPicker() {
     const saved = previous.get(model.name);
     const checked = saved ? saved.checked : index === 0;
     const concurrency = saved?.concurrency || Math.min(Number(model.max_parallel_requests || 5), 32);
-    return `<label class="benchmark-model-option" data-model="${escapeHtml(model.name)}"><input type="checkbox" ${checked ? "checked" : ""}><div><b>${escapeHtml(model.name)}</b><small>${model.mode === "embedding" ? "Embedding · validación vectorial" : "Chat · respuestas autocorregibles"}</small></div><input type="number" min="1" max="32" value="${concurrency}" aria-label="Concurrencia máxima para ${escapeHtml(model.name)}" title="Concurrencia máxima"></label>`;
+    const latest = currentBenchmark?.latest_model_kpis?.[model.name];
+    const latestValue = latest ? `${latest.estimated ? "≈" : ""}${benchmarkNumber(latest.tokens_per_second)}` : "—";
+    const basis = latest?.token_basis === "input" ? "tokens de entrada" : "tokens de salida";
+    const latestTitle = latest ? `Último resultado · ${basis}${latest.estimated ? " · estimado" : ""}` : "Sin medición anterior";
+    return `<label class="benchmark-model-option" data-model="${escapeHtml(model.name)}"><input type="checkbox" ${checked ? "checked" : ""}><div><b>${escapeHtml(model.name)}</b><small>${model.mode === "embedding" ? "Embedding · validación vectorial" : "Chat · texto final esperado"}</small></div><span class="benchmark-last-kpi" title="${latestTitle}"><small>ÚLTIMO</small><strong>${latestValue} tok/s</strong></span><input type="number" min="1" max="32" value="${concurrency}" aria-label="Concurrencia máxima para ${escapeHtml(model.name)}" title="Concurrencia máxima"></label>`;
   }).join("");
   container.querySelectorAll("input").forEach((input) => input.onchange = updateBenchmarkEstimate);
   updateBenchmarkEstimate();
@@ -1773,14 +1789,17 @@ function benchmarkSvg(points, primaryKey, secondaryKey = null) {
 
 function benchmarkModelResult(model) {
   const levels = Object.entries(model.levels || {}).sort((left, right) => Number(left[0]) - Number(right[0]));
-  const levelRows = levels.map(([level, metrics]) => `<tr><td>Nivel ${level}</td><td>${metrics.completed}</td><td>${benchmarkNumber(metrics.ttft_p95_ms, " ms")}</td><td>${benchmarkNumber(metrics.latency_p95_ms, " ms")}</td><td>${benchmarkNumber(metrics.error_rate, "%")}</td><td>${benchmarkNumber(metrics.correct_rate, "%")}</td></tr>`).join("");
+  const levelRows = levels.map(([level, metrics]) => `<tr><td>Nivel ${level}</td><td>${metrics.completed}</td><td>${metrics.tokens_estimated ? "≈" : ""}${benchmarkNumber(metrics.tokens_per_second, " tok/s")}</td><td>${benchmarkNumber(metrics.ttft_p95_ms, " ms")}</td><td>${benchmarkNumber(metrics.latency_p95_ms, " ms")}</td><td>${benchmarkNumber(metrics.error_rate, "%")}</td><td>${benchmarkNumber(metrics.correct_rate, "%")}</td></tr>`).join("");
   const errors = (model.recent_errors || []).map((error) => `<li>Nivel ${error.level} · ${escapeHtml(error.message)}</li>`).join("");
-  const modeNote = model.mode === "embedding" ? "TTFT no aplica a embeddings" : `TTFT p50 ${benchmarkNumber(model.ttft_ms?.p50, " ms")}`;
-  return `<article class="benchmark-model-result"><div class="benchmark-model-head"><div><h4>${escapeHtml(model.name)}</h4><small>${escapeHtml(model.provider_model)} · ${modeNote}</small></div><span class="load-level">${model.current_level ? `Nivel ${model.current_level} · ${model.in_flight} en vuelo` : model.finished_elapsed ? "Finalizado" : "En espera"}</span></div><div class="benchmark-metrics"><div class="benchmark-metric"><span>Completadas</span><strong>${model.completed}</strong></div><div class="benchmark-metric"><span>Rendimiento</span><strong>${benchmarkNumber(model.requests_per_second, " req/s")}</strong></div><div class="benchmark-metric"><span>TTFT p95</span><strong>${benchmarkNumber(model.ttft_ms?.p95, " ms")}</strong></div><div class="benchmark-metric"><span>Latencia p95</span><strong>${benchmarkNumber(model.latency_ms?.p95, " ms")}</strong></div><div class="benchmark-metric"><span>Errores</span><strong>${benchmarkNumber(model.error_rate, "%")}</strong></div><div class="benchmark-metric"><span>Correctas</span><strong>${benchmarkNumber(model.correct_rate, "%")}</strong></div><div class="benchmark-metric"><span>Nivel sostenible</span><strong>${model.sustainable_concurrency ?? "—"}</strong></div></div><div class="benchmark-chart-grid"><div class="benchmark-chart"><div class="benchmark-chart-head"><b>CONCURRENCIA</b><span>Cian nivel · violeta en vuelo</span></div>${benchmarkSvg(model.timeline, "level", "in_flight")}</div><div class="benchmark-chart"><div class="benchmark-chart-head"><b>TTFT P95 EN VIVO</b><span>Milisegundos</span></div>${benchmarkSvg(model.timeline, "ttft_p95_ms")}</div></div>${levelRows ? `<table class="benchmark-levels"><thead><tr><th>Escalón</th><th>Peticiones</th><th>TTFT p95</th><th>Total p95</th><th>Error</th><th>Correctas</th></tr></thead><tbody>${levelRows}</tbody></table>` : ""}${errors ? `<ul class="benchmark-errors">${errors}</ul>` : ""}</article>`;
+  const modeNote = model.mode === "embedding" ? "Vector numérico finito · tokens de entrada" : `Texto final exacto · TTFT p50 ${benchmarkNumber(model.ttft_ms?.p50, " ms")}`;
+  const tokenValue = `${model.tokens_estimated ? "≈" : ""}${benchmarkNumber(model.tokens_per_second)}`;
+  const tokenNote = model.token_basis === "input" ? "Entrada procesada" : "Salida generada";
+  return `<article class="benchmark-model-result"><div class="benchmark-model-head"><div><h4>${escapeHtml(model.name)}</h4><small>${escapeHtml(model.provider_model)} · ${modeNote}</small></div><div class="benchmark-model-kpi"><span>TOKENS / SEGUNDO</span><strong>${tokenValue}</strong><small>${tokenNote}${model.tokens_estimated ? " · estimado" : ""}</small></div><span class="load-level">${model.current_level ? `Nivel ${model.current_level} · ${model.in_flight} en vuelo` : model.finished_elapsed ? "Finalizado" : "En espera"}</span></div><div class="benchmark-metrics"><div class="benchmark-metric"><span>Completadas</span><strong>${model.completed}</strong></div><div class="benchmark-metric"><span>Rendimiento</span><strong>${benchmarkNumber(model.requests_per_second, " req/s")}</strong></div><div class="benchmark-metric"><span>TTFT p95</span><strong>${benchmarkNumber(model.ttft_ms?.p95, " ms")}</strong></div><div class="benchmark-metric"><span>Latencia p95</span><strong>${benchmarkNumber(model.latency_ms?.p95, " ms")}</strong></div><div class="benchmark-metric"><span>Errores</span><strong>${benchmarkNumber(model.error_rate, "%")}</strong></div><div class="benchmark-metric"><span>Correctas</span><strong>${benchmarkNumber(model.correct_rate, "%")}</strong></div><div class="benchmark-metric"><span>Nivel sostenible</span><strong>${model.sustainable_concurrency ?? "—"}</strong></div></div><div class="benchmark-chart-grid"><div class="benchmark-chart"><div class="benchmark-chart-head"><b>CONCURRENCIA</b><span>Cian nivel · violeta en vuelo</span></div>${benchmarkSvg(model.timeline, "level", "in_flight")}</div><div class="benchmark-chart"><div class="benchmark-chart-head"><b>TOKENS/S EN VIVO</b><span>${tokenNote}</span></div>${benchmarkSvg(model.timeline, "tokens_per_second")}</div></div>${levelRows ? `<table class="benchmark-levels"><thead><tr><th>Escalón</th><th>Peticiones</th><th>Tokens/s</th><th>TTFT p95</th><th>Total p95</th><th>Error</th><th>Correctas</th></tr></thead><tbody>${levelRows}</tbody></table>` : ""}${errors ? `<ul class="benchmark-errors">${errors}</ul>` : ""}</article>`;
 }
 
 function renderBenchmark(snapshot) {
   currentBenchmark = snapshot;
+  renderBenchmarkModelPicker();
   const idle = snapshot.status === "idle";
   $("#benchmark-empty").hidden = !idle;
   $("#benchmark-results").hidden = idle;
@@ -1805,7 +1824,7 @@ function renderBenchmark(snapshot) {
   const errors = values.reduce((sum, model) => sum + model.errors, 0);
   const correct = values.reduce((sum, model) => sum + model.correct, 0);
   const successes = values.reduce((sum, model) => sum + model.successes, 0);
-  $("#benchmark-overview").innerHTML = `<article><span>Peticiones</span><strong>${completed.toLocaleString("es-ES")}</strong></article><article><span>Throughput conjunto</span><strong>${benchmarkNumber(completed / Math.max(snapshot.elapsed_seconds, .001), " req/s")}</strong></article><article><span>Error global</span><strong>${benchmarkNumber(errors * 100 / Math.max(completed, 1), "%")}</strong></article><article><span>Corrección global</span><strong>${benchmarkNumber(correct * 100 / Math.max(successes, 1), "%")}</strong></article>`;
+  $("#benchmark-overview").innerHTML = `<article class="benchmark-primary-kpi"><span>TOKENS / SEGUNDO</span><strong>${snapshot.tokens_estimated ? "≈" : ""}${benchmarkNumber(snapshot.tokens_per_second)}</strong><small>Rendimiento agregado procesado</small></article><article><span>Peticiones</span><strong>${completed.toLocaleString("es-ES")}</strong></article><article><span>Throughput conjunto</span><strong>${benchmarkNumber(completed / Math.max(snapshot.elapsed_seconds, .001), " req/s")}</strong></article><article><span>Error global</span><strong>${benchmarkNumber(errors * 100 / Math.max(completed, 1), "%")}</strong></article><article><span>Corrección global</span><strong>${benchmarkNumber(correct * 100 / Math.max(successes, 1), "%")}</strong></article>`;
   $("#benchmark-model-results").innerHTML = values.map(benchmarkModelResult).join("");
   setInlineStatus("#benchmark-form-status", snapshot.error || (active ? "No cierres el proceso de IA Gateway durante la prueba." : "Resultados listos para descargar."), snapshot.error ? "error" : active ? "" : "success");
 }
@@ -1911,7 +1930,7 @@ document.querySelectorAll(".primary-tab").forEach((button) => button.onclick = (
   if (button.dataset.view === "benchmark") loadBenchmark().catch(showError);
 });
 
-// Sequential initialization ensures the probe runs only when the gateway is ready.
+// Sequential initialization loads state only; it never invokes configured models.
 async function initialize() {
   /** Startup sequence: status/models first, then secondary data. */
   await loadStatus();
@@ -1923,7 +1942,6 @@ async function initialize() {
   updateModelParameterContext();
   const requestedTab = new URLSearchParams(location.search).get("tab");
   document.querySelector(`.primary-tab[data-view="${requestedTab}"]`)?.click();
-  if (gatewayProcessAlive) await loadRemoteLatencies();
 }
 
 async function authenticationBootstrap() {

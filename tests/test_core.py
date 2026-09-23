@@ -404,6 +404,38 @@ def test_callback_skips_guardrail_for_explicit_exclusions_and_embeddings(tmp_pat
     assert "dashboard_guardrail" not in embedding["metadata"]
 
 
+def test_callback_skips_guardrail_for_periodic_health_probe(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "dashboard_settings.json").write_text(__import__("json").dumps({
+        "guardrail": {
+            "enabled": True,
+            "model": "guardian",
+            "provider_model": "ollama/guardian",
+            "api_base": "http://localhost:11434",
+        },
+    }), encoding="utf-8")
+    monkeypatch.setenv("IA_GATEWAY_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "gateway.litellm_callback._classify_with_guardrail",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("La sonda no debe duplicar el guardrail")),
+    )
+
+    rewritten = asyncio.run(DashboardLogger().async_pre_call_hook(
+        None,
+        None,
+        {
+            "model": "chat",
+            "messages": [{"role": "user", "content": "health"}],
+            "metadata": {"dashboard_probe": "periodic"},
+        },
+        "completion",
+    ))
+
+    assert rewritten["metadata"]["dashboard_probe"] == "periodic"
+    assert "dashboard_guardrail" not in rewritten["metadata"]
+
+
 def test_origin_ip_prefers_edge_header_over_litellm_loopback():
     kwargs = {"litellm_params": {"metadata": {
         "requester_ip_address": "127.0.0.6",
@@ -740,6 +772,21 @@ def test_add_model_can_register_fallback_and_pending_restart(tmp_path, monkeypat
     config = yaml.safe_load(result["content"])
     assert config["router_settings"]["fallbacks"] == [{"tres": ["dos"]}]
     assert result["restart_pending"] is True
+
+
+def test_config_rejects_fallback_between_embedding_and_chat_models(tmp_path):
+    manager = make_manager(tmp_path)
+    config = yaml.safe_load(manager.config_text())
+    config["model_list"][0]["model_name"] = "embedding-local"
+    config["model_list"][0]["litellm_params"]["model"] = "ollama/bge-m3:latest"
+    config["router_settings"] = {"fallbacks": [{"embedding-local": ["dos"]}]}
+
+    try:
+        manager.validate_config_text(yaml.safe_dump(config))
+    except RuntimeError as exc:
+        assert "chat y embeddings" in str(exc)
+    else:
+        raise AssertionError("Se esperaba rechazo del fallback entre APIs incompatibles")
 
 
 def test_dashboard_settings_are_not_forwarded_to_litellm(tmp_path):

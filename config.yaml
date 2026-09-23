@@ -14,9 +14,15 @@ model_list:
 - model_name: embedding-local
   litellm_params:
     model: ollama/bge-m3:latest
-    api_base: http://localhost:11434
-    keep_alive: -1
     drop_params: true
+    api_base: http://localhost:11434
+    num_retries: 1
+    keep_alive: -1
+  model_info:
+    dashboard_backend_profile: ollama
+    dashboard_parameter_policy: caller_wins
+    dashboard_validation_fingerprint: 3a56758fd53053d5cdaf79e1121762a4a30905ef5fd33fc9652ce003d48cc1d6
+    dashboard_validated_at: '2026-09-22T13:02:51Z'
 - model_name: guardian-seguridad
   litellm_params:
     model: ollama/llama-guard3
@@ -99,16 +105,39 @@ model_list:
   model_info:
     dashboard_source: cloudera
     dashboard_cloudera_kind: workbench
+- model_name: royles-memetron-3-nano
+  litellm_params:
+    model: openai/nvidia/nemotron-3-nano
+    drop_params: true
+    api_base: https://ml-64288d82-5dd.go01-dem.ylcu-atmi.cloudera.site/namespaces/serving-default/endpoints/royles-memetron-3-nano/v1
+    api_key: os.environ/CLOUDERA_8F3DDEB583E2_CDP_TOKEN
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+  model_info:
+    dashboard_backend_profile: nim
+    dashboard_compatibility_profile: cloudera_1_5_5_sp3
+    dashboard_reasoning_mode: disabled
+    dashboard_parameter_policy: model_wins
+    supports_reasoning: false
+    dashboard_source: cloudera
+    dashboard_cloudera_kind: inference
+    dashboard_serving_engine: nim
+    dashboard_task: TEXT_GENERATION
+    dashboard_embedding_input_type: ''
+    dashboard_remote_model: nvidia/nemotron-3-nano
+    dashboard_validation_fingerprint: a871096a948380192d7f789f200a589592ac444624c4be84b2b3ec0a3530271e
+    dashboard_validated_at: '2026-09-22T16:24:14Z'
 dashboard_settings:
   guardrail:
-    enabled: true
-    model: guardian-seguridad
+    enabled: false
+    model: ''
     policy: warn
     timeout: 8
     excluded_models: []
   advisor:
     enabled: true
-    model: topito
+    model: goes-nemotron-3-super-120b
     timeout: 120
 router_settings:
   fallbacks:

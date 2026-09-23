@@ -58,7 +58,7 @@
           <label>Timeout <span>(segundos)</span><input id="config-timeout" type="number" min="1" step="1" placeholder="120"></label>
           <label>Reintentos<input id="config-num-retries" type="number" min="0" max="10" step="1" placeholder="0"><small>En Workbench se recomienda 0 para evitar réplicas ocupadas.</small></label>
           <label>Máximo en paralelo<input id="config-max-parallel" type="number" min="1" step="1" placeholder="4"><small>Límite local del router LiteLLM para este deployment.</small></label>
-          <label>Keep alive<input id="config-keep-alive" placeholder="-1"><small>Útil en Ollama; confirma que otros backends lo admitan.</small></label>
+          <label>Keep alive<input id="config-keep-alive" placeholder="-1"><small>Ollama: -1 mantiene el modelo cargado, 0 lo descarga o usa una duración como 5m.</small></label>
         </div></details>
 
         <details class="parameter-section"><summary>Extras y prueba de contrato <span>cualquier opción específica del proveedor</span></summary><div class="field-grid">
@@ -179,7 +179,7 @@
         </form>
 
         <div class="benchmark-live">
-          <div id="benchmark-empty" class="benchmark-empty"><span class="benchmark-radar" aria-hidden="true"><i></i></span><h3>Preparado para medir</h3><p>Se usarán sumas, ordenaciones, copia exacta y transformaciones simples para separar disponibilidad de corrección.</p><ul><li>TTFT y latencia p50 / p95 / p99</li><li>Throughput, errores y respuestas correctas</li><li>Concurrencia sostenible antes de degradarse</li></ul></div>
+          <div id="benchmark-empty" class="benchmark-empty"><span class="benchmark-radar" aria-hidden="true"><i></i></span><h3>Preparado para medir</h3><p>Los modelos de chat se validan contra el texto final esperado; los embeddings, comprobando que devuelven un vector numérico válido.</p><ul><li>Tokens/s como KPI principal</li><li>TTFT y latencia p50 / p95 / p99</li><li>Errores, corrección y concurrencia sostenible</li></ul></div>
           <div id="benchmark-results" hidden>
             <div class="benchmark-run-head"><div><p id="benchmark-run-label" class="model-kicker">EJECUCIÓN</p><h3 id="benchmark-run-title">Prueba en curso</h3></div><a id="benchmark-download" class="download-button" href="/api/benchmarks/current/report" hidden>Descargar JSON</a></div>
             <div class="benchmark-progress"><div><span id="benchmark-progress-label">Preparando…</span><strong id="benchmark-progress-value">0%</strong></div><progress id="benchmark-progress" max="100" value="0">0%</progress></div>
