@@ -96,6 +96,7 @@ def test_quick_test_propagates_external_ip_to_litellm(monkeypatch, client):
     }])
     monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
     monkeypatch.setattr(dashboard.manager, "active_model_names", lambda: ["modelo"])
+    monkeypatch.setattr(dashboard.manager, "gateway_api_key", lambda: "sk-quick-test")
     monkeypatch.setattr(dashboard.httpx, "AsyncClient", lambda **_kwargs: Client())
 
     response = client.post(
@@ -106,6 +107,7 @@ def test_quick_test_propagates_external_ip_to_litellm(monkeypatch, client):
 
     assert response.status_code == 200
     assert calls[0][1]["headers"]["X-IA-Gateway-Client-IP"] == "198.51.100.27"
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer sk-quick-test"
 
 
 def test_manual_token_renewal_records_controlled_error(monkeypatch, client):
@@ -127,15 +129,67 @@ def test_manual_token_renewal_records_controlled_error(monkeypatch, client):
 
 
 def test_gateway_auth_headers_ignore_legacy_general_key(monkeypatch):
-    monkeypatch.setenv("LITELLM_MASTER_KEY", "general-test-key")
+    monkeypatch.setattr(dashboard.manager, "gateway_api_key", lambda: "")
 
     assert dashboard.gateway_auth_headers() == {}
 
 
 def test_gateway_auth_headers_allow_disabled_master_key(monkeypatch):
-    monkeypatch.delenv("LITELLM_MASTER_KEY", raising=False)
+    monkeypatch.setattr(dashboard.manager, "gateway_api_key", lambda: "")
 
     assert dashboard.gateway_auth_headers() == {}
+
+
+def test_gateway_auth_headers_use_application_managed_key(monkeypatch):
+    monkeypatch.setattr(dashboard.manager, "gateway_api_key", lambda: "sk-managed")
+
+    assert dashboard.gateway_auth_headers() == {"Authorization": "Bearer sk-managed"}
+
+
+def test_authenticated_status_exposes_key_for_executable_examples(monkeypatch, client):
+    monkeypatch.setattr(dashboard.manager, "status", lambda: {
+        "running": True,
+        "gateway_auth": {"enabled": True, "configured": True, "key_hint": "••••visible"},
+    })
+    monkeypatch.setattr(dashboard.manager, "gateway_api_key", lambda: "sk-visible-example")
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["gateway_auth"]["api_key"] == "sk-visible-example"
+    assert response.headers["cache-control"].startswith("no-store")
+
+
+def test_gateway_security_endpoint_rotates_without_exposing_old_key(monkeypatch, client):
+    captured = []
+    monkeypatch.setattr(
+        dashboard.manager,
+        "configure_gateway_auth",
+        lambda enabled, regenerate: captured.append((enabled, regenerate)) or {
+            "enabled": enabled, "configured": True, "key_hint": "••••newkey",
+            "updated_at": "2026-09-28T10:00:00Z", "restarted": True,
+            "api_key": "sk-ia-gateway-newkey",
+        },
+    )
+    monkeypatch.setattr(dashboard.model_health, "trigger", lambda: None)
+    monkeypatch.setattr(dashboard.benchmarks, "snapshot", lambda: {"status": "idle"})
+
+    response = client.put("/api/gateway/security", json={"enabled": True, "regenerate": True})
+
+    assert response.status_code == 200
+    assert response.json()["api_key"] == "sk-ia-gateway-newkey"
+    assert captured == [(True, True)]
+    rejected = client.put("/api/gateway/security", json={"enabled": False, "regenerate": True})
+    assert rejected.status_code == 422
+
+
+def test_gateway_security_change_is_blocked_during_load_test(monkeypatch, client):
+    monkeypatch.setattr(dashboard.benchmarks, "snapshot", lambda: {"status": "running"})
+
+    response = client.put("/api/gateway/security", json={"enabled": True})
+
+    assert response.status_code == 409
+    assert "batería de pruebas" in response.json()["detail"]
 
 
 def test_dynamic_cloudera_credentials_do_not_restart_litellm(monkeypatch):
@@ -334,6 +388,7 @@ def test_benchmark_starts_against_internal_gateway(monkeypatch, client):
     }])
     monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
     monkeypatch.setattr(dashboard.manager, "active_model_names", lambda: ["modelo"])
+    monkeypatch.setattr(dashboard.manager, "gateway_api_key", lambda: "sk-benchmark")
 
     response = client.post("/api/benchmarks", json={
         "targets": [{"model": "modelo", "max_concurrency": 3}],
@@ -344,6 +399,7 @@ def test_benchmark_starts_against_internal_gateway(monkeypatch, client):
     assert response.status_code == 200
     assert captured["base_url"] == f"http://{dashboard.manager.host}:{dashboard.manager.port}"
     assert captured["models"][0]["name"] == "modelo"
+    assert captured["headers"] == {"Authorization": "Bearer sk-benchmark"}
 
 
 def test_config_backup_downloads_exact_yaml_as_attachment(client):
@@ -484,6 +540,9 @@ def test_model_cards_offer_accessible_curl_and_python_examples():
     assert "/v1/chat/completions" in javascript
     assert "/v1/embeddings" in javascript
     assert "import requests" in javascript
+    assert "Authorization: Bearer ${gatewayApiKey}" in javascript
+    assert 'JSON.stringify(`Bearer ${gatewayApiKey}`)' in javascript
+    assert 'id="gateway-auth-enabled"' in (dashboard.ROOT / "static" / "index.html").read_text(encoding="utf-8")
     assert 'event.key === "Escape"' in javascript
     assert ".model-help:hover .model-help-popover" in stylesheet
     assert ".model-help:focus-within .model-help-popover" in stylesheet
@@ -511,7 +570,7 @@ def test_remote_latency_probe_works_without_gateway_auth(monkeypatch, client):
     }])
     monkeypatch.setattr(dashboard.manager, "is_running", lambda: True)
     monkeypatch.setattr(dashboard.httpx, "AsyncClient", lambda **_kwargs: Client())
-    monkeypatch.setenv("LITELLM_MASTER_KEY", "general-test-key")
+    monkeypatch.setattr(dashboard.manager, "gateway_api_key", lambda: "")
 
     response = client.post("/api/models/topito/latency")
 

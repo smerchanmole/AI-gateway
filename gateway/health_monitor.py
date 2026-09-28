@@ -28,6 +28,7 @@ class ModelHealthMonitor:
         active_names: Callable[[], list[str]],
         is_running: Callable[[], bool],
         base_url: str,
+        headers: Callable[[], dict[str, str]] | None = None,
         interval_seconds: int = 300,
         timeout_seconds: float = 180,
         max_concurrency: int = 4,
@@ -37,6 +38,7 @@ class ModelHealthMonitor:
         self._active_names = active_names
         self._is_running = is_running
         self._base_url = base_url.rstrip("/")
+        self._headers = headers or (lambda: {})
         self._interval_seconds = max(1, int(interval_seconds))
         self._timeout_seconds = timeout_seconds
         self._max_concurrency = max(1, int(max_concurrency))
@@ -181,10 +183,11 @@ class ModelHealthMonitor:
         started = time.perf_counter()
         checked_at = self._iso(self._now())
         try:
+            headers = {**self._headers(), "X-IA-Gateway-Probe": "periodic"}
             response = await client.post(
                 f"{self._base_url}/v1/{endpoint}",
                 json=payload,
-                headers={"X-IA-Gateway-Probe": "periodic"},
+                headers=headers,
             )
             latency_ms = round((time.perf_counter() - started) * 1000)
             response.raise_for_status()

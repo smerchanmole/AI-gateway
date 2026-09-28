@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import asyncio
 from datetime import datetime
+import json
 import os
 import subprocess
 import sys
@@ -732,6 +733,41 @@ def test_missing_master_key_is_optional_and_removed_from_active_config(tmp_path,
     manager._write_active_config()
     active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
     assert "master_key" not in active.get("general_settings", {})
+
+
+def test_gateway_api_key_is_private_optional_and_controls_litellm(tmp_path, monkeypatch):
+    manager = make_manager(tmp_path)
+    monkeypatch.setenv("LITELLM_MASTER_KEY", "ambient-key-must-not-win")
+
+    assert manager.gateway_auth_status() == {
+        "enabled": False, "configured": False, "key_hint": None, "updated_at": None,
+    }
+    enabled = manager.configure_gateway_auth(True)
+    generated = enabled.pop("api_key")
+    assert generated.startswith("sk-ia-gateway-")
+    assert enabled["enabled"] is True
+    assert enabled["configured"] is True
+    assert enabled["key_hint"].endswith(generated[-6:])
+    assert manager.gateway_access_file.stat().st_mode & 0o777 == 0o600
+    assert generated not in json.dumps(manager.gateway_auth_status())
+
+    manager._write_active_config()
+    active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
+    assert active["general_settings"]["master_key"] == "os.environ/LITELLM_MASTER_KEY"
+    assert manager._process_environment()["LITELLM_MASTER_KEY"] == generated
+
+    rotated = manager.configure_gateway_auth(True, regenerate=True)
+    assert rotated["api_key"] != generated
+    assert manager.gateway_api_key() == rotated["api_key"]
+
+    disabled = manager.configure_gateway_auth(False)
+    assert disabled["enabled"] is False
+    assert disabled["configured"] is True
+    assert manager.gateway_api_key() == ""
+    manager._write_active_config()
+    active = yaml.safe_load(manager.active_config.read_text(encoding="utf-8"))
+    assert "master_key" not in active.get("general_settings", {})
+    assert "LITELLM_MASTER_KEY" not in manager._process_environment()
 
 
 def test_disabled_model_does_not_require_its_provider_api_key(tmp_path, monkeypatch):

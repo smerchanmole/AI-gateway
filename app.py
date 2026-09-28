@@ -271,6 +271,7 @@ model_health = ModelHealthMonitor(
     active_names=manager.active_model_names,
     is_running=manager.is_running,
     base_url=f"http://{manager.host}:{manager.port}",
+    headers=lambda: gateway_auth_headers(),
     interval_seconds=300,
 )
 _MODEL_VALIDATIONS: dict[str, tuple[str, float]] = {}
@@ -343,8 +344,10 @@ async def cloudera_token_supervisor() -> None:
 
 
 def gateway_auth_headers() -> dict[str, str]:
-    """LiteLLM runs without its own inbound authentication in this application."""
-    return {}
+    """Authenticate trusted control-plane calls when gateway security is enabled."""
+
+    key = manager.gateway_api_key()
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def client_origin_ip(request: Request) -> str:
@@ -432,7 +435,7 @@ async def secure_dashboard(request: Request, call_next):
                 return _security_headers(JSONResponse({"detail": "Token de seguridad CSRF no válido"}, status_code=403))
         request.state.auth_session = session
     response = await call_next(request)
-    if path == "/" or path.startswith("/static/"):
+    if path == "/" or path.startswith("/static/") or path == "/api/status":
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
     return _security_headers(response)
@@ -509,6 +512,13 @@ class ModelState(BaseModel):
     """Minimum contract for enabling or disabling an alias from the UI."""
 
     enabled: bool
+
+
+class GatewaySecurityUpdate(BaseModel):
+    """Inbound LiteLLM authentication controlled independently from model YAML."""
+
+    enabled: bool
+    regenerate: bool = False
 
 
 class TestCall(BaseModel):
@@ -1045,8 +1055,16 @@ def home():
 
 @app.get("/api/status")
 def status():
-    """Return real health and telemetry; a PID alone does not imply service."""
-    return {**manager.status(), "public_port": PUBLIC_GATEWAY_PORT}
+    """Return admin-only health, telemetry, and the key used in client examples."""
+
+    snapshot = manager.status()
+    gateway_auth = dict(snapshot.get("gateway_auth") or {})
+    gateway_auth["api_key"] = manager.gateway_api_key() or None
+    return {
+        **snapshot,
+        "gateway_auth": gateway_auth,
+        "public_port": PUBLIC_GATEWAY_PORT,
+    }
 
 
 @app.get("/api/models")
@@ -1511,6 +1529,25 @@ def start():
 def stop():
     """Stop LiteLLM and its descendant processes."""
     return manager.stop()
+
+
+@app.put("/api/gateway/security")
+def update_gateway_security(update: GatewaySecurityUpdate):
+    """Apply optional master-key authentication and rotate it without exposing old keys."""
+
+    if update.regenerate and not update.enabled:
+        raise HTTPException(422, "Activa la API key antes de regenerarla")
+    if benchmarks.snapshot().get("status") in {"running", "cancelling"}:
+        raise HTTPException(
+            409,
+            "Detén la batería de pruebas antes de cambiar la API key para no invalidar sus peticiones en curso",
+        )
+    try:
+        result = manager.configure_gateway_auth(update.enabled, update.regenerate)
+        model_health.trigger()
+        return result
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
 
 
 @app.put("/api/models/{name}/state")

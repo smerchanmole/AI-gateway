@@ -28,6 +28,7 @@ def test_monitor_probes_only_enabled_aliases_loaded_by_litellm():
         active_names=lambda: ["qwen", "vectors", "disabled"],
         is_running=lambda: True,
         base_url="http://gateway",
+        headers=lambda: {"Authorization": "Bearer sk-periodic"},
         interval_seconds=300,
         transport=httpx.MockTransport(handler),
     )
@@ -42,6 +43,8 @@ def test_monitor_probes_only_enabled_aliases_loaded_by_litellm():
     assert calls[0][1]["metadata"]["dashboard_probe"] == "periodic"
     assert calls[1][1]["metadata"]["dashboard_probe"] == "periodic"
     assert calls[0][2]["x-ia-gateway-probe"] == "periodic"
+    assert calls[0][2]["authorization"] == "Bearer sk-periodic"
+    assert calls[1][2]["authorization"] == "Bearer sk-periodic"
 
 
 def test_monitor_reports_gateway_stopped_without_calling_models():
@@ -60,4 +63,3 @@ def test_monitor_reports_gateway_stopped_without_calling_models():
 
     assert snapshot["gateway_status"] == "stopped"
     assert snapshot["models"] == {}
-

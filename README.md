@@ -62,7 +62,7 @@ The screenshot above is generated from the running application. Language and lig
 
 | Section | What it answers | Main actions |
 |---|---|---|
-| **Models** | Which aliases are active and healthy? What capacity is visible? | Start/stop LiteLLM, enable/disable aliases, inspect health and memory, run chat or embedding probes |
+| **Models** | Which aliases are active and healthy? What capacity is visible? | Start/stop LiteLLM, enable or rotate the gateway API key, enable/disable aliases, inspect health and memory, run chat or embedding probes |
 | **Configuration** | How is every route, credential, guardrail, fallback, and parameter defined? | Guided CRUD, Cloudera discovery, TLS policy, credential renewal, advisor, backup/restore, advanced YAML |
 | **Load testing** | How much concurrent traffic can the gateway and each backend sustain? | Select up to eight models, ramp concurrency from 1 to N, choose request/time budget, warm up, monitor live charts, export JSON |
 | **Logs** | What happened on every request and how did the service behave over a day? | View KPIs and request detail, inspect sanitized effective parameters and IPs, export Excel, inspect LiteLLM technical logs |
@@ -169,6 +169,7 @@ In Cloudera, the platform terminates TLS and forwards traffic to its assigned ap
 | Model topology, aliases, fallbacks, and guardrail selection | `config.yaml` | Yes, LiteLLM must reload its routing table |
 | Cloudera connections and secrets | `runtime/cloudera.sqlite3` | No |
 | Renewed CDP tokens and model-specific tokens | `runtime/cloudera.sqlite3` | No; the LiteLLM callback reads the current value dynamically |
+| Optional inbound gateway API key | `runtime/gateway-access.json` (`0600`) | Yes; LiteLLM and trusted internal callers switch atomically |
 | Structured request logs | SQLite files under `runtime/` | No |
 | Effective LiteLLM configuration | `runtime/active_config.yaml` | Generated automatically; do not edit |
 
@@ -186,7 +187,7 @@ sequenceDiagram
     participant G as Optional guardrail
     participant P as Model provider
     participant S as Daily SQLite log
-    C->>E: POST /v1/chat/completions
+    C->>E: POST /v1/chat/completions + optional Bearer key
     E->>L: Stream request + trusted origin IP
     L->>X: Pre-call hook
     X->>X: Resolve current Cloudera token
@@ -234,12 +235,13 @@ ia-gateway/
 └── runtime/                       # Generated/private state; ignored by Git
     ├── active_config.yaml         # Sanitized effective LiteLLM configuration
     ├── cloudera.sqlite3           # Connections, secrets, lifecycle state
+    ├── gateway-access.json        # Optional inbound API key; owner-only (0600)
     ├── logs/YYYY-MM-DD.sqlite3    # Structured request events
     ├── edge/edge.log              # Public proxy technical log
     └── tls/                       # Local certificate and private key
 ```
 
-Ownership is intentional: `config.yaml` describes stable routing, SQLite holds mutable private state, and `runtime/active_config.yaml` is generated. Editing generated runtime files bypasses validation and is unsupported.
+Ownership is intentional: `config.yaml` describes stable routing, SQLite holds mutable Cloudera state, `runtime/gateway-access.json` holds the optional client-facing key, and `runtime/active_config.yaml` is generated. Editing generated runtime files bypasses validation and is unsupported.
 
 ## Cloudera AI installation
 
@@ -273,7 +275,7 @@ Create a Cloudera AI Workbench application with:
 
 `app.py` creates a private `.venv`, installs `requirements.txt`, validates it with `pip check`, and starts the application. The first launch therefore takes longer and requires access to the configured Python package index.
 
-Disabling Cloudera platform authentication exposes the application URL to the network policy applied to that workspace. The dashboard still has its own administrator login. The `/v1/*` inference API currently does not require the dashboard password or a LiteLLM master key, so protect the URL with the appropriate Cloudera/network access policy before production use.
+Disabling Cloudera platform authentication exposes the application URL to the network policy applied to that workspace. The dashboard still has its own administrator login. Enable the gateway **API key** switch before production so `/v1/*` also requires `Authorization: Bearer …`; retain the appropriate Cloudera/workspace ingress policy as an independent protection layer.
 
 ### 3. Sign in and change the initial password
 
@@ -461,6 +463,25 @@ CDP_RENEWAL_TIMEOUT_SECONDS=60
 
 The three ports must be distinct. Only `IA_GATEWAY_PORT` is externally accessible.
 
+## Optional gateway API-key authentication
+
+Inbound authentication is disabled by default for backward compatibility. The control bar beside **Start** contains an **API key** switch and a **Regenerate key** action:
+
+1. Enable the switch. IA Gateway generates a cryptographically random `sk-ia-gateway-…` key and displays it for the authenticated administrator.
+2. Store that value in a secrets manager and expose it to clients as `IA_GATEWAY_API_KEY`.
+3. Every `/v1/*` request must then include `Authorization: Bearer <key>`.
+4. Regenerating immediately invalidates the previous key. Enabling, disabling, or rotating authentication restarts LiteLLM automatically when it is running.
+
+Security changes are blocked while a load test is running so its workers cannot be invalidated halfway through a campaign. The credential is stored only in `runtime/gateway-access.json` with owner-only permissions. It is excluded from Git and never written to `config.yaml` or request logs. The non-cacheable, session-protected admin status endpoint returns it so each model card can contain a directly executable example; public `/v1/*` responses never disclose it. Manual tests, parameter validation, the advisor, periodic health probes, and load tests all inject the active key internally.
+
+When authentication is enabled, model cards automatically add the complete required header to their cURL and Python examples. The following environment-variable form remains useful outside the dashboard:
+
+```bash
+export IA_GATEWAY_API_KEY='sk-ia-gateway-copy-the-generated-value'
+curl https://your-gateway.example/v1/models \
+  -H "Authorization: Bearer ${IA_GATEWAY_API_KEY}"
+```
+
 ## Calling the API
 
 ### List models
@@ -642,7 +663,7 @@ The public edge deliberately separates credentials:
 - Cloudera secret values are never sent back to the browser.
 - Credential and log SQLite files, generated TLS material, PIDs, and active configuration live under ignored `runtime/` paths.
 
-The dashboard login is not currently an API key for `/v1/*`. If the Cloudera application is created without platform authentication, any client that can reach the application URL can call enabled models. Use workspace ingress controls now, and add gateway API-key/access-control enforcement before exposing it to an untrusted network.
+The dashboard login and the `/v1/*` API key are deliberately separate controls. If the switch is disabled and the Cloudera application has no platform authentication, any client that can reach the URL can call enabled models. For production, enable the gateway key and keep workspace ingress controls in place. The authenticated dashboard shows the full active key in each model's cURL and Python example.
 
 ## Logs and client IPs
 
@@ -728,6 +749,7 @@ pytest -q
 | `config.yaml` | Model source configuration |
 | `.env` | Local environment secrets; ignored by Git |
 | `runtime/cloudera.sqlite3` | Cloudera connections, credentials, and token state |
+| `runtime/gateway-access.json` | Optional inbound gateway key and enabled state; owner-only permissions |
 | `runtime/active_config.yaml` | Generated LiteLLM configuration |
 | `runtime/edge/edge.log` | Python edge process log |
 | `runtime/` request databases/logs | Structured and technical logs |
@@ -744,7 +766,10 @@ The YAML changed but LiteLLM has not reloaded its router. Apply the pending chan
 
 **`Authentication Error, No api key passed in`**
 
-The provider credential is missing. Configure its environment variable or save a Cloudera/model token in the dashboard. A LiteLLM master key is not required by this deployment.
+First identify which hop rejected the request:
+
+- If the gateway **API key** switch is enabled, copy the complete `Authorization: Bearer …` header from the model's example. An old key stops working immediately after regeneration.
+- If the client already sent the current gateway key, inspect the provider error and configure the provider environment variable or Cloudera/model credential. Provider credentials are separate from the gateway key.
 
 **CDP IAM hostname does not resolve**
 
@@ -771,11 +796,11 @@ When escalating a provider problem, export the load-test JSON or daily Excel, ca
 
 ### Operational checklist
 
-- Back up `config.yaml` and `runtime/cloudera.sqlite3` according to the environment's recovery policy.
+- Back up `config.yaml`, `runtime/cloudera.sqlite3`, and `runtime/gateway-access.json` according to the environment's recovery policy. Protect the latter as a reusable secret.
 - Monitor token renewal state and opaque-key rotation dates before they become incidents.
 - Re-run contract tests after provider, model, Cloudera AI, LiteLLM, NIM, or vLLM upgrades.
 - Establish load baselines per model, replica count, guardrail policy, and representative prompt profile.
-- Restrict the public `/v1/*` URL with workspace/ingress controls until an explicit client API-key policy is enabled.
+- Enable the `/v1/*` API key and retain workspace/ingress controls as defence in depth. Regenerate the key after suspected disclosure.
 - Treat prompt and response logs as potentially sensitive data and define retention accordingly.
 - Use a trusted ingress certificate in production; reserve the generated self-signed certificate for local development.
 
@@ -803,4 +828,4 @@ Add a provider by keeping four concerns independent: discovery metadata, runtime
 
 ## License and production note
 
-Review all dependency and provider licences before redistribution. Before production use, add the required `/v1/*` access-control policy, use managed TLS at the ingress, restrict workspace egress and ingress, back up `config.yaml` and `runtime/cloudera.sqlite3`, and treat prompts/responses in logs as potentially sensitive data.
+Review all dependency and provider licences before redistribution. Before production use, enable and distribute the `/v1/*` API key through a secrets manager, use managed TLS at the ingress, restrict workspace egress and ingress, back up `config.yaml`, `runtime/cloudera.sqlite3`, and `runtime/gateway-access.json`, and treat prompts/responses in logs as potentially sensitive data.

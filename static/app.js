@@ -12,6 +12,9 @@ let selectedLogModel = "__litellm__";
 let selectedLogDay = new Date().toLocaleDateString("en-CA", {timeZone: "Europe/Madrid"});
 let selectedTestModel = null;
 let gatewayProcessAlive = false;
+let gatewayApiKeyEnabled = false;
+let gatewayApiKey = "";
+let gatewaySecurityBusy = false;
 let editingModelName = null;
 const remoteLatencies = new Map();
 let clouderaConnections = [];
@@ -718,11 +721,71 @@ async function loadStatus() {
   persistenceElement.textContent = `${persistence.credential_store || "SQLite"} · tokens sin reinicio · modelos con reinicio`;
   persistenceElement.classList.toggle("dynamic", !persistence.token_restart_required);
 
+  const gatewayAuth = status.gateway_auth ?? {};
+  gatewayApiKeyEnabled = Boolean(gatewayAuth.enabled);
+  gatewayApiKey = gatewayApiKeyEnabled ? String(gatewayAuth.api_key || "") : "";
+  if (!gatewaySecurityBusy) $("#gateway-auth-enabled").checked = gatewayApiKeyEnabled;
+  $("#gateway-auth-enabled").disabled = gatewaySecurityBusy;
+  $("#gateway-auth-regenerate").disabled = gatewaySecurityBusy || !gatewayApiKeyEnabled;
+  const authState = $("#gateway-auth-state");
+  authState.textContent = gatewaySecurityBusy
+    ? "Aplicando seguridad y reiniciando LiteLLM…"
+    : gatewayApiKeyEnabled
+      ? `Activada · Bearer ${gatewayAuth.key_hint || "configurada"}`
+      : "Desactivada · acceso sin clave";
+  authState.classList.toggle("enabled", gatewayApiKeyEnabled && !gatewaySecurityBusy);
+
   const button = $("#gateway-button");
   button.disabled = false;
   button.textContent = status.process_alive ? "Detener" : "Arrancar";
   button.classList.toggle("stop", status.process_alive);
   $("#apply-config-button").hidden = !status.restart_pending;
+}
+
+function revealGeneratedGatewayKey(apiKey) {
+  if (!apiKey) return;
+  const input = $("#gateway-generated-key");
+  input.value = apiKey;
+  input.type = "password";
+  $("#toggle-gateway-key").textContent = "Mostrar";
+  setInlineStatus("#gateway-key-copy-status", "");
+  $("#gateway-key-dialog").showModal();
+}
+
+async function updateGatewaySecurity(enabled, regenerate = false) {
+  if (gatewaySecurityBusy) return;
+  gatewaySecurityBusy = true;
+  $("#gateway-auth-enabled").disabled = true;
+  $("#gateway-auth-regenerate").disabled = true;
+  $("#gateway-auth-state").textContent = "Aplicando seguridad y reiniciando LiteLLM…";
+  try {
+    const result = await api("/api/gateway/security", {
+      method: "PUT",
+      body: JSON.stringify({enabled, regenerate}),
+    });
+    gatewayApiKeyEnabled = Boolean(result.enabled);
+    revealGeneratedGatewayKey(result.api_key);
+    await loadStatus();
+    renderConfiguredModels();
+  } catch (error) {
+    showError(error);
+    await loadStatus();
+  } finally {
+    gatewaySecurityBusy = false;
+    await loadStatus();
+  }
+}
+
+async function copyGeneratedGatewayKey() {
+  const value = $("#gateway-generated-key").value;
+  try {
+    await navigator.clipboard.writeText(value);
+    setInlineStatus("#gateway-key-copy-status", "API key copiada. Guárdala en un gestor de secretos.", "success");
+  } catch (_error) {
+    $("#gateway-generated-key").type = "text";
+    $("#gateway-generated-key").select();
+    setInlineStatus("#gateway-key-copy-status", "Selecciona y copia manualmente la clave.");
+  }
 }
 
 function shellSingleQuote(value) {
@@ -738,12 +801,18 @@ function modelUsageExamples(model, index) {
   const curl = [
     `curl -X POST ${shellSingleQuote(endpoint)} \\`,
     "  -H 'Content-Type: application/json' \\",
+    ...(gatewayApiKeyEnabled && gatewayApiKey
+      ? [`  -H ${shellSingleQuote(`Authorization: Bearer ${gatewayApiKey}`)} \\`]
+      : []),
     `  --data ${shellSingleQuote(JSON.stringify(payload))}`,
   ].join("\n");
   const resultExpression = isEmbedding
     ? 'response.json()["data"][0]["embedding"]'
     : 'response.json()["choices"][0]["message"]["content"]';
-  const python = `import requests\n\nresponse = requests.post(\n    ${JSON.stringify(endpoint)},\n    json=${JSON.stringify(payload, null, 4)},\n    timeout=60,\n)\nresponse.raise_for_status()\nprint(${resultExpression})`;
+  const pythonHeaders = gatewayApiKeyEnabled
+    ? `,\n    headers={"Authorization": ${JSON.stringify(`Bearer ${gatewayApiKey}`)}}`
+    : "";
+  const python = `import requests\n\nresponse = requests.post(\n    ${JSON.stringify(endpoint)},\n    json=${JSON.stringify(payload, null, 4)}${pythonHeaders},\n    timeout=60,\n)\nresponse.raise_for_status()\nprint(${resultExpression})`;
   return `<div class="model-help">
     <button class="model-help-trigger" type="button" aria-label="Cómo llamar al modelo ${escapeHtml(model.name)}" aria-expanded="false" aria-controls="model-help-${index}">?</button>
     <aside class="model-help-popover" id="model-help-${index}" role="region" aria-label="Ejemplos de uso de ${escapeHtml(model.name)}">
@@ -1964,6 +2033,24 @@ document.querySelectorAll('input[name="cloudera-auth-mode"]').forEach((radio) =>
 });
 $("#cancel-cloudera-edit").onclick = () => { cancelClouderaEdit(); setInlineStatus("#cloudera-status", "Edición cancelada."); };
 $("#apply-config-button").onclick = async () => { try { await api("/api/config/apply", {method: "POST"}); await loadStatus(); } catch (error) { showError(error); } };
+$("#gateway-auth-enabled").onchange = async (event) => {
+  const enabled = event.target.checked;
+  if (!enabled && !window.confirm("¿Desactivar la API key? Las rutas /v1 volverán a aceptar llamadas sin autenticación.")) {
+    event.target.checked = true;
+    return;
+  }
+  await updateGatewaySecurity(enabled, false);
+};
+$("#gateway-auth-regenerate").onclick = async () => {
+  if (!window.confirm("La clave actual dejará de funcionar inmediatamente. ¿Quieres generar una nueva?")) return;
+  await updateGatewaySecurity(true, true);
+};
+$("#toggle-gateway-key").onclick = () => {
+  const input = $("#gateway-generated-key");
+  input.type = input.type === "password" ? "text" : "password";
+  $("#toggle-gateway-key").textContent = input.type === "password" ? "Mostrar" : "Ocultar";
+};
+$("#copy-gateway-key").onclick = copyGeneratedGatewayKey;
 
 document.querySelectorAll(".primary-tab").forEach((button) => button.onclick = () => {
   document.querySelectorAll(".primary-tab").forEach((tab) => { tab.classList.toggle("active", tab === button); tab.setAttribute("aria-pressed", String(tab === button)); });

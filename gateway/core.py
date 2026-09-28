@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -19,7 +20,7 @@ import subprocess
 import threading
 import time
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
 from pathlib import Path
@@ -63,6 +64,7 @@ class GatewayManager:
         self.runtime_dir = self.root / "runtime"
         self.active_config = self.runtime_dir / "active_config.yaml"
         self.state_file = self.runtime_dir / "state.json"
+        self.gateway_access_file = self.runtime_dir / "gateway-access.json"
         self.pid_file = self.runtime_dir / "litellm.pid"
         self.output_log = self.runtime_dir / "litellm-process.log"
         self.dashboard_settings_file = self.runtime_dir / "dashboard_settings.json"
@@ -75,6 +77,87 @@ class GatewayManager:
         self._ollama_metric_processes: dict[int, psutil.Process] = {}
         self._config_lock = threading.RLock()
         self.runtime_dir.mkdir(exist_ok=True)
+
+    def _gateway_access(self) -> dict[str, Any]:
+        """Read the private inbound-auth state; absence always means disabled."""
+
+        try:
+            data = json.loads(self.gateway_access_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        return {
+            "enabled": bool(data.get("enabled")),
+            "api_key": str(data.get("api_key") or ""),
+            "updated_at": str(data.get("updated_at") or ""),
+        }
+
+    def _write_gateway_access(self, state: dict[str, Any]) -> None:
+        """Atomically persist the master key outside YAML with owner-only access."""
+
+        payload = {
+            "enabled": bool(state.get("enabled")),
+            "api_key": str(state.get("api_key") or ""),
+            "updated_at": str(state.get("updated_at") or datetime.now(timezone.utc).isoformat()),
+        }
+        temp = self.gateway_access_file.with_suffix(".tmp")
+        temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.chmod(temp, 0o600)
+        temp.replace(self.gateway_access_file)
+        os.chmod(self.gateway_access_file, 0o600)
+
+    def gateway_api_key(self) -> str:
+        """Return the active key only to trusted in-process gateway clients."""
+
+        state = self._gateway_access()
+        return state["api_key"] if state["enabled"] and state["api_key"] else ""
+
+    def gateway_auth_status(self) -> dict[str, Any]:
+        """Expose security state without returning the reusable credential."""
+
+        state = self._gateway_access()
+        key = state["api_key"]
+        return {
+            "enabled": bool(state["enabled"] and key),
+            "configured": bool(key),
+            "key_hint": f"••••{key[-6:]}" if key else None,
+            "updated_at": state["updated_at"] or None,
+        }
+
+    def configure_gateway_auth(self, enabled: bool, regenerate: bool = False) -> dict[str, Any]:
+        """Enable, disable, or rotate LiteLLM authentication and apply it immediately."""
+
+        with self._config_lock:
+            previous = self._gateway_access()
+            generated = bool(regenerate or (enabled and not previous["api_key"]))
+            api_key = (
+                f"sk-ia-gateway-{secrets.token_urlsafe(32)}"
+                if generated else previous["api_key"]
+            )
+            state = {
+                "enabled": bool(enabled),
+                "api_key": api_key,
+                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            self._write_gateway_access(state)
+            was_running = self.process_alive()
+            try:
+                if was_running:
+                    self.stop()
+                    self.start()
+            except Exception:
+                # Restore the prior contract so a failed rotation cannot leave
+                # internal probes and the running proxy disagreeing about auth.
+                self._write_gateway_access(previous)
+                if was_running and not self.process_alive():
+                    try:
+                        self.start()
+                    except Exception:
+                        pass
+                raise
+            result = {**self.gateway_auth_status(), "restarted": was_running}
+            if generated:
+                result["api_key"] = api_key
+            return result
 
     def process_log_path(self, day: date | None = None) -> Path:
         """Select the daily technical log using the Europe/Madrid calendar."""
@@ -652,8 +735,8 @@ class GatewayManager:
         visit(source)
         from gateway.cloudera import ClouderaCatalog
         local_credentials = ClouderaCatalog(self.runtime_dir).environment()
-        # IA Gateway disables these inherited LiteLLM options: the only allowed
-        # persistence is the application-managed local SQLite database.
+        # Provider credentials remain externally supplied. The gateway master
+        # key is application-managed and therefore never counts as missing.
         optional = {"LITELLM_MASTER_KEY", "DATABASE_URL"}
         return sorted(
             name for name in referenced
@@ -784,10 +867,12 @@ class GatewayManager:
             settings["custom_provider_map"] = custom_providers
         config["litellm_settings"] = settings
         general_settings = dict(config.get("general_settings") or {})
-        # Inbound authentication belongs to the Cloudera WebApp and persistence
-        # belongs to our SQLite database. Remove inherited options so neither a
-        # master key nor an external database can be enabled accidentally.
-        general_settings.pop("master_key", None)
+        # The dashboard owns inbound authentication. Never trust a master key
+        # pasted into YAML: emit only the private state managed by the switch.
+        if self.gateway_api_key():
+            general_settings["master_key"] = "os.environ/LITELLM_MASTER_KEY"
+        else:
+            general_settings.pop("master_key", None)
         general_settings.pop("database_url", None)
         if general_settings:
             config["general_settings"] = general_settings
@@ -844,15 +929,16 @@ class GatewayManager:
     def _process_environment(self) -> dict[str, str]:
         """Build the LiteLLM environment while respecting YAML policy.
 
-        Una cadena vacía no desactiva la autenticación en LiteLLM: se interpreta
-        como una master key válida y obliga a enviar ``Authorization``. Quitamos
-        la variable y usamos el modo de producción para impedir que el CLI vuelva
-        a cargarla desde `.env`; las claves de proveedores se heredan normalmente.
+        A blank string does not disable LiteLLM authentication: it behaves as a
+        valid master key. Ambient values are therefore removed first and only
+        the application-managed key is injected when the switch is enabled.
         """
         env = os.environ.copy()
         from gateway.cloudera import ClouderaCatalog
         env.update(ClouderaCatalog(self.runtime_dir).environment())
         env.pop("LITELLM_MASTER_KEY", None)
+        if master_key := self.gateway_api_key():
+            env["LITELLM_MASTER_KEY"] = master_key
         env.pop("DATABASE_URL", None)
         env["LITELLM_MODE"] = "PRODUCTION"
         env["IA_GATEWAY_ROOT"] = str(self.root)
@@ -972,6 +1058,7 @@ class GatewayManager:
             "host": self.host,
             "port": self.port,
             "restart_pending": self.restart_pending_file.exists(),
+            "gateway_auth": self.gateway_auth_status(),
             "persistence": self.persistence_status(),
             **self._metrics(pid),
         }
