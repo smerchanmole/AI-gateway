@@ -762,6 +762,14 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
         effective_backend = ("workbench" if model.cloudera_kind == "workbench" else
                              model.serving_engine.strip().lower() or
                              ("ollama" if provider_model.startswith("ollama/") else "openai"))
+    # Workbench Apps expose an OpenAI-compatible endpoint, but the application
+    # may still be backed by vLLM and accept its chat-template extensions.  In
+    # particular, qwen3.8stream-como-app disables Qwen thinking through the
+    # top-level ``chat_template_kwargs.enable_thinking`` request field. LiteLLM
+    # emits values configured under ``extra_body`` at that provider boundary.
+    # Keep this tied to the explicit Cloudera connection kind so ordinary
+    # OpenAI endpoints never receive a non-standard Qwen/vLLM parameter.
+    workbench_app = model.source == "cloudera" and model.cloudera_kind == "workbench_app"
 
     def bounded(value: int | float | None, label: str, minimum: float,
                 maximum: float | None = None) -> None:
@@ -851,7 +859,7 @@ def _model_entry(model: ModelCreate) -> dict[str, object]:
             extra_body["enable_thinking"] = thinking
             if model.preserve_thinking:
                 extra_body["preserve_thinking"] = True
-        elif effective_backend in {"vllm", "nim"}:
+        elif effective_backend in {"vllm", "nim"} or workbench_app:
             extra_body["chat_template_kwargs"] = {"enable_thinking": thinking}
     if (effective_backend == "workbench" and "embed" in model.task.lower()
             and model.embedding_input_type in {"query", "passage"}):

@@ -407,6 +407,34 @@ def test_callback_enforces_model_parameters_and_logs_effective_values(tmp_path, 
     assert row["parameters"]["extra_body"]["guided_json"] == {"type": "object"}
 
 
+def test_callback_applies_workbench_app_thinking_control_to_every_call(tmp_path, monkeypatch):
+    """Quick, periodic and load tests share this pre-call parameter path."""
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "dashboard_settings.json").write_text(__import__("json").dumps({
+        "guardrail": {"enabled": False},
+        "model_parameters": {"qwen-app": {
+            "policy": "caller_wins",
+            "configured": {
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+            },
+        }},
+    }), encoding="utf-8")
+    monkeypatch.setenv("IA_GATEWAY_ROOT", str(tmp_path))
+
+    rewritten = asyncio.run(DashboardLogger().async_pre_call_hook(
+        None,
+        None,
+        {"model": "qwen-app", "messages": [{"role": "user", "content": "Hola"}], "stream": True},
+        "completion",
+    ))
+
+    expected = {"chat_template_kwargs": {"enable_thinking": False}}
+    assert rewritten["extra_body"] == expected
+    assert rewritten["metadata"]["dashboard_effective_parameters"]["extra_body"] == expected
+
+
 def test_callback_skips_guardrail_for_explicit_exclusions_and_embeddings(tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
     runtime.mkdir()

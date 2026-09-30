@@ -986,12 +986,31 @@ def test_workbench_app_form_and_model_entry_use_openai_streaming_contract():
         cloudera_kind="workbench_app",
         serving_engine="openai-compatible",
         task="generation",
+        reasoning_mode="disabled",
     ))
 
     assert entry["litellm_params"]["model"] == "openai/qwen3.8-27b-fp8"
     assert entry["litellm_params"]["api_base"] == "https://qwen38.example/v1"
+    assert entry["litellm_params"]["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
     assert "api_key" not in entry["litellm_params"]
     assert entry["model_info"]["dashboard_cloudera_kind"] == "workbench_app"
+    assert entry["model_info"]["dashboard_reasoning_mode"] == "disabled"
+    assert entry["model_info"]["supports_reasoning"] is False
+
+
+def test_plain_openai_model_does_not_receive_workbench_app_reasoning_extension():
+    """Non-standard Qwen controls must remain scoped to Workbench Apps."""
+
+    entry = dashboard._model_entry(dashboard.ModelCreate(
+        model_name="standard-openai",
+        model="openai/gpt-compatible",
+        backend_profile="openai",
+        reasoning_mode="disabled",
+    ))
+
+    assert "extra_body" not in entry["litellm_params"]
 
 
 def test_dashboard_has_three_primary_areas_and_warn_only_guardrail():
