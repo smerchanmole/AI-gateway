@@ -69,7 +69,7 @@ The screenshot above is generated from the running application. Language and lig
 
 ### Models
 
-The inventory is the operational home page. A model card distinguishes the public alias from the provider model, displays whether it is chat or embeddings, and separates process state from endpoint health. Remote CPU or VRAM values are never fabricated: unavailable remote metrics are labelled as such.
+The inventory is the operational home page. A model card distinguishes the public alias from the provider model, displays whether it is chat or embeddings, and separates process state from endpoint health. LiteLLM CPU utilization is normalized against the CPUs actually available to the process: host CPU count, process affinity, and cgroup v1/v2 quotas are combined so a Kubernetes pod reports its assigned capacity instead of the node's cores. Remote CPU or VRAM values are never fabricated: unavailable remote metrics are labelled as such.
 
 The control plane also performs one lightweight availability check every five minutes for every enabled alias currently loaded by LiteLLM. This server-side monitor continues when no browser is open, selects the chat or embeddings endpoint from the declared capability, prevents overlapping cycles, and labels the synthetic input as a periodic health check in the request log. Periodic checks bypass the content guardrail because they validate model availability rather than user content; the guardrail remains independently monitored as one of the loaded aliases.
 

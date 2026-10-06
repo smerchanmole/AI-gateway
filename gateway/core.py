@@ -30,6 +30,92 @@ import yaml
 import psutil
 
 
+def _cgroup_cpu_limit(
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+    membership_file: Path = Path("/proc/self/cgroup"),
+) -> float | None:
+    """Return the strictest CPU quota that applies to this process.
+
+    Container runtimes commonly expose every CPU from the Kubernetes node via
+    ``psutil.cpu_count()`` even when the pod has a much smaller CPU limit. Both
+    cgroup v2 (``cpu.max``) and v1 (CFS quota/period files) are supported. We
+    inspect the process group and its parents because a parent cgroup can carry
+    the effective limit while the leaf itself says ``max``.
+    """
+
+    directories: list[Path] = [cgroup_root]
+    try:
+        memberships = membership_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        memberships = []
+    for line in memberships:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        hierarchy, controllers, relative = parts
+        relative_path = Path(relative.lstrip("/"))
+        if hierarchy == "0":
+            directories.append(cgroup_root / relative_path)
+        if "cpu" in controllers.split(","):
+            directories.extend((
+                cgroup_root / "cpu" / relative_path,
+                cgroup_root / controllers / relative_path,
+                cgroup_root / relative_path,
+            ))
+
+    candidates: list[float] = []
+    visited: set[Path] = set()
+    for directory in directories:
+        current = directory
+        while current == cgroup_root or cgroup_root in current.parents:
+            if current in visited:
+                break
+            visited.add(current)
+            try:
+                quota, period = (current / "cpu.max").read_text(encoding="utf-8").split()[:2]
+                if quota != "max" and float(quota) > 0 and float(period) > 0:
+                    candidates.append(float(quota) / float(period))
+            except (OSError, ValueError, IndexError):
+                pass
+            try:
+                quota = float((current / "cpu.cfs_quota_us").read_text(encoding="utf-8").strip())
+                period = float((current / "cpu.cfs_period_us").read_text(encoding="utf-8").strip())
+                if quota > 0 and period > 0:
+                    candidates.append(quota / period)
+            except (OSError, ValueError):
+                pass
+            if current == cgroup_root:
+                break
+            current = current.parent
+    return min(candidates) if candidates else None
+
+
+def _effective_cpu_count() -> int | float:
+    """Report CPUs usable by this process, respecting pod/container limits."""
+
+    candidates: list[float] = []
+    host_count = psutil.cpu_count(logical=True)
+    if host_count:
+        candidates.append(float(host_count))
+    try:
+        affinity = os.sched_getaffinity(0)
+        if affinity:
+            candidates.append(float(len(affinity)))
+    except (AttributeError, OSError):
+        try:
+            affinity = psutil.Process().cpu_affinity()
+            if affinity:
+                candidates.append(float(len(affinity)))
+        except (AttributeError, psutil.Error, OSError, PermissionError):
+            pass
+    quota = _cgroup_cpu_limit()
+    if quota and quota > 0:
+        candidates.append(quota)
+    effective = max(min(candidates), 0.001) if candidates else 1.0
+    rounded = round(effective, 3)
+    return int(rounded) if rounded.is_integer() else rounded
+
+
 def environment_port(name: str, default: int) -> int:
     """Read an environment port with explicit validation and a local fallback."""
     raw = os.environ.get(name, "").strip()
@@ -643,7 +729,7 @@ class GatewayManager:
             self._ollama_metric_processes = {
                 pid: process for pid, process in self._ollama_metric_processes.items() if pid in live_pids
             }
-            return round(cpu / (psutil.cpu_count() or 1), 1)
+            return round(cpu / _effective_cpu_count(), 1)
         except (psutil.Error, OSError, PermissionError):
             return None
 
@@ -1014,7 +1100,7 @@ class GatewayManager:
         """Aggregate CPU and RSS for the process tree, degrading safely on permission errors."""
         if not pid:
             self._metric_processes.clear()
-            return {"cpu_percent": None, "memory_gb": None, "cores": psutil.cpu_count() or 1}
+            return {"cpu_percent": None, "memory_gb": None, "cores": _effective_cpu_count()}
         try:
             root = psutil.Process(pid)
             try:
@@ -1035,14 +1121,14 @@ class GatewayManager:
                 process_id: process for process_id, process in self._metric_processes.items()
                 if process_id in live_pids
             }
-            cores = psutil.cpu_count() or 1
+            cores = _effective_cpu_count()
             return {
                 "cpu_percent": round(cpu / cores, 1),
                 "memory_gb": round(memory / (1024 ** 3), 3),
                 "cores": cores,
             }
         except (psutil.Error, OSError, PermissionError):
-            return {"cpu_percent": None, "memory_gb": None, "cores": psutil.cpu_count() or 1}
+            return {"cpu_percent": None, "memory_gb": None, "cores": _effective_cpu_count()}
 
     def status(self) -> dict[str, Any]:
         """Build the snapshot refreshed by the UI every three seconds."""

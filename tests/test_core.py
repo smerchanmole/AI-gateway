@@ -9,7 +9,7 @@ import sys
 
 import yaml
 
-from gateway.core import GatewayManager, environment_port
+from gateway.core import GatewayManager, _cgroup_cpu_limit, _effective_cpu_count, environment_port
 from gateway.cloudera import ClouderaCatalog
 from gateway.tls import ensure_self_signed_certificate
 from datetime import date
@@ -48,6 +48,40 @@ def test_environment_port_rejects_invalid_values(monkeypatch):
             assert "IA_GATEWAY_LITELLM_PORT" in str(exc)
         else:
             raise AssertionError(f"Se esperaba rechazo para el puerto {value}")
+
+
+def test_cgroup_v2_cpu_limit_uses_strictest_parent_quota(tmp_path):
+    root = tmp_path / "cgroup"
+    leaf = root / "kubepods" / "pod" / "container"
+    leaf.mkdir(parents=True)
+    (root / "cpu.max").write_text("max 100000\n", encoding="utf-8")
+    (root / "kubepods" / "cpu.max").write_text("400000 100000\n", encoding="utf-8")
+    (root / "kubepods" / "pod" / "cpu.max").write_text("250000 100000\n", encoding="utf-8")
+    (leaf / "cpu.max").write_text("max 100000\n", encoding="utf-8")
+    membership = tmp_path / "self-cgroup"
+    membership.write_text("0::/kubepods/pod/container\n", encoding="utf-8")
+
+    assert _cgroup_cpu_limit(root, membership) == 2.5
+
+
+def test_cgroup_v1_cpu_limit_supports_fractional_pod_cpu(tmp_path):
+    root = tmp_path / "cgroup"
+    leaf = root / "cpu" / "pod"
+    leaf.mkdir(parents=True)
+    (leaf / "cpu.cfs_quota_us").write_text("50000\n", encoding="utf-8")
+    (leaf / "cpu.cfs_period_us").write_text("100000\n", encoding="utf-8")
+    membership = tmp_path / "self-cgroup"
+    membership.write_text("5:cpu,cpuacct:/pod\n", encoding="utf-8")
+
+    assert _cgroup_cpu_limit(root, membership) == 0.5
+
+
+def test_effective_cpu_count_prefers_affinity_and_cgroup_limit(monkeypatch):
+    monkeypatch.setattr("gateway.core.psutil.cpu_count", lambda logical=True: 28)
+    monkeypatch.setattr("gateway.core.os.sched_getaffinity", lambda _pid: set(range(8)), raising=False)
+    monkeypatch.setattr("gateway.core._cgroup_cpu_limit", lambda: 3.5)
+
+    assert _effective_cpu_count() == 3.5
 
 
 def test_disable_model_filters_runtime_config(tmp_path):
